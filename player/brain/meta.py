@@ -146,6 +146,15 @@ P0_MILESTONES: list[Milestone] = [
     Milestone("temple_1", "Ersten Tempel bauen", _bld(1, "temple"),
               {"kind": "build", "name": "temple"},
               visible=_tech("theology")),
+    Milestone("solar_revolution", "Solar Revolution (globaler Multiplikator!)",
+              lambda snap: any(u["name"] == "solarRevolution" and (u["on"] or u["val"])
+                               for u in snap.get("religion", {}).get("upgrades", [])),
+              {"kind": "religion_upgrade", "name": "solarRevolution"},
+              visible=lambda snap: any(u["name"] == "solarRevolution" and u["unlocked"]
+                                       for u in snap.get("religion", {}).get("upgrades", []))),
+    Milestone("ziggurat_1", "Erstes Ziggurat (Unicorn-Ökonomie)", _bld(1, "ziggurat"),
+              {"kind": "build", "name": "ziggurat"},
+              visible=_bld_visible("ziggurat")),
     Milestone("hut_4", "Viertes Zuhause", _bld(4, "hut"),
               {"kind": "build", "name": "hut"},
               visible=_bld_visible("hut")),

@@ -74,6 +74,22 @@ async def execute_reset(runtime, reset_eval: dict) -> None:
     if save and runtime.store:
         runtime.store.write_save(save)
 
+    # 1b. TAP-light (Spec 15.2, ohne Transcend in dieser Ausbaustufe):
+    #     Worship über Adore in permanente Epiphany retten, sofern Apocrypha
+    #     verfügbar ist — Worship selbst überlebt den Reset nicht in voller Höhe.
+    try:
+        adored = await browser.evaluate(
+            "() => { const ru = game.religion.getRU('apocripha');"
+            " if (!ru || !ru.on || game.religion.faith < 1000) return false;"
+            " game.religion.resetFaith(1.01, false); return true; }")
+        if adored:
+            bus.publish("narrative.milestone", {
+                "priority": "P2", "title": "Adore vor Reset",
+                "body": "Worship wurde in permanente Epiphany umgewandelt (TAP-Kette).",
+            })
+    except Exception:
+        pass
+
     # 2./3. Kapitelkarte — der Reset ist ein Kapitelwechsel (Cockpit-Spec 14.5)
     bus.publish("narrative.chapter", {
         "priority": "P1",

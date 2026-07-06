@@ -123,6 +123,11 @@ def _target_prices(snap: dict, target: dict | None) -> list[dict] | None:
             if p["name"] == target["name"]:
                 return p["prices"]
         return None
+    if target["kind"] == "religion_upgrade":
+        for u in snap.get("religion", {}).get("upgrades", []):
+            if u["name"] == target["name"] and not (u["noStackable"] and (u["on"] or u["val"])):
+                return u["prices"]
+        return None
     return None
 
 
@@ -139,6 +144,9 @@ def _target_obj(snap: dict, target: dict | None) -> dict | None:
     if target["kind"] == "space_program":
         return next((p for p in snap.get("space", {}).get("programs", [])
                      if p["name"] == target["name"]), None)
+    if target["kind"] == "religion_upgrade":
+        return next((u for u in snap.get("religion", {}).get("upgrades", [])
+                     if u["name"] == target["name"]), None)
     return None
 
 
@@ -163,6 +171,7 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     _trade_candidates(snap, bn, cands)
     _praise_candidate(snap, cands)
     _festival_candidate(snap, cands)
+    _religion_candidates(snap, target, cands)
     _space_building_candidates(snap, bn, cands)
     _wait_candidate(snap, bn, cands, meta_view)
 
@@ -210,6 +219,8 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
         act = actions.buy_perk(target["name"], obj.get("label") or target["name"])
     elif target["kind"] == "space_program":
         act = actions.space_program(target["name"], obj.get("label") or target["name"])
+    elif target["kind"] == "religion_upgrade":
+        act = actions.buy_religion_upgrade(target["name"], obj.get("label") or target["name"])
     else:
         act = actions.research(target["name"], obj["label"])
 
@@ -502,6 +513,51 @@ def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
             _craft_toward(snap, m["name"], m["missing"], cands, depth + 1, seen)
 
 
+# ---------------------------------------------------------------- Religion
+
+# Kosten der Unicorn-Opferung (religion.js Ziggurat-Panel):
+SACRIFICE_UNICORN_COST = 2500
+
+
+def _religion_candidates(snap, target, cands) -> None:
+    religion = snap.get("religion", {})
+    target_name = target.get("name") if target and target["kind"] == "religion_upgrade" else None
+
+    # Religion-Upgrades (Faith-Käufe): Solar Revolution ist DER globale
+    # Produktionsmultiplikator (Spec 15.1), Apocrypha schaltet Adore frei.
+    for u in religion.get("upgrades", []):
+        if u["name"] == target_name or not u["unlocked"]:
+            continue
+        if u["noStackable"] and (u["on"] or u["val"]):
+            continue   # bereits gekauft
+        if not A.affordable(snap, u["prices"]):
+            continue
+        if u["name"] == "solarRevolution":
+            comp = {"unlock": 2.0}
+        elif u["name"] == "apocripha":
+            comp = {"unlock": 1.6}
+        elif u["name"] == "transcendence":
+            comp = {"unlock": 1.2}
+        else:
+            comp = {"economy": 0.9}
+        cands.append(Candidate(
+            actions.buy_religion_upgrade(u["name"], u["label"]),
+            sum(comp.values()), comp))
+
+    # Ziggurat-/Unicorn-Kette (Spec 15.3, vereinfacht bewertet):
+    for z in religion.get("ziggurat", []):
+        if not z["unlocked"] or not A.affordable(snap, z["prices"]):
+            continue
+        cands.append(Candidate(
+            actions.buy_religion_upgrade(z["name"], z["label"], ziggurat=True),
+            1.0, {"economy": 1.0}))
+
+    # Unicorns opfern, sobald ein Batch voll ist und ein Ziggurat steht:
+    if A.bld_val(snap, "ziggurat") >= 1 \
+            and A.res_value(snap, "unicorns") >= SACRIFICE_UNICORN_COST:
+        cands.append(Candidate(actions.sacrifice_unicorns(), 1.5, {"economy": 1.5}))
+
+
 # ---------------------------------------------------------------- Space
 
 # Welche Planeten-Gebäude produzieren was (für Engpass-Kopplung):
@@ -599,8 +655,18 @@ def _praise_candidate(snap, cands) -> None:
     faith = A.resource(snap, "faith")
     if not faith or faith.get("maxValue", 0) <= 0:
         return
-    if faith["value"] / faith["maxValue"] >= 0.95:
-        cands.append(Candidate(actions.praise(), 1.5, {"capLoss": 1.5}))
+    if faith["value"] / faith["maxValue"] < 0.95:
+        return
+    # Aber: Faith ist auch Kaufwährung der Religion-Upgrades. Solange ein
+    # erreichbares (Cap reicht) Upgrade offen ist, wird gespart statt gepriesen.
+    cap = faith["maxValue"]
+    for u in snap.get("religion", {}).get("upgrades", []):
+        if not u["unlocked"] or (u["noStackable"] and (u["on"] or u["val"])):
+            continue
+        price = next((p["val"] for p in u["prices"] if p["name"] == "faith"), None)
+        if price is not None and price <= cap:
+            return
+    cands.append(Candidate(actions.praise(), 1.5, {"capLoss": 1.5}))
 
 
 # Festivalkosten sind im Spiel fix verdrahtet (village.js FestivalButton):

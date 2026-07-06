@@ -80,7 +80,15 @@ def systems_vm(snap: dict) -> dict:
         },
         "races": [r["title"] for r in snap.get("diplomacy", {}).get("races", [])],
         "energy": snap.get("derived", {}).get("energy", {}),
-        "faith": snap.get("religion", {}),
+        "religion": {
+            "worship": snap.get("religion", {}).get("worship", 0),
+            "epiphany": snap.get("religion", {}).get("epiphany", 0),
+            "transcendenceTier": snap.get("religion", {}).get("transcendenceTier", 0),
+            "solarRevolution": any(u["name"] == "solarRevolution" and (u["on"] or u["val"])
+                                   for u in snap.get("religion", {}).get("upgrades", [])),
+            "ziggurat": [{"label": z["label"], "val": z["val"]}
+                         for z in snap.get("religion", {}).get("ziggurat", []) if z["val"] > 0],
+        },
     }
 
 

@@ -171,9 +171,30 @@
     });
 
     section("religion", () => {
+        // Religion-Upgrades werden über den WORSHIP-Stand sichtbar
+        // (religion.js:1925: visible = on > 0 || religion.faith >= meta.faith),
+        // das unlocked-Flag der Metadaten bleibt dabei false!
+        const worship = g.religion.faith || 0;
+        const mapUpgrades = (list, worshipGated) => (list || [])
+            .filter(u => u.unlocked || (u.val > 0) || u.on
+                || (worshipGated && worship >= (u.faith || Infinity)))
+            .map(u => ({
+                name: u.name, label: u.label,
+                val: u.val || 0, on: u.on || 0,
+                unlocked: !!u.unlocked
+                    || (worshipGated && worship >= (u.faith || Infinity)),
+                noStackable: !!u.noStackable,
+                prices: (u.prices || []).map(p => ({
+                    name: p.name,
+                    val: p.val * Math.pow(u.priceRatio || 1, u.val || 0),
+                })),
+            }));
         out.religion = {
-            faith: g.religion.faith,          // Worship-Pool ("Total faith")
-            faithRatio: g.religion.faithRatio,
+            worship: worship,                    // "Total faith" = Worship-Pool
+            epiphany: g.religion.faithRatio,     // permanenter Faith-Bonus
+            transcendenceTier: g.religion.transcendenceTier || 0,
+            upgrades: mapUpgrades(g.religion.religionUpgrades, true),
+            ziggurat: mapUpgrades(g.religion.zigguratUpgrades, false),
         };
     });
 

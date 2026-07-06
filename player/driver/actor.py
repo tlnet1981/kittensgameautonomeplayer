@@ -100,6 +100,8 @@ class Actor:
                 return await self._trade(exec_spec)
             if kind == "praise":
                 return await self._praise()
+            if kind == "adore":
+                return await self._adore()
             return {"ok": False, "method": "none", "detail": f"Unbekannter kind: {kind}"}
         except Exception as exc:
             return {"ok": False, "method": "error", "detail": str(exc)}
@@ -203,6 +205,20 @@ class Actor:
             return {"ok": True, "method": "dom", "detail": "Praise the sun geklickt"}
         await self.browser.evaluate("() => game.religion.praise()")
         return {"ok": True, "method": "js-fallback", "detail": "religion.praise()"}
+
+    async def _adore(self) -> dict:
+        """Adore the Galaxy — Worship → Epiphany (religion.resetFaith)."""
+        await self._ensure_tab("Religion")
+        res = await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS,
+                                          {"title": "Adore the galaxy",
+                                           "glowMs": self.glow_ms, "click": True})
+        if not res.get("error"):
+            await asyncio.sleep(0.25)
+            return {"ok": True, "method": "dom", "detail": "Adore geklickt"}
+        ok = await self.browser.evaluate(
+            "() => { if (!game.religion.getRU('apocripha').on) return false;"
+            " game.religion.resetFaith(1.01, false); return true; }")
+        return {"ok": bool(ok), "method": "js-fallback", "detail": "resetFaith(1.01)"}
 
     async def _craft(self, spec: dict) -> dict:
         # Workshop-Tab zeigen (falls sichtbar), Craft über die exakte API —

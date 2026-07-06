@@ -55,6 +55,21 @@
           (energy.balance !== undefined ? energy.balance.toFixed(1) + " Wt" : "–") + "</span>";
     }
 
+    // Religion-Panel (M5)
+    const relBox = document.getElementById("religion-box");
+    if (relBox && sys && sys.religion) {
+      const r = sys.religion;
+      const zig = (r.ziggurat || []).map(z => escapeHtml(z.label) + " ×" + z.val).join(", ");
+      relBox.innerHTML =
+        "Worship: <strong>" + fmtNum(r.worship, 0) + "</strong>" +
+        " · Epiphany: <strong>" + (r.epiphany || 0).toFixed(3) + "</strong>" +
+        " · Transcendence-Tier: <strong>" + r.transcendenceTier + "</strong>" +
+        "<br>Solar Revolution: " + (r.solarRevolution
+          ? "<span style='color:var(--good)'>aktiv ✓</span>"
+          : "<span class='muted'>noch nicht</span>") +
+        (zig ? "<br>Ziggurat-Ausbau: " + zig : "");
+    }
+
     // Metaphysics-Reihenfolge
     const metaBox = document.getElementById("metaphysics-box");
     const perk = plan && plan.nextPerk;

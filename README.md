@@ -68,9 +68,9 @@ Unten läuft der **Live-Feed** mit Narrations-Karten und Ereignissen.
 | M0 Gerüst | ✅ | Server, Cockpit-Shell, Playwright-Driver, Live-Telemetrie |
 | M1 Brain-Kern | ✅ | Steuerzyklus, Food-Safety, Jobs, P0-Frühspiel, Decision Records, Mission-Control/Decisions/Plan-Tabs |
 | M2 Frühspiel komplett | ✅ | Handel + Kundschafter, Religion-Basis (Praise/Tempel), Festivals, Narrations-Karten, Timeline-Tab |
-| M3 Erster Reset | – | Reset-Transaktion, Meta-Controller, Metaphysics |
-| M4 Space & Energie | – | Rocketry-Kette, Energie-Management |
-| M5 Religion tief | – | Solar Revolution, TAP, Unicorns, Pacts |
+| M3 Erster Reset | ✅ | Reset-Transaktion, Run-Typen, Metaphysics-Kaufkette |
+| M4 Space & Energie | ✅ | Rocketry-Kette, Craft-Kaskade, Energie-Regel, Space-Missionen |
+| M5 Religion tief | ✅ | Solar Revolution, Religion-Upgrades, Unicorn-Kette, Adore vor Reset (TAP-light) |
 | M6 Time | – | Leviathans, Time Crystals, Shatter, Chronospheres, Challenges |
 | M7 Endgame | – | Seed-Runs, positive CS-Schleife, Paragon-Speedruns |
 

@@ -181,6 +181,37 @@ def praise() -> Action:
     )
 
 
+def buy_religion_upgrade(name: str, label: str, ziggurat: bool = False) -> Action:
+    return Action(
+        id=f"religion:{name}", type="BUY_UPGRADE",
+        label=f"Religion: {label}",
+        exec_spec={"kind": "click_button", "tab": "Religion", "title": label, "batch": 1},
+        expected=f"{label} aktiv" + (" (Ziggurat-Ausbau)" if ziggurat else ""),
+    )
+
+
+def sacrifice_unicorns() -> Action:
+    return Action(
+        id="religion:sacrificeUnicorns", type="SACRIFICE_UNICORNS",
+        label="Opfere Unicorns (→ Tears)",
+        exec_spec={"kind": "click_button", "tab": "Religion",
+                   "title": "Sacrifice unicorns", "batch": 1},
+        expected="2500 Unicorns → Tears (× Ziggurat-Stufe)",
+        irreversible=True,
+    )
+
+
+def adore() -> Action:
+    """Adore the Galaxy: Worship → permanente Epiphany (Teil der TAP-Kette)."""
+    return Action(
+        id="religion:adore", type="ADORE",
+        label="Adore the Galaxy (Worship → Epiphany)",
+        exec_spec={"kind": "adore"},
+        expected="Worship wird zu permanenter Epiphany",
+        irreversible=True,
+    )
+
+
 def festival() -> Action:
     return Action(
         id="festival:hold", type="FESTIVAL",
