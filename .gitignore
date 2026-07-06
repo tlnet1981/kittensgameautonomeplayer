@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Laufzeitdaten (Session-Logs, Save-Exporte)
+data/
+
+# Lokaler Spiel-Clone für Entwicklung/Tests (siehe README):
+#   git clone --depth 1 https://github.com/nuclear-unicorn/kittensgame.git gamefiles
+gamefiles/
+
+# Editor/OS
+.idea/
+.vscode/
+.DS_Store

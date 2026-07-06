@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Kittens Player — Cockpit</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ GLOBALE LEISTE (Cockpit-Spec 4.3) ============ -->
+<header id="globalbar">
+  <div class="gb-left">
+    <span id="gb-state" class="state-pill state-IDLE">IDLE</span>
+    <span class="gb-item"><label>Phase</label><span id="gb-phase">–</span></span>
+    <span class="gb-item"><label>Run</label><span id="gb-run">–</span></span>
+    <span class="gb-item gb-objective"><label>Ziel</label><span id="gb-objective">–</span></span>
+  </div>
+  <div class="gb-center">
+    <span class="gb-item"><label>Jahr</label><span id="gb-year">–</span></span>
+    <span class="gb-item"><label>Saison</label><span id="gb-season">–</span></span>
+    <span class="gb-item"><label>Kitten</label><span id="gb-kittens">–</span></span>
+    <span class="gb-item violet"><label>Paragon</label><span id="gb-paragon">–</span></span>
+  </div>
+  <div class="gb-right">
+    <span id="gb-version" class="version-badge" title="Spielversion vs. Referenzversion">v?</span>
+    <span id="gb-health" class="health-dot" title="Datenfrische"></span>
+    <button id="btn-start" class="ctl">▶ Start</button>
+    <button id="btn-pause" class="ctl" disabled>⏸ Pause</button>
+    <button id="btn-resume" class="ctl" disabled>⏵ Weiter</button>
+    <button id="btn-step" class="ctl" disabled title="Genau eine Aktion ausführen">⏭ Step</button>
+    <button id="btn-stop" class="ctl danger" disabled>■ Stop</button>
+  </div>
+</header>
+
+<!-- ============ TAB-NAVIGATION ============ -->
+<nav id="tabs">
+  <button data-tab="mission" class="tab-btn active">Mission Control</button>
+  <button data-tab="decisions" class="tab-btn">Decisions</button>
+  <button data-tab="economy" class="tab-btn">Economy</button>
+  <button data-tab="plan" class="tab-btn">Plan</button>
+  <button data-tab="systems" class="tab-btn">Systems</button>
+  <button data-tab="timeline" class="tab-btn">Timeline</button>
+  <button data-tab="diagnostics" class="tab-btn">Diagnostics</button>
+</nav>
+
+<!-- ============ HAUPTBEREICH ============ -->
+<main>
+  <section id="tab-mission" class="tab active">
+    <div class="placeholder" id="mission-placeholder">
+      <h2>Mission Control</h2>
+      <p>Der Agent ist noch nicht gestartet. Mit <strong>▶ Start</strong> öffnet sich das
+      Spielfenster und die Live-Telemetrie beginnt.</p>
+      <p class="muted">Entscheidungslogik (Current Action, Begründungen, Kandidaten) kommt mit Meilenstein M1.</p>
+    </div>
+    <div id="mission-live" class="hidden">
+      <div id="hero-card" class="card hero">
+        <div class="hero-top"><span class="hero-type" id="hero-type">TELEMETRIE</span>
+          <span class="hero-exec" id="hero-exec"></span></div>
+        <div class="hero-action" id="hero-action">Beobachte Spielzustand …</div>
+        <div class="hero-reason" id="hero-reason"></div>
+      </div>
+      <div class="strip" id="safety-strip"></div>
+    </div>
+  </section>
+
+  <section id="tab-decisions" class="tab">
+    <div class="placeholder"><h2>Decisions</h2>
+      <p class="muted">Entscheidungsjournal und Decision Inspector kommen mit Meilenstein M1.</p></div>
+  </section>
+
+  <section id="tab-economy" class="tab">
+    <div class="strip" id="eco-safety"></div>
+    <div class="card">
+      <h3>Ressourcen <span class="muted small">live, Netto pro Sekunde</span></h3>
+      <table id="eco-table" class="datatable">
+        <thead><tr>
+          <th>Ressource</th><th class="num">Bestand</th><th class="num">Cap</th>
+          <th class="bar-col"></th><th class="num">Netto/s</th><th class="num">Zeit bis Grenze</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Bevölkerung &amp; Jobs</h3>
+      <div id="eco-population" class="muted">–</div>
+    </div>
+  </section>
+
+  <section id="tab-plan" class="tab">
+    <div class="placeholder"><h2>Plan</h2>
+      <p class="muted">Phase Map und Zielhierarchie kommen mit Meilenstein M1/M3.</p></div>
+  </section>
+
+  <section id="tab-systems" class="tab">
+    <div class="placeholder"><h2>Systems</h2>
+      <p class="muted">Religion, Space, Time, Trade &amp; Challenges wachsen mit den Meilensteinen M2–M6.</p></div>
+  </section>
+
+  <section id="tab-timeline" class="tab">
+    <div class="placeholder"><h2>Timeline</h2>
+      <p class="muted">Multi-Lane-Timeline kommt mit Meilenstein M2.</p></div>
+  </section>
+
+  <section id="tab-diagnostics" class="tab">
+    <div class="card">
+      <h3>Systemzustand</h3>
+      <div id="diag-content" class="mono small">–</div>
+    </div>
+    <div class="card">
+      <h3>Warnungen / Fehler</h3>
+      <div id="diag-errors" class="mono small muted">keine</div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ LIVE-FEED (unten, Spec 4.1) ============ -->
+<footer id="livefeed">
+  <div class="feed-title">LIVE</div>
+  <div id="feed-items"></div>
+</footer>
+
+<script src="app.js"></script>
+<script src="tabs/economy.js"></script>
+</body>
+</html>

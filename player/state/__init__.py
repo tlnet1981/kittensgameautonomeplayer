@@ -1,0 +1,1 @@
+"""Zustandsnormalisierung und abgeleitete Kennzahlen."""
