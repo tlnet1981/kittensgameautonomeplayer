@@ -81,6 +81,10 @@ class Actor:
                 return await self._hunt()
             if kind == "craft":
                 return await self._craft(exec_spec)
+            if kind == "trade":
+                return await self._trade(exec_spec)
+            if kind == "praise":
+                return await self._praise()
             return {"ok": False, "method": "none", "detail": f"Unbekannter kind: {kind}"}
         except Exception as exc:
             return {"ok": False, "method": "error", "detail": str(exc)}
@@ -158,6 +162,33 @@ class Actor:
             return {"ok": True, "method": "dom", "detail": "Send hunters geklickt"}
         await self.browser.evaluate("() => game.village.huntAll()")
         return {"ok": True, "method": "js-fallback", "detail": "huntAll()"}
+
+    async def _trade(self, spec: dict) -> dict:
+        # Trade-Tab sichtbar machen; Ausführung über die exakte API
+        # (Batch-Klicks im DOM wären fehleranfällig und langsam).
+        await self._ensure_tab("Trade")
+        ok = await self.browser.evaluate(
+            """(args) => {
+                const race = game.diplomacy.get(args.race);
+                if (!race || !race.unlocked) return false;
+                game.diplomacy.tradeMultiple(race, args.times);
+                return true;
+            }""",
+            {"race": spec["race"], "times": int(spec.get("times", 1))},
+        )
+        return {"ok": bool(ok), "method": "js",
+                "detail": f"tradeMultiple({spec['race']}, {spec.get('times', 1)})"}
+
+    async def _praise(self) -> dict:
+        await self._ensure_tab("Religion")
+        res = await self.browser.evaluate(FIND_BUTTON_JS,
+                                          {"title": "Praise the sun", "glowMs": self.glow_ms})
+        if not res.get("error"):
+            await asyncio.sleep(0.25)
+            await self.browser.page.mouse.click(res["x"], res["y"])
+            return {"ok": True, "method": "dom", "detail": "Praise the sun geklickt"}
+        await self.browser.evaluate("() => game.religion.praise()")
+        return {"ok": True, "method": "js-fallback", "detail": "religion.praise()"}
 
     async def _craft(self, spec: dict) -> dict:
         # Workshop-Tab zeigen (falls sichtbar), Craft über die exakte API —

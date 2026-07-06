@@ -121,6 +121,42 @@ def craft(name: str, label: str, times: int) -> Action:
     )
 
 
+def trade(race: str, race_title: str, times: int) -> Action:
+    return Action(
+        id=f"trade:{race}", type="TRADE",
+        label=f"Handle {times}× mit {race_title}",
+        exec_spec={"kind": "trade", "race": race, "times": times},
+        expected="Ressourcen gemäß Trade-Tabelle", batch=times,
+    )
+
+
+def explore() -> Action:
+    return Action(
+        id="explore:races", type="TRADE",
+        label="Schicke Kundschafter aus (neue Handelspartner)",
+        exec_spec={"kind": "click_button", "tab": "Trade", "title": "Send explorers", "batch": 1},
+        expected="Chance auf neue Rasse (-1000 Catpower)",
+    )
+
+
+def praise() -> Action:
+    return Action(
+        id="praise:sun", type="PRAISE",
+        label="Preise die Sonne (Faith → Worship)",
+        exec_spec={"kind": "praise"},
+        expected="Faith wird in dauerhaften Worship umgewandelt",
+    )
+
+
+def festival() -> Action:
+    return Action(
+        id="festival:hold", type="FESTIVAL",
+        label="Feiere ein Festival (+30 % Happiness, ein Jahr)",
+        exec_spec={"kind": "click_button", "tab": "Village", "title": "Hold festival", "batch": 1},
+        expected="+30 % Happiness, doppelte Kitten-Ankunft",
+    )
+
+
 def wait(reason: str, wake: str) -> Action:
     return Action(
         id="wait", type="WAIT",

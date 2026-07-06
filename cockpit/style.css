@@ -185,6 +185,21 @@ tr.infeasible-row td { opacity: 0.55; }
 }
 .score-chip.neg-chip { background: #46281a; color: #ffb59a; }
 
+/* ---------- Timeline ---------- */
+.tl-filters { display: flex; gap: 6px; margin-bottom: 10px; }
+.tl-chip {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary);
+  border-radius: 12px; padding: 3px 12px; font-size: 12px; cursor: pointer;
+}
+.tl-chip.active { border-color: var(--cyan); color: var(--cyan); }
+.tl-item { padding: 3px 0; font-size: 13px; color: var(--text-secondary);
+  border-bottom: 1px solid #222220; }
+.tl-item .ts { color: var(--text-muted); font-family: var(--mono); font-size: 11px; margin-right: 10px; }
+.tl-item.tl-narrative { color: var(--cyan); }
+.tl-item.tl-safety { color: var(--warning); }
+.tl-item.tl-model { color: var(--serious); }
+.tl-count { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+
 /* ---------- Live-Feed ---------- */
 #livefeed {
   border-top: 1px solid var(--border); background: var(--surface-1);

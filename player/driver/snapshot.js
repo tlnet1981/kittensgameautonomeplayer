@@ -165,10 +165,28 @@
 
     section("religion", () => {
         out.religion = {
-            faith: g.religion.faith,
+            faith: g.religion.faith,          // Worship-Pool ("Total faith")
             faithRatio: g.religion.faithRatio,
-            worship: g.religion.faith, // Alias; präzisiert in M5
         };
+    });
+
+    section("diplomacy", () => {
+        out.diplomacy = { races: [], undiscovered: false };
+        if (g.diplomacy && g.diplomacy.races) {
+            for (const r of g.diplomacy.races) {
+                if (!r.unlocked) { out.diplomacy.undiscovered = true; continue; }
+                out.diplomacy.races.push({
+                    name: r.name,
+                    title: r.title,
+                    // Was die Rasse pro Trade verlangt (zusätzlich zu 15 Gold + 50 Catpower):
+                    buys: (r.buys || []).map(p => ({ name: p.name, val: p.val })),
+                    // Was sie liefert (value = Menge pro Trade, chance in %):
+                    sells: (r.sells || []).map(s => ({
+                        name: s.name, value: s.value, chance: s.chance,
+                    })),
+                });
+            }
+        }
     });
 
     section("effects", () => {

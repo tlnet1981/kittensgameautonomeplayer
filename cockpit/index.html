@@ -132,8 +132,17 @@
   </section>
 
   <section id="tab-timeline" class="tab">
-    <div class="placeholder"><h2>Timeline</h2>
-      <p class="muted">Multi-Lane-Timeline kommt mit Meilenstein M2.</p></div>
+    <div class="card">
+      <h3>Timeline <span class="muted small">gesamte Session, neueste zuerst</span></h3>
+      <div id="tl-filters" class="tl-filters">
+        <button class="tl-chip active" data-filter="">Alle</button>
+        <button class="tl-chip" data-filter="decision">Entscheidungen</button>
+        <button class="tl-chip" data-filter="narrative">Story</button>
+        <button class="tl-chip" data-filter="safety">Safety</button>
+        <button class="tl-chip" data-filter="model">System</button>
+      </div>
+      <div id="tl-items"></div>
+    </div>
   </section>
 
   <section id="tab-diagnostics" class="tab">
@@ -159,5 +168,6 @@
 <script src="tabs/mission.js"></script>
 <script src="tabs/decisions.js"></script>
 <script src="tabs/plan.js"></script>
+<script src="tabs/timeline.js"></script>
 </body>
 </html>

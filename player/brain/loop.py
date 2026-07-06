@@ -23,6 +23,7 @@ import time
 
 from player.driver.actor import Actor
 from player.driver.reader import read_snapshot
+from player.narrator import Narrator
 from player.state import access as A
 from player.state.derived import derive
 
@@ -34,6 +35,7 @@ class Brain:
     def __init__(self, runtime) -> None:
         self.rt = runtime
         self.actor = Actor(runtime.browser, runtime.config.click_glow_ms)
+        self.narrator = Narrator(runtime.bus)
         self._done_milestones: set[str] = set()
         self._first_cycle = True
         self._last_wait_reason: str | None = None   # WAIT-Verdichtung (Spec 2.6)
@@ -130,6 +132,8 @@ class Brain:
         self.last_record = record
         bus.publish("decision.committed", record.to_dict())
         bus.publish("plan.updated", self._plan_payload(meta_view, bottleneck))
+        self.narrator.track_bottleneck((bottleneck or {}).get("resource"),
+                                       meta_view.objective_label)
 
         # --- Ausführen ---
         action = selected.action
@@ -159,6 +163,16 @@ class Brain:
         if not result["ok"]:
             bus.publish("model.warning",
                         {"error": f"Aktion fehlgeschlagen: {action.label} — {result.get('detail')}"})
+        self.narrator.on_action_executed(action.type, action.label, result["ok"])
+        # Forschung als P2-Karte — außer sie ist selbst Meilenstein (die Karte
+        # kommt dann von _announce_milestones, keine Dubletten):
+        milestone_techs = {m.target["name"] for m in meta.P0_MILESTONES
+                           if m.target and m.target["kind"] == "research"}
+        for tech_name in _observables(after_snap)["techs"] - before["techs"]:
+            if tech_name not in milestone_techs:
+                label = next((t["label"] for t in after_snap.get("science", {}).get("techs", [])
+                              if t["name"] == tech_name), tech_name)
+                self.narrator.on_research(label, meta_view.objective_label)
         self.rt.set_state("RUNNING", "")
 
     # ------------------------------------------------------------ Meilensteine

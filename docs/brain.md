@@ -68,6 +68,7 @@ oder wenn das **Cap** die Zielmenge blockiert → Storage-Gate).
 | storage | 1.0–2.2 | Storage-Regel 11.3 A (nur bei Cap-Blockade!) |
 | housing | 1.6 | Hütte etc., nur bei sicherer Food-Lage (12.1) |
 | capLoss | 1.5–1.6 | Jagd/Craft nahe Cap (11.4) |
+| happiness | 1.2–1.8 | Festival / Amphitheater (Happiness = globaler Produktionsmultiplikator) |
 | economy | 0.6 | generischer Ausbau |
 | opportunity | −0.7 | Kauf verbraucht die für den Engpass reservierte Ressource (10.2) |
 | WAIT | 0.01 | immer möglich, mit Grund + Weckbedingung (G-05) |
@@ -83,6 +84,25 @@ Refine, solange keine Woodcutter existieren), wird die Input-Ressource
 (Catnip) „reserviert": generische Käufe, die sie verbrauchen, bekommen die
 `opportunity`-Strafe und fallen unter 0. Beide Deadlocks aus dem Live-Test
 sind als Regressionstests festgehalten (`tests/test_tactics.py`).
+
+## M2-Erweiterungen: Handel, Religion-Basis, Festivals
+
+- **Handel (14.1, TradeValue-light):** Eine Rasse wird nur bespielt, wenn sie
+  den aktuellen Engpass liefert; Batch = min(Gold/15, Catpower/50, Ware, 5).
+  Zusätzlich Gold-Cap-Schutz (Gold am Cap = verschenkter Handelsspielraum).
+  Volle EV-Rechnung mit Saison/Standing folgt bei Bedarf in P1+.
+- **Kundschafter:** neuer Handelspartner = Optionswert (Unlock 1.6),
+  sobald 1000 Catpower verfügbar sind.
+- **Praise (15.1):** Faith ≥ 95 % Cap → Praise (Cap-Verlust-Regel);
+  vor Solar Revolution gibt es keinen Grund, Faith zu horten.
+- **Festival (12.x):** ab Drama & bezahlbar (1500 Catpower / 5000 Culture /
+  2500 Parchment, im Spiel fix verdrahtet); +30 % Happiness auf alles.
+
+## Narration (`player/narrator.py`, Cockpit-Spec Kap. 18)
+
+Deterministisch aus Templates: Erstereignis-Karten (erste Jagd, erster Handel,
+erstes Festival, erstes Gebet, erstes Handwerk), Forschungs-Karten,
+Meilenstein-Karten und Engpasswechsel (P3). Kein LLM, keine freie Textform.
 
 ## DecisionRecord (`brain/records.py`, Spec Kap. 23)
 

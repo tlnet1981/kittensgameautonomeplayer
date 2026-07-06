@@ -134,6 +134,9 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     _upgrade_candidates(snap, cands)
     _hunt_candidate(snap, cands)
     _craft_candidates(snap, target, bn, cands)
+    _trade_candidates(snap, bn, cands)
+    _praise_candidate(snap, cands)
+    _festival_candidate(snap, cands)
     _wait_candidate(snap, bn, cands, meta_view)
 
     # Deterministisch sortieren: Score absteigend, dann Action-ID (C.2).
@@ -191,11 +194,12 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
 def _job_candidates(snap, bn, cands) -> None:
     village = snap.get("village", {})
     free = village.get("freeKittens", 0)
-    if free <= 0:
-        return
-
     food = snap.get("derived", {}).get("food", {})
     reserve = food.get("reserveSeconds")
+
+    if free <= 0:
+        _job_rebalance_candidate(snap, bn, cands, village, reserve)
+        return
 
     # Food zuerst stabilisieren, wenn Reserve unter Komfortniveau:
     if reserve is not None and reserve < RESERVE_COMFORT_SECONDS and A.job_unlocked(snap, "farmer"):
@@ -224,6 +228,29 @@ def _job_candidates(snap, bn, cands) -> None:
         ))
         if src == "Engpass":
             cands[-1].components["bottleneck"] = 0.0  # nur Anzeige-Marker
+
+
+def _job_rebalance_candidate(snap, bn, cands, village, reserve) -> None:
+    """Lokale Tauschoperation (Spec 12.2 Schritt 7): Der Engpass-Job ist
+    komplett unbesetzt und es gibt keine freien Kitten → ein Kitten aus dem
+    größten anderen Job umschulen. `job_count == 0` verhindert Thrashing."""
+    if not bn or not bn.get("resource"):
+        return
+    job = RESOURCE_JOB.get(bn["resource"])
+    if not job or not A.job_unlocked(snap, job) or A.job_count(snap, job) > 0:
+        return
+    food_tight = reserve is not None and reserve < RESERVE_COMFORT_SECONDS
+    donors = [j for j in village.get("jobs", [])
+              if j["name"] != job and j["value"] > 0
+              and not (j["name"] == "farmer" and food_tight)]
+    if not donors:
+        return
+    biggest = max(donors, key=lambda j: (j["value"], j["name"]))
+    label = next((j["title"] for j in village.get("jobs", []) if j["name"] == job), job)
+    cands.append(Candidate(
+        actions.shift_job(biggest["name"], job, label, 1), 2.2,
+        {"jobValue": 1.2, "bottleneck": 1.0},
+    ))
 
 
 # ---------------------------------------------------------------- Sammeln/Veredeln
@@ -306,6 +333,8 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None) -> Non
             comp["bottleneck"] = 1.8   # produziert genau den Engpass
         elif name == "workshop" and A.bld_val(snap, "workshop") == 0:
             comp["unlock"] = 1.7       # erste Werkstatt schaltet Crafts frei
+        elif name == "amphitheatre" and snap.get("village", {}).get("happiness", 1.0) < 1.0:
+            comp["happiness"] = 1.2    # unglückliche Kitten produzieren weniger
         else:
             comp["economy"] = 0.6      # generischer Ausbau
 
@@ -407,6 +436,92 @@ def _craft_candidates(snap, target, bn, cands) -> None:
                                    sum(comp.values()), comp))
 
 
+# ---------------------------------------------------------------- Handel
+
+# Fixkosten jedes Trades (zusätzlich zur rassespezifischen Ware):
+TRADE_GOLD_COST = 15
+TRADE_MANPOWER_COST = 50
+
+
+def _trade_candidates(snap, bn, cands) -> None:
+    diplo = snap.get("diplomacy", {})
+    races = diplo.get("races", [])
+    gold = A.res_value(snap, "gold")
+    manpower = A.res_value(snap, "manpower")
+
+    # Kundschafter: neue Handelspartner sind ein Unlock (Optionswert).
+    if diplo.get("undiscovered") and manpower >= 1000:
+        cands.append(Candidate(actions.explore(), 1.6, {"unlock": 1.6}))
+
+    if not races:
+        return
+
+    for race in races:
+        # TradeValue-light (Spec 14.1): Handel nur, wenn die Rasse den
+        # aktuellen Engpass liefert. EV-Rechnung folgt mit späterem Ausbau.
+        sells_bottleneck = bn and bn.get("resource") and any(
+            s["name"] == bn["resource"] for s in race.get("sells", []))
+        if not sells_bottleneck:
+            continue
+        batch = int(min(gold // TRADE_GOLD_COST, manpower // TRADE_MANPOWER_COST, 5))
+        for p in race.get("buys", []):
+            have = A.res_value(snap, p["name"])
+            batch = int(min(batch, have // p["val"])) if p["val"] else batch
+        if batch >= 1:
+            cands.append(Candidate(
+                actions.trade(race["name"], race["title"], batch), 1.7,
+                {"bottleneck": 1.7},
+            ))
+
+    # Gold am Cap ist verschenkter Handelsspielraum (Cap-Regel 11.4):
+    gold_res = A.resource(snap, "gold")
+    if gold_res and gold_res.get("maxValue", 0) > 0 \
+            and gold_res["value"] / gold_res["maxValue"] > 0.95 \
+            and manpower >= TRADE_MANPOWER_COST:
+        race = races[0]
+        batch = int(min(gold // TRADE_GOLD_COST, manpower // TRADE_MANPOWER_COST, 3))
+        for p in race.get("buys", []):
+            have = A.res_value(snap, p["name"])
+            batch = int(min(batch, have // p["val"])) if p["val"] else batch
+        if batch >= 1 and not any(c.action.id == f"trade:{race['name']}" for c in cands):
+            cands.append(Candidate(
+                actions.trade(race["name"], race["title"], batch), 1.1,
+                {"capLoss": 1.1},
+            ))
+
+
+# ---------------------------------------------------------------- Religion / Festival
+
+def _praise_candidate(snap, cands) -> None:
+    # Faith am Cap verfällt — Praise wandelt sie in dauerhaften Worship (15.1).
+    faith = A.resource(snap, "faith")
+    if not faith or faith.get("maxValue", 0) <= 0:
+        return
+    if faith["value"] / faith["maxValue"] >= 0.95:
+        cands.append(Candidate(actions.praise(), 1.5, {"capLoss": 1.5}))
+
+
+# Festivalkosten sind im Spiel fix verdrahtet (village.js FestivalButton):
+FESTIVAL_PRICES = [
+    {"name": "manpower", "val": 1500},
+    {"name": "culture", "val": 5000},
+    {"name": "parchment", "val": 2500},
+]
+
+
+def _festival_candidate(snap, cands) -> None:
+    if snap.get("calendar", {}).get("festivalDays", 0) > 0:
+        return
+    if not A.tech_researched(snap, "drama"):
+        return
+    if not A.affordable(snap, FESTIVAL_PRICES):
+        return
+    # +30 % Happiness wirkt auf die gesamte Produktion — fast immer gut.
+    happiness = snap.get("village", {}).get("happiness", 1.0)
+    score = 1.8 if happiness < 1.3 else 1.2
+    cands.append(Candidate(actions.festival(), score, {"happiness": score}))
+
+
 # ---------------------------------------------------------------- WAIT
 
 def _wait_candidate(snap, bn, cands, meta_view) -> None:
@@ -433,6 +548,7 @@ REASON_TEMPLATES = {
     "storage": "{label}: das aktuelle Cap blockiert den Fortschritt (Storage-Regel A).",
     "capLoss": "{label} verhindert Produktionsverlust am Ressourcen-Cap.",
     "economy": "{label} ist eine günstige Ökonomie-Investition.",
+    "happiness": "{label}: Happiness wirkt als Multiplikator auf die gesamte Produktion.",
     "base": "{label}",
 }
 

@@ -117,6 +117,7 @@ window.KGP = (() => {
     "state.save_exported": e => "Save exportiert: " + e.payload.path,
     "narrative.chapter": e => e.payload.title + " — " + e.payload.body,
     "narrative.milestone": e => "★ " + e.payload.title + " — " + e.payload.body,
+    "narrative.tactical": e => e.payload.title + " — " + e.payload.body,
   };
 
   function feedClass(e) {
