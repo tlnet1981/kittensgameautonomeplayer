@@ -275,7 +275,8 @@ def determine_run(snap: dict) -> str:
         return "FIRST_RUN"
     if next_metaphysics_target(snap) is not None:
         return "PRICE_RATIO_RUN"
-    return "CORE_META_RUN"   # weitere Run-Typen folgen mit M4–M7
+    # Metaphysics-Kette komplett: Paragon pro Realzeit maximieren (Spec 8.2/20.4)
+    return "PARAGON_RUN"
 
 
 @dataclass

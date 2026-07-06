@@ -13,6 +13,8 @@ Grundlage sind zwei Spezifikationen: *„Autonome Optimimale Spiel-Mechanik"*
 (die Entscheidungslogik) und *„Cockpit Konzept"* (die Beobachtungsoberfläche).
 Referenzversion des Spiels: **1.5.0.2, Build Revision 3**.
 
+![Mission Control](docs/screenshot-mission-control.png)
+
 ## Quickstart
 
 Voraussetzungen: Python 3.11+, einmalig:
@@ -72,7 +74,19 @@ Unten läuft der **Live-Feed** mit Narrations-Karten und Ereignissen.
 | M4 Space & Energie | ✅ | Rocketry-Kette, Craft-Kaskade, Energie-Regel, Space-Missionen |
 | M5 Religion tief | ✅ | Solar Revolution, Religion-Upgrades, Unicorn-Kette, Adore vor Reset (TAP-light) |
 | M6 Time | ✅ | Time Crystals, konservative Shatter-Regel, Chronoforge/Cryochambers, Leviathan-Handel, TC-Schutz-Gate |
-| M7 Endgame | – | Seed-Runs, positive CS-Schleife, Paragon-Speedruns |
+| M7 Endgame | ✅ | Paragon-Speedrun-Regel (Spec 20.4), Run-Summaries, Audio-Cues |
+
+**Bekannte Grenzen** (bewusst, siehe [docs/brain.md](docs/brain.md)): Challenges,
+Policies, Pacts und die volle Shatter-/Chronosphere-Endgame-Bilanz sind noch
+nicht automatisiert — die Architektur (Ziel-Arten, Kandidaten-Scoring,
+Reset-Gates) ist dafür vorbereitet; in docs/brain.md steht, wie man eine
+neue Spielschicht ergänzt.
+
+## Debug-Spielereien
+
+- `POST /api/control/force_reset` — Reset-Transaktion sofort auslösen.
+- `POST /api/debug/eval` mit `{"js": "() => …"}` — beliebiges JS im
+  Spielkontext ausführen (z. B. zum Cheaten/Zeitraffern beim Zusehen).
 
 ## Architektur (Kurzfassung)
 

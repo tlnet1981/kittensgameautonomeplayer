@@ -166,6 +166,44 @@ window.KGP = (() => {
     return div;
   }
 
+  // ---------- Audio-Cues (Cockpit-Spec 18.5: dezent, mit Mute) ----------
+  let muted = localStorage.getItem("kgp-muted") === "1";
+  let audioCtx = null;
+
+  function beep(freq, durMs, delayMs) {
+    if (muted) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const t0 = audioCtx.currentTime + (delayMs || 0) / 1000;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = freq;
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.08, t0);           // leise!
+      gain.gain.exponentialRampToValueAtTime(0.001, t0 + durMs / 1000);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + durMs / 1000);
+    } catch (e) { /* Audio nicht verfügbar */ }
+  }
+
+  function audioCue(e) {
+    if (e.type === "narrative.chapter") { beep(523, 180); beep(784, 260, 190); }      // Kapitel: Zweiklang
+    else if (e.type === "narrative.milestone") { beep(659, 200); }                    // Meilenstein: Einzelton
+    else if (e.type === "model.error") { beep(196, 350); }                            // Fehler: tief
+  }
+
+  function initMute() {
+    const btn = document.getElementById("btn-mute");
+    const renderBtn = () => { btn.textContent = muted ? "🔇" : "🔊"; };
+    btn.onclick = () => {
+      muted = !muted;
+      localStorage.setItem("kgp-muted", muted ? "1" : "0");
+      renderBtn();
+    };
+    renderBtn();
+  }
+
   // ---------- WebSocket ----------
   function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -184,6 +222,7 @@ window.KGP = (() => {
         applyStatus(e.payload);
       } else {
         addFeedItem(e);
+        audioCue(e);
         routeEvent(e, false);
         eventHandlers.forEach(fn => fn(e));
       }
@@ -257,6 +296,7 @@ window.KGP = (() => {
   // ---------- Init ----------
   document.addEventListener("DOMContentLoaded", () => {
     initTabs();
+    initMute();
     document.getElementById("btn-start").onclick = () => control("start");
     document.getElementById("btn-stop").onclick = () => control("stop");
     document.getElementById("btn-pause").onclick = () => control("pause");

@@ -111,12 +111,45 @@ Kandidaten mit Score-Zerlegung und Ablehnungsgrund, Gewinner,
 Ausführungsergebnis und beobachteten Effekt. Das ist die Datenquelle des
 Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
 
-## Bewusste Vereinfachungen gegenüber der Spec (Stand M1)
+## M4–M7: Space, Time, Endgame
+
+- **Craft-Kaskade (11.2 light):** Braucht ein Ziel Blueprints, steigt die
+  Kaskade rekursiv ab (Parchment → Manuscript → Compendium → Blueprint) und
+  craftet pro Zyklus die tiefste machbare Stufe.
+- **Energie (16.4 / I-04):** Bei Energie-Defizit bekommen Erzeuger
+  (Steamworks, Magneto, Solar Farm, Hydro, Reactor) Vorrang-Score 2.0.
+- **Space:** Missionen sind Meilenstein-Ziele (Orbital Launch → Mond);
+  Planeten-Gebäude generische Kandidaten mit Engpass-Kopplung
+  (Lunar Outpost → Unobtainium usw.).
+- **Time (17.x, Basisausbaustufe):** Chronoforge-Ausbau (Resource Retrieval
+  priorisiert), Cryochambers; konservative Shatter-Regel: nur mit RR ≥ 1,
+  Heat-Spielraum und 5-TC-Reserve, Batch ≤ 5.
+- **TC-Schutz-Gate (I-02 / 9.1):** Reset mit ≥ 3 Time Crystals wird ohne
+  Anachronomancy blockiert.
+- **Run-Typen (8.2):** FIRST_RUN → PRICE_RATIO_RUN (Metaphysics-Kette
+  Engineering…Renaissance + Chronomancy/Astromancy/Anachronomancy) →
+  PARAGON_RUN.
+- **Paragon-Speedrun (20.4):** Reset, wenn die marginale Paragonrate
+  (5-min-Fenster) unter 50 % der Ø-Rate des Runs fällt; Mindestlaufzeit
+  20 min, Mindestgewinn 10 Paragon.
+- **TAP-light (15.2):** Vor jedem Reset wird Adore ausgeführt, wenn
+  Apocrypha aktiv ist (Worship → permanente Epiphany). Transcend ist noch
+  nicht automatisiert (Epiphany-Verlustrechnung).
+
+## Bewusste Vereinfachungen gegenüber der Spec (Stand M7)
 
 | Spec | Hier | Warum |
 |---|---|---|
-| Stochastische Vorwärtssimulation (Kap. 5) | Live-Raten + Formeln Anhang D | Spiel = Modell; genügt für P0–P2 |
-| Exakte Schattenpreise λᵢ (10.2) | Engpass-ETA + Komponenten-Gewichte | transparent, robust, deterministisch |
-| MacroPlan-Kandidaten ×3 Varianten (8.3) | ein Meilensteinpfad + Opportunismus | kommt mit M3 (Run-Typen) |
-| Payback-Regel (10.4) | implizit über Gewichte | explizit ab M2 (Handel) |
+| Stochastische Vorwärtssimulation (Kap. 5) | Live-Raten + Formeln Anhang D | Spiel = Modell; transparent & robust |
+| Exakte Schattenpreise λᵢ (10.2) | Engpass-ETA + Komponenten-Gewichte | deterministisch, im Cockpit erklärbar |
+| MacroPlan ×3 Varianten (8.3) | ein Meilensteinpfad + Opportunismus | genügt bis P2; Erweiterungspunkt meta.py |
 | Model-Mismatch-Stop (22.2) | Warnung + DEGRADED | privater Betrieb gegen Online-Spiel |
+| Challenges (Kap. 18) | nicht automatisiert | irreversibel + regeländernd; Aktions-/Gate-Gerüst vorhanden |
+| Policies (13.4) | nicht automatisiert | exklusiv-irreversibel; Panel-Scoping im Actor bereit |
+| Pacts/Necrocorns (15.5), volle Shatter-Engine (17), Seed-/CS-Loops (19) | Grundbausteine (Leviathan-Handel, Shatter-Basis, Chronosphere-Kauf, Cryochambers) | exakte Endgame-Bilanzen wären eigene Modellierungsprojekte — Architektur (Ziel-Arten, Kandidaten, Gates) nimmt sie auf |
+
+**Erweitern:** Neue Spielschicht = (1) Snapshot-Sektion in `driver/snapshot.js`,
+(2) ggf. neue Ziel-Art in `tactics._target_prices/_target_obj/_milestone_candidate`,
+(3) Kandidaten-Funktion mit Score-Komponenten, (4) Meilensteine in `meta.py`,
+(5) Tests auf Snapshot-Fixtures. Das Cockpit zeigt alles automatisch über
+DecisionRecords an.

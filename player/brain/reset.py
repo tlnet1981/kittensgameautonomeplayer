@@ -26,7 +26,14 @@ FIRST_RESET_MIN_PARAGON = 35
 MIN_PARAGON_GAIN = 10
 
 
-def evaluate(snap: dict, run_type: str, next_perk: dict | None) -> dict[str, Any]:
+# Paragon-Speedrun (Spec 20.4): Mindestlaufzeit und Abbruchkriterium.
+PARAGON_RUN_MIN_SECONDS = 20 * 60
+PARAGON_MARGINAL_WINDOW = 5 * 60      # Fenster für die marginale Rate
+PARAGON_MARGINAL_FACTOR = 0.5         # Reset, wenn marginal < 50 % der Ø-Rate
+
+
+def evaluate(snap: dict, run_type: str, next_perk: dict | None,
+             paragon_samples: list[tuple[float, int]] | None = None) -> dict[str, Any]:
     """Bewertet, ob jetzt resettet werden soll. Liefert Gates fürs Cockpit."""
     projection = snap.get("derived", {}).get("resetParagon", 0)
     paragon_now = snap.get("prestige", {}).get("paragon", 0)
@@ -38,6 +45,10 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None) -> dict[str, Any
         reason = (f"Projektion {projection} ≥ {FIRST_RESET_MIN_PARAGON} Paragon"
                   if recommended else
                   f"Projektion {projection} / {FIRST_RESET_MIN_PARAGON} Paragon")
+    elif run_type == "PARAGON_RUN":
+        # Spec 20.4: Run endet, wenn die marginale Paragonrate unter die
+        # Durchschnittsrate des Runs fällt (Proxy für den Neustart-Ø).
+        recommended, reason = _paragon_speedrun_rule(projection, paragon_samples)
     elif next_perk is not None:
         price = next((p["val"] for p in next_perk.get("prices", []) if p["name"] == "paragon"), 0)
         funds_after_reset = paragon_now + projection
@@ -74,6 +85,32 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None) -> dict[str, Any
         "gates": gates,
         "nextPerk": next_perk["label"] if next_perk else None,
     }
+
+
+def _paragon_speedrun_rule(projection: int,
+                           samples: list[tuple[float, int]] | None) -> tuple[bool, str]:
+    if not samples or len(samples) < 2:
+        return False, "Paragon-Run: sammle Verlaufsdaten"
+    t0, p0 = samples[0]
+    t_now, p_now = samples[-1]
+    runtime_s = t_now - t0
+    if runtime_s < PARAGON_RUN_MIN_SECONDS or projection < MIN_PARAGON_GAIN:
+        return False, (f"Paragon-Run läuft {runtime_s / 60:.0f} min, "
+                       f"Projektion +{projection}")
+    avg_rate = (p_now - p0) / max(1.0, runtime_s)
+    window_start = t_now - PARAGON_MARGINAL_WINDOW
+    recent = [(t, p) for t, p in samples if t >= window_start]
+    if len(recent) < 2:
+        return False, "Paragon-Run: Fenster zu kurz"
+    marginal_rate = (recent[-1][1] - recent[0][1]) / max(1.0, recent[-1][0] - recent[0][0])
+    if avg_rate <= 0:
+        return False, "Paragon-Run: noch keine positive Rate"
+    if marginal_rate < avg_rate * PARAGON_MARGINAL_FACTOR:
+        return True, (f"marginale Paragonrate {marginal_rate * 3600:.1f}/h < "
+                      f"{PARAGON_MARGINAL_FACTOR:.0%} der Ø-Rate {avg_rate * 3600:.1f}/h "
+                      f"(Spec 20.4)")
+    return False, (f"marginale Rate {marginal_rate * 3600:.1f}/h hält Ø-Rate "
+                   f"{avg_rate * 3600:.1f}/h — weiterlaufen")
 
 
 async def execute_reset(runtime, reset_eval: dict) -> None:

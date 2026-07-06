@@ -36,12 +36,12 @@ def test_metaphysics_order_progression():
     assert target["name"] == "goldenRatio"
 
 
-def test_core_meta_run_when_chain_complete():
+def test_paragon_run_when_chain_complete():
     perks = [{"name": n, "label": n, "researched": True, "unlocked": True,
               "prices": [{"name": "paragon", "val": 1}]}
              for n in meta.METAPHYSICS_ORDER]
     snap = _with_prestige(make_snap(), paragon=100, karma=5, perks=perks)
-    assert meta.determine_run(snap) == "CORE_META_RUN"
+    assert meta.determine_run(snap) == "PARAGON_RUN"
 
 
 def test_first_reset_threshold():

@@ -44,6 +44,10 @@ class Brain:
         self.last_bottleneck: dict | None = None
         self.last_reset_eval: dict | None = None
         self.force_reset = False   # Debug-Control aus dem Cockpit
+        # Verlauf der Paragon-Projektion für die Speedrun-Regel (Spec 20.4):
+        self.paragon_samples: list[tuple[float, int]] = []
+        self.run_started = time.time()
+        self.decisions_made = 0
 
     # ------------------------------------------------------------ Hauptschleife
 
@@ -95,18 +99,25 @@ class Brain:
         self._announce_milestones(meta_view)
 
         # --- Reset-Bewertung (Spec Kap. 20) ---
-        reset_eval = reset.evaluate(snap, meta_view.run_type, meta_view.next_perk)
+        self.paragon_samples.append((time.time(), snap["derived"]["resetParagon"]))
+        if len(self.paragon_samples) > 4000:
+            del self.paragon_samples[:2000]
+        reset_eval = reset.evaluate(snap, meta_view.run_type, meta_view.next_perk,
+                                    self.paragon_samples)
         self.last_reset_eval = reset_eval
         if reset_eval["recommended"] or self.force_reset:
             self.force_reset = False
             if not reset_eval["recommended"]:
                 reset_eval = dict(reset_eval)
                 reset_eval["reason"] = "Manuell ausgelöst (Cockpit-Debug)"
+            self._publish_run_summary(meta_view)
             self.rt.set_state("EXECUTING", "Pre-Reset-Transaktion")
             await reset.execute_reset(self.rt, reset_eval)
             self._done_milestones = set()      # neuer Run, neue Meilensteine
             self._last_wait_reason = None
             self._first_cycle = True
+            self.paragon_samples = []
+            self.run_started = time.time()
             return
 
         # Kandidaten immer vollständig erzeugen (Cockpit zeigt Alternativen);
@@ -133,6 +144,7 @@ class Brain:
         else:
             self._last_wait_reason = None
 
+        self.decisions_made += 1
         record = DecisionRecord(
             trigger=trigger,
             phase=meta_view.phase,
@@ -208,6 +220,18 @@ class Brain:
                 "body": f"Nächstes Ziel: {nxt}",
             })
         self._done_milestones = done_now
+
+    def _publish_run_summary(self, meta_view: meta.MetaView) -> None:
+        """Session-Summary am Run-Ende (Cockpit-Spec 17.5, deterministisch)."""
+        runtime_min = (time.time() - self.run_started) / 60
+        done = sum(1 for m in meta_view.milestones if m["state"] == "done")
+        self.rt.bus.publish("narrative.chapter", {
+            "priority": "P1",
+            "title": "Run-Zusammenfassung",
+            "body": (f"{runtime_min:.0f} min Laufzeit · {self.decisions_made} Entscheidungen · "
+                     f"{done} Meilensteine · Run-Typ {meta_view.run_type}"),
+        })
+        self.decisions_made = 0
 
     def _plan_payload(self, meta_view: meta.MetaView, bottleneck: dict | None) -> dict:
         payload = meta_view.to_dict()
