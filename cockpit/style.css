@@ -150,6 +150,41 @@ td.neg { color: #ff8a8a; }
 .fillbar > div { height: 100%; background: var(--blue); border-radius: 3px; }
 .fillbar.high > div { background: var(--warning); }
 
+/* ---------- Mission Control ---------- */
+.mission-grid { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
+@media (max-width: 1100px) { .mission-grid { grid-template-columns: 1fr; } }
+.hero-meta { margin-top: 8px; }
+.crit-text { color: var(--critical); }
+.warn-text { color: var(--warning); }
+
+.causal .chain-step { padding: 4px 0; font-size: 14px; }
+.causal .chain-step.now { font-weight: 700; color: var(--cyan); }
+.chain-arrow { color: var(--text-muted); margin-right: 8px; }
+
+.ms-row { padding: 4px 2px; font-size: 13.5px; color: var(--text-secondary); }
+.ms-row.ms-done { color: var(--text-muted); }
+.ms-row.ms-done .ms-icon { color: var(--good); }
+.ms-row.ms-active { color: var(--text-primary); font-weight: 600; }
+.ms-row.ms-active .ms-icon { color: var(--cyan); }
+.ms-icon { display: inline-block; width: 20px; }
+
+.bn-res { font-size: 20px; font-weight: 700; color: var(--warning); text-transform: capitalize; }
+
+/* ---------- Decision Inspector ---------- */
+tr.clickable { cursor: pointer; }
+tr.selected-row td { background: #14293d !important; }
+tr.infeasible-row td { opacity: 0.55; }
+.di-provenance { background: var(--surface-2); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+.di-provenance > div { padding: 1px 0; }
+.prov-label { display: inline-block; min-width: 110px; color: var(--text-muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.05em; }
+#decision-inspector h4 { margin: 10px 0 6px; color: var(--text-secondary); font-size: 13px; }
+.score-chip {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  background: #12324a; color: #9fd6ff; border-radius: 4px; padding: 1px 6px; margin: 1px 0;
+}
+.score-chip.neg-chip { background: #46281a; color: #ffb59a; }
+
 /* ---------- Live-Feed ---------- */
 #livefeed {
   border-top: 1px solid var(--border); background: var(--surface-1);

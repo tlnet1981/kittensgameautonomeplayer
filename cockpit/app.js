@@ -8,6 +8,9 @@ window.KGP = (() => {
     economy: null,     // EconomyVM
     population: null,  // PopulationVM
     health: null,      // HealthVM
+    currentDecision: null,   // letzter DecisionRecord
+    plan: null,              // StrategicPlanVM (Meilensteine + Engpass)
+    decisions: [],           // Journal (neueste zuerst, max 200)
     connected: false,
   };
   const updateHandlers = [];
@@ -94,33 +97,50 @@ window.KGP = (() => {
   }
 
   // ---------- Live-Feed ----------
+  // PLANNING/EXECUTING/WAITING-Wechsel passieren im Sekundentakt — die
+  // gehören nicht in den Feed (Ereignisverdichtung, Cockpit-Spec 2.6).
+  const NOISY_STATES = new Set(["PLANNING", "EXECUTING", "WAITING", "RUNNING"]);
   const FEED_LABELS = {
-    "agent.state": e => "Agent: " + e.payload.from + " → " + e.payload.to
-      + (e.payload.reason ? " (" + e.payload.reason + ")" : ""),
+    "agent.state": e => (NOISY_STATES.has(e.payload.to) && NOISY_STATES.has(e.payload.from))
+      ? null
+      : "Agent: " + e.payload.from + " → " + e.payload.to
+        + (e.payload.reason ? " (" + e.payload.reason + ")" : ""),
+    "decision.committed": e => e.payload.selected.action.type === "WAIT"
+      ? null   // WAIT-Detail steht in der Hero Card, nicht im Feed
+      : e.payload.selected.action.label + " — " + e.payload.reason,
+    "execution.result": e => e.payload.ok ? null
+      : "Ausführung fehlgeschlagen: " + e.payload.detail,
     "model.error": e => "Fehler: " + e.payload.error,
     "model.warning": e => "Warnung: " + e.payload.error,
     "model.version_mismatch": e => "Versionsabweichung: Spiel v" + e.payload.gameVersion
       + " r" + e.payload.buildRevision + " ≠ Referenz v" + e.payload.referenceVersion,
     "state.save_exported": e => "Save exportiert: " + e.payload.path,
     "narrative.chapter": e => e.payload.title + " — " + e.payload.body,
+    "narrative.milestone": e => "★ " + e.payload.title + " — " + e.payload.body,
   };
 
   function feedClass(e) {
-    if (e.type === "model.error") return "crit";
+    if (e.type === "model.error" || (e.type === "execution.result" && !e.payload.ok)) return "crit";
     if (e.type === "model.warning" || e.type === "model.version_mismatch") return "warn";
-    if (e.type === "narrative.chapter") return "p1";
+    if (e.type === "narrative.chapter" || e.type === "narrative.milestone") return "p1";
     return "";
   }
 
   function addFeedItem(e) {
     const fn = FEED_LABELS[e.type];
     if (!fn) return; // Telemetrie etc. nicht im Feed
+    const text = fn(e);
+    if (text === null) return;
     const div = document.createElement("div");
     div.className = "feed-item " + feedClass(e);
-    div.innerHTML = '<span class="ts">' + fmtClock(e.ts) + "</span>" + fn(e);
+    div.innerHTML = '<span class="ts">' + fmtClock(e.ts) + "</span>" + escapeHtml(text);
     const box = document.getElementById("feed-items");
     box.prepend(div);
     while (box.children.length > 80) box.removeChild(box.lastChild);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
   // ---------- Diagnostics-Tab (Kern, da klein) ----------
@@ -136,37 +156,7 @@ window.KGP = (() => {
     errBox.textContent = (h.errors && h.errors.length) ? h.errors.join("\n") : "keine";
   }
 
-  // ---------- Mission Control (M0: Telemetrie-Ansicht) ----------
-  function renderMission() {
-    const s = store.status;
-    const live = s && s.agentState !== "IDLE";
-    document.getElementById("mission-placeholder").classList.toggle("hidden", live);
-    document.getElementById("mission-live").classList.toggle("hidden", !live);
-    if (!live) return;
-
-    const eco = store.economy;
-    const strip = document.getElementById("safety-strip");
-    strip.innerHTML = "";
-    if (eco && eco.food) {
-      strip.appendChild(tile("Food-Sicherheit",
-        eco.food.reserveSeconds === null ? "stabil" : fmtDuration(eco.food.reserveSeconds),
-        "Worst-Winter " + fmtRate(eco.food.worstWinterNetPerSec) + "/s",
-        eco.food.safe ? "ok" : "crit"));
-    }
-    if (eco && eco.energy) {
-      const b = eco.energy.balance;
-      strip.appendChild(tile("Energie", fmtRate(b) + " Wt",
-        eco.energy.prod.toFixed(1) + " Prod / " + eco.energy.cons.toFixed(1) + " Verbrauch",
-        b >= 0 ? "ok" : "warn"));
-    }
-    if (store.population) {
-      const p = store.population;
-      strip.appendChild(tile("Bevölkerung", p.kittens + " / " + p.maxKittens,
-        "Happiness " + Math.round(p.happiness * 100) + "% · " + p.freeKittens + " frei",
-        "ok"));
-    }
-  }
-
+  // Wiederverwendbare Status-Kachel (Safety-/Status-Strips)
   function tile(label, val, sub, cls) {
     const div = document.createElement("div");
     div.className = "tile " + (cls || "");
@@ -184,15 +174,16 @@ window.KGP = (() => {
       const e = JSON.parse(msg.data);
       if (e.type === "hello") {
         applyStatus(e.payload.status);
-        (e.payload.recentEvents || []).forEach(addFeedItem);
+        (e.payload.recentEvents || []).forEach(ev => {
+          addFeedItem(ev);
+          routeEvent(ev, true);
+        });
+        renderAll();
       } else if (e.type === "state.snapshot") {
         applyStatus(e.payload);
       } else {
         addFeedItem(e);
-        if (e.type === "agent.state") {
-          if (store.status) store.status.agentState = e.payload.to;
-          renderAll();
-        }
+        routeEvent(e, false);
         eventHandlers.forEach(fn => fn(e));
       }
     };
@@ -202,18 +193,49 @@ window.KGP = (() => {
     };
   }
 
+  // Events in den Store einsortieren (silent=true beim Hello-Replay).
+  function routeEvent(e, silent) {
+    if (e.type === "decision.committed") {
+      store.currentDecision = e.payload;
+      store.decisions.unshift(e.payload);
+      if (store.decisions.length > 200) store.decisions.pop();
+    } else if (e.type === "execution.result") {
+      // Ergebnis in den passenden Journal-Eintrag zurückschreiben:
+      const d = store.decisions.find(x => x.decisionId === e.payload.decisionId);
+      if (d) {
+        d.execution = { state: e.payload.ok ? "COMPLETED" : "FAILED", method: e.payload.method, detail: e.payload.detail };
+        d.observed = e.payload.observed;
+      }
+      if (store.currentDecision && store.currentDecision.decisionId === e.payload.decisionId) {
+        store.currentDecision.execution = d ? d.execution : store.currentDecision.execution;
+        store.currentDecision.observed = e.payload.observed;
+      }
+    } else if (e.type === "plan.updated") {
+      store.plan = e.payload;
+    } else if (e.type === "agent.state") {
+      if (store.status) store.status.agentState = e.payload.to;
+    } else {
+      return;
+    }
+    if (!silent) renderAll();
+  }
+
   function applyStatus(payload) {
     if (!payload) return;
     store.status = payload.status;
     store.economy = payload.economy;
     store.population = payload.population;
     store.health = payload.health;
+    if (payload.currentDecision && !store.currentDecision) {
+      store.currentDecision = payload.currentDecision;
+      store.decisions.unshift(payload.currentDecision);
+    }
+    if (payload.plan) store.plan = payload.plan;
     renderAll();
   }
 
   function renderAll() {
     renderGlobalBar();
-    renderMission();
     renderDiagnostics();
     updateHandlers.forEach(fn => fn(store));
   }
@@ -245,6 +267,6 @@ window.KGP = (() => {
     store,
     onUpdate: fn => updateHandlers.push(fn),
     onEvent: fn => eventHandlers.push(fn),
-    fmtNum, fmtRate, fmtDuration, fmtClock,
+    fmtNum, fmtRate, fmtDuration, fmtClock, tile, escapeHtml,
   };
 })();

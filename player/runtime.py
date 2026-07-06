@@ -34,7 +34,9 @@ class PlayerRuntime:
         self.bus = bus
         self.store: SessionStore | None = None
         self.browser: GameBrowser | None = None
+        self.brain = None   # ab M1: player.brain.loop.Brain
         self._telemetry_task: asyncio.Task | None = None
+        self._brain_task: asyncio.Task | None = None
         self._save_task: asyncio.Task | None = None
         self._state = "IDLE"
         self._errors: list[str] = []
@@ -59,14 +61,30 @@ class PlayerRuntime:
         self._state = new_state
         self.bus.publish("agent.state", {"from": old, "to": new_state, "reason": reason})
 
+    # Öffentlich fürs Brain (PLANNING/EXECUTING/WAITING/DEGRADED-Wechsel):
+    def set_state(self, new_state: str, reason: str = "") -> None:
+        self._set_state(new_state, reason)
+
     def status_payload(self) -> dict:
         snap = self.last_snapshot or {}
         age = (time.time() - self.last_snapshot_ts) if self.last_snapshot_ts else None
+        run_info = None
+        current_action = None
+        plan = None
+        if self.brain is not None:
+            if self.brain.last_meta is not None:
+                mv = self.brain.last_meta
+                run_info = {"type": mv.run_type, "phase": mv.phase, "objective": mv.objective_label}
+                plan = self.brain._plan_payload(mv, self.brain.last_bottleneck)
+            if self.brain.last_record is not None:
+                current_action = self.brain.last_record.to_dict()
         return {
-            "status": viewmodels.status_vm(snap, self._state, self.version_guard),
+            "status": viewmodels.status_vm(snap, self._state, self.version_guard, run_info),
             "economy": viewmodels.economy_vm(snap) if snap else None,
             "population": viewmodels.population_vm(snap) if snap else None,
             "health": viewmodels.health_vm(self._state, age, self._errors),
+            "currentDecision": current_action,
+            "plan": plan,
         }
 
     # ------------------------------------------------------------------ Controls
@@ -91,7 +109,11 @@ class PlayerRuntime:
             self._telemetry_task = asyncio.create_task(self._telemetry_loop())
             if self.config.save_export_interval > 0:
                 self._save_task = asyncio.create_task(self._save_loop())
-            self._set_state("RUNNING", "Spiel geladen")
+            # Brain (Entscheidungsschleife) starten:
+            from player.brain.loop import Brain
+            self.brain = Brain(self)
+            self._brain_task = asyncio.create_task(self.brain.run())
+            self._set_state("RUNNING", "Spiel geladen — Agent aktiv")
         except Exception as exc:
             self._errors.append(str(exc))
             self.bus.publish("model.error", {"error": str(exc), "trace": traceback.format_exc()})
@@ -183,7 +205,7 @@ class PlayerRuntime:
             self.bus.publish("model.version_mismatch", self.version_guard)
 
     async def _teardown(self) -> None:
-        for task in (self._telemetry_task, self._save_task):
+        for task in (self._telemetry_task, self._brain_task, self._save_task):
             if task is not None:
                 task.cancel()
                 try:
@@ -191,7 +213,9 @@ class PlayerRuntime:
                 except (asyncio.CancelledError, Exception):
                     pass
         self._telemetry_task = None
+        self._brain_task = None
         self._save_task = None
+        self.brain = None
         if self.browser is not None:
             try:
                 await self.browser.stop()

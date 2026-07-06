@@ -50,23 +50,51 @@
     <div class="placeholder" id="mission-placeholder">
       <h2>Mission Control</h2>
       <p>Der Agent ist noch nicht gestartet. Mit <strong>▶ Start</strong> öffnet sich das
-      Spielfenster und die Live-Telemetrie beginnt.</p>
-      <p class="muted">Entscheidungslogik (Current Action, Begründungen, Kandidaten) kommt mit Meilenstein M1.</p>
+      Spielfenster und der Agent beginnt zu spielen.</p>
     </div>
     <div id="mission-live" class="hidden">
-      <div id="hero-card" class="card hero">
-        <div class="hero-top"><span class="hero-type" id="hero-type">TELEMETRIE</span>
-          <span class="hero-exec" id="hero-exec"></span></div>
-        <div class="hero-action" id="hero-action">Beobachte Spielzustand …</div>
-        <div class="hero-reason" id="hero-reason"></div>
+      <div class="mission-grid">
+        <div>
+          <div id="hero-card" class="card hero">
+            <div class="hero-top"><span class="hero-type" id="hero-type">–</span>
+              <span class="hero-exec" id="hero-exec"></span></div>
+            <div class="hero-action" id="hero-action">…</div>
+            <div class="hero-reason" id="hero-reason"></div>
+            <div class="hero-meta" id="hero-meta"></div>
+          </div>
+          <div class="card">
+            <h3>Missionskette <span class="muted small">warum diese Aktion?</span></h3>
+            <div id="causal-chain" class="causal"></div>
+          </div>
+          <div class="strip" id="safety-strip"></div>
+        </div>
+        <div>
+          <div class="card">
+            <h3>Meilensteine</h3>
+            <div id="milestone-strip"></div>
+          </div>
+          <div class="card">
+            <h3>Engpass</h3>
+            <div id="bottleneck-box" class="muted">–</div>
+          </div>
+        </div>
       </div>
-      <div class="strip" id="safety-strip"></div>
     </div>
   </section>
 
   <section id="tab-decisions" class="tab">
-    <div class="placeholder"><h2>Decisions</h2>
-      <p class="muted">Entscheidungsjournal und Decision Inspector kommen mit Meilenstein M1.</p></div>
+    <div class="card">
+      <h3>Entscheidungsjournal <span class="muted small">neueste zuerst — Zeile anklicken für Details</span></h3>
+      <table class="datatable" id="decision-journal">
+        <thead><tr><th>#</th><th>Zeit</th><th>Aktion</th><th class="num">Score</th>
+          <th>Begründung</th><th>Ergebnis</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card hidden" id="decision-inspector">
+      <h3>Decision Inspector <span class="muted small" id="di-id"></span></h3>
+      <div id="di-content"></div>
+    </div>
   </section>
 
   <section id="tab-economy" class="tab">
@@ -88,8 +116,14 @@
   </section>
 
   <section id="tab-plan" class="tab">
-    <div class="placeholder"><h2>Plan</h2>
-      <p class="muted">Phase Map und Zielhierarchie kommen mit Meilenstein M1/M3.</p></div>
+    <div class="card">
+      <h3>Zielhierarchie</h3>
+      <div id="plan-hierarchy" class="causal"></div>
+    </div>
+    <div class="card">
+      <h3>Meilenstein-Roadmap (Phase P0)</h3>
+      <div id="plan-milestones"></div>
+    </div>
   </section>
 
   <section id="tab-systems" class="tab">
@@ -122,5 +156,8 @@
 
 <script src="app.js"></script>
 <script src="tabs/economy.js"></script>
+<script src="tabs/mission.js"></script>
+<script src="tabs/decisions.js"></script>
+<script src="tabs/plan.js"></script>
 </body>
 </html>

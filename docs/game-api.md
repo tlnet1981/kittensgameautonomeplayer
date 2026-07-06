@@ -62,6 +62,23 @@ zuerst hier prüfen, welche Zugriffe sich geändert haben. Alle Zugriffe laufen
 | `game.tabs` | Tab-Liste `{tabId, visible}` — Grundlage für sichtbare Klick-Navigation |
 | `game.save()` + `localStorage['com.nuclearunicorn.kittengame.savedata']` | Save-Export (LZString) |
 
+## DOM-Selektoren (Actor, sichtbare Klicks)
+
+| Selektor | Bedeutung |
+|---|---|
+| `a.tab.<TabId>` | Spiel-Tabs (`Bonfire`, `Village`, `Science`, `Workshop`, `Trade`, `Religion`, `Space`, `Time`); aktiver Tab trägt zusätzlich `activeTab`; unsichtbare Tabs fehlen im DOM |
+| `div.btn` | alle Aktions-Buttons; deaktivierte tragen `disabled` |
+| `div.btn .btnTitle` | Button-Beschriftung (z. B. „Catnip field") — Matching per `startsWith` |
+
+Der Actor injiziert die CSS-Klasse `kgp-glow` (Cyan-Leuchtrahmen) vor jedem
+Klick — reine Show für den Zuschauer, keine Spielwirkung.
+
+JS-API-Aufrufe des Actors (wo DOM-Klicks unpraktisch sind):
+- Jobs: `game.village.getJob(name)`, `assignJob(job, amt)` (nur positive amt!),
+  `unassignJob(kitten)` mit Kitten aus `game.village.sim.kittens`
+- Jagd: `game.village.huntAll()` (Button „Send hunters" wird bevorzugt)
+- Craft: `game.workshop.craft(name, amt)` (respektiert Craft Ratio)
+
 ## Bekannte Stolpersteine
 
 - **Version ohne Punkte:** `telemetry.version` liefert `"1502"`, nicht `"1.5.0.2"` —
