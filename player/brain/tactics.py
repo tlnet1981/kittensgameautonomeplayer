@@ -79,7 +79,8 @@ WAIT_SCORE = 0.01
 
 # Reine Anzeige-Komponenten (Sekundenwerte der Schattenpreis-/CS-Rechnung) —
 # sie fließen NICHT additiv in den Score ein; netValue geht normiert ein.
-SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue")
+SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue",
+                    "tradeValue", "huntValue", "praiseValue")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -206,10 +207,10 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     if banking:
         _banking_candidates(snap, cands)
     _upgrade_candidates(snap, cands, lam)
-    _hunt_candidate(snap, cands)
+    _hunt_candidate(snap, cands, lam)
     _craft_candidates(snap, target, bn, cands, lam)
-    _trade_candidates(snap, bn, cands)
-    _praise_candidate(snap, cands)
+    _trade_candidates(snap, bn, cands, lam)
+    _praise_candidate(snap, cands, lam, horizon)
     _festival_candidate(snap, cands)
     _religion_candidates(snap, target, cands)
     _space_building_candidates(snap, bn, cands)
@@ -697,16 +698,70 @@ def _upgrade_candidates(snap, cands, lam=None) -> None:
 
 # ---------------------------------------------------------------- Jagd
 
-def _hunt_candidate(snap, cands) -> None:
+# Jagd-Ergebnisverteilung (Spec 14.2) — Referenzwerte Kittens Game 1.5.0.2,
+# village.js sendHuntersInternal, je 100 Catpower („Squad", ohne huntRatio-
+# Bonus aus Upgrades — der fehlt im Snapshot, konservativ Faktor 1.0):
+#   Furs:     immer, Menge rand(80) + 40          → E = 79.5
+#   Ivory:    P = 0.45 (rand(100) < 45), rand(50) + 25 → E = 49.5
+#   Unicorns: P = 0.005 (rand(1000) < 5), Menge 1
+HUNT_MANPOWER_COST = 100
+HUNT_FURS_EV = 79.5
+HUNT_IVORY_CHANCE = 0.45
+HUNT_IVORY_EV = 49.5
+HUNT_UNICORN_CHANCE = 0.005
+# EV-Timing (14.2): Cap-Puffer ≈ ein Entscheidungsintervall — droht Cap-
+# Verlust vorher, ist JETZT jagen besser als auf den größeren Batch warten.
+HUNT_CAP_BUFFER_S = 60.0
+# Batch-Vorteil des Wartens ≈ eine gesparte Aktion; erst wenn die λ-bewertete
+# Beute mehr Ziel-Sekunden bringt, lohnt die sofortige Jagd (Skala wie netValue).
+HUNT_VALUE_MIN_S = NET_VALUE_SCALE
+# Fallback-Schwelle ohne λ-Daten (Bestandsverhalten): jagen ab 85 % Füllstand.
+HUNT_FILL_FALLBACK = 0.85
+
+
+def _hunt_expected_yield(squads: int, lam: dict[str, float]) -> float:
+    """λ-bewerteter Erwartungswert der Jagdbeute in Ziel-Sekunden (14.2)."""
+    per_squad = (lam.get("furs", 0.0) * HUNT_FURS_EV
+                 + lam.get("ivory", 0.0) * HUNT_IVORY_CHANCE * HUNT_IVORY_EV
+                 + lam.get("unicorns", 0.0) * HUNT_UNICORN_CHANCE)
+    return squads * per_squad
+
+
+def _hunt_candidate(snap, cands, lam=None) -> None:
     mp = A.resource(snap, "manpower")
     if not mp or not A.job_unlocked(snap, "hunter") and A.job_count(snap, "hunter") == 0:
         # Jagd lohnt erst mit Catpower-Produktion
-        if not mp or mp["value"] < 100:
+        if not mp or mp["value"] < HUNT_MANPOWER_COST:
             return
     if mp.get("maxValue", 0) <= 0:
         return
     fill = mp["value"] / mp["maxValue"]
-    if fill >= 0.85 and mp["value"] >= 100:
+    cap_pressure = fill >= HUNT_FILL_FALLBACK and mp["value"] >= HUNT_MANPOWER_COST
+
+    if lam and mp["value"] >= HUNT_MANPOWER_COST:
+        # EV-Regel (Spec 14.2): Jagd = Trade mit bekannter Verteilung.
+        squads = int(mp["value"] // HUNT_MANPOWER_COST)
+        hunt_value = _hunt_expected_yield(squads, lam)
+        rate = mp.get("perSec", 0.0)
+        cap_time = ((mp["maxValue"] - mp["value"]) / rate
+                    if rate > A.RATE_EPS else math.inf)
+        if cap_pressure or cap_time < HUNT_CAP_BUFFER_S:
+            # Cap-Verlust droht: Warten verschenkt Catpower — sofort jagen.
+            comp = {"capLoss": 1.5}
+            if hunt_value > 1e-9:
+                comp["huntValue"] = hunt_value   # Sekundenwert, nur Anzeige
+            if A.res_value(snap, "furs") <= 0:
+                comp["economy"] = 0.3   # erster Pelz = Happiness-Schub
+            cands.append(Candidate(actions.hunt(), _score(comp), comp))
+        elif hunt_value > HUNT_VALUE_MIN_S:
+            # Beute ist dem Ziel JETZT mehr wert als der Batch-Vorteil des
+            # Wartens (EV(sofort) > EV(warten), Spec 14.2).
+            comp = {"economy": 1.3, "huntValue": hunt_value}
+            cands.append(Candidate(actions.hunt(), _score(comp), comp))
+        return
+
+    # Fallback ohne λ-Daten (Bestandsverhalten): 85-%-Schwelle.
+    if cap_pressure:
         comp = {"capLoss": 1.5}
         if A.res_value(snap, "furs") <= 0:
             comp["economy"] = 0.3   # erster Pelz = Happiness-Schub
@@ -871,11 +926,64 @@ def _space_building_candidates(snap, bn, cands) -> None:
 # Fixkosten jedes Trades (zusätzlich zur rassespezifischen Ware):
 TRADE_GOLD_COST = 15
 TRADE_MANPOWER_COST = 50
+# Erwartungsmengen-Formel (Spec 14.1) — Referenzwerte Kittens Game 1.5.0.2,
+# diplomacy.js tradeImpl:
+#   E[Menge] = value · (1 + seasons[saison]) · (1 + tradeRatio)
+#              · chance/100 · Standing-Faktor
+# tradeRatio-Effekt = +1 % Erfolgsmenge pro Trade Ship;
+# hostile:  P(Trade gelingt) = standing + standingRatio/100 (geklemmt [0,1]);
+# friendly: Bonus-Chance = standing + standingRatio/200 → Menge ×1.25.
+# Was der Snapshot nicht liefert (seasons/standing/tradeRatio), wird
+# konservativ mit Faktor 1.0 bzw. Modifikator 0.0 angesetzt.
+TRADE_SHIP_RATIO = 0.01
+TRADE_FRIENDLY_BONUS = 0.25
 
 
-def _trade_candidates(snap, bn, cands) -> None:
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+
+def _trade_expected_yield(snap, race: dict, diplo: dict) -> dict[str, float]:
+    """Erwartete Menge je Ressource für EINEN Trade (Ergebnisverteilung 14.1)."""
+    season = snap.get("calendar", {}).get("seasonName", "")
+    trade_ratio = diplo.get("tradeRatio")
+    if trade_ratio is None:
+        # Fallback: +1 % pro Trade Ship (Referenz 1.5.0.2, „tradeRatio"-Effekt).
+        trade_ratio = TRADE_SHIP_RATIO * A.res_value(snap, "ship")
+    standing_ratio = diplo.get("standingRatio") or 0.0
+    attitude = race.get("attitude") or "neutral"
+    standing = race.get("standing") or 0.0
+    success, bonus = 1.0, 1.0
+    if attitude == "hostile":
+        success = _clamp01(standing + standing_ratio / 100.0)
+    elif attitude == "friendly":
+        bonus = 1.0 + TRADE_FRIENDLY_BONUS * _clamp01(standing + standing_ratio / 200.0)
+    out: dict[str, float] = {}
+    for s in race.get("sells", []):
+        season_mod = (s.get("seasons") or {}).get(season, 0.0) or 0.0
+        chance = _clamp01((s.get("chance") or 0.0) / 100.0)
+        amount = ((s.get("value") or 0.0) * (1.0 + season_mod)
+                  * (1.0 + trade_ratio) * chance * success * bonus)
+        if amount > 0:
+            out[s["name"]] = out.get(s["name"], 0.0) + amount
+    return out
+
+
+def _trade_value(snap, race: dict, diplo: dict, lam: dict[str, float]) -> float:
+    """TradeValue(race) = Σ_o P(o|race,state)·Value(o) − Value(costs) in
+    Ziel-Sekunden (Spec 14.1); Value über Schattenpreise λ. Kosten sind die
+    Fixkosten (Gold/Catpower) plus die verkaufte Ware (buys)."""
+    gain = sum(lam.get(res, 0.0) * amt
+               for res, amt in _trade_expected_yield(snap, race, diplo).items())
+    costs = ([{"name": "gold", "val": TRADE_GOLD_COST},
+              {"name": "manpower", "val": TRADE_MANPOWER_COST}]
+             + [{"name": p["name"], "val": p["val"]} for p in race.get("buys", [])])
+    return gain - shadow.cost_time(costs, lam)
+
+
+def _trade_candidates(snap, bn, cands, lam=None) -> None:
     diplo = snap.get("diplomacy", {})
-    races = diplo.get("races", [])
+    races = A.races(snap)
     gold = A.res_value(snap, "gold")
     manpower = A.res_value(snap, "manpower")
 
@@ -901,22 +1009,31 @@ def _trade_candidates(snap, bn, cands) -> None:
                     actions.trade("leviathans", race["title"], batch), 1.7,
                     {"economy": 1.7}))
             continue
-        # TradeValue-light (Spec 14.1): Handel nur, wenn die Rasse den
-        # aktuellen Engpass liefert. EV-Rechnung folgt mit späterem Ausbau.
         sells_bottleneck = bn and bn.get("resource") and any(
             s["name"] == bn["resource"] for s in race.get("sells", []))
-        if not sells_bottleneck:
+        trade_val = None
+        if lam:
+            # TradeValue-EV (Spec 14.1): Handel nur bei positivem
+            # Erwartungswert über die Ergebnisverteilung.
+            trade_val = _trade_value(snap, race, diplo, lam)
+            if trade_val <= 0:
+                continue
+        elif not sells_bottleneck:
+            # Fallback ohne λ-Daten (TradeValue-light, Bestandsverhalten):
+            # Handel nur, wenn die Rasse den aktuellen Engpass liefert.
             continue
         batch = int(min(gold // TRADE_GOLD_COST, manpower // TRADE_MANPOWER_COST, 5))
         for p in race.get("buys", []):
             have = A.res_value(snap, p["name"])
             batch = int(min(batch, have // p["val"])) if p["val"] else batch
         if batch >= 1:
-            comp = {"bottleneck": 1.7}
+            comp = {"bottleneck": 1.7} if sells_bottleneck else {"economy": 0.9}
+            if trade_val is not None:
+                comp["tradeValue"] = trade_val * batch   # Sekundenwert, Anzeige
             _apply_food_risk(snap, comp, race.get("buys", []))
             cands.append(Candidate(
                 actions.trade(race["name"], race["title"], batch),
-                sum(comp.values()), comp,
+                _score(comp), comp,
             ))
 
     # Gold am Cap ist verschenkter Handelsspielraum (Cap-Regel 11.4):
@@ -938,15 +1055,20 @@ def _trade_candidates(snap, bn, cands) -> None:
 
 # ---------------------------------------------------------------- Religion / Festival
 
-def _praise_candidate(snap, cands) -> None:
+# EV-Timing Praise (Spec 15.1): Cap-Puffer ≈ ein Entscheidungsintervall —
+# läuft Faith vorher ans Cap, verfällt Produktion; Fallback-Schwelle 95 %.
+PRAISE_CAP_BUFFER_S = 60.0
+PRAISE_FILL_FALLBACK = 0.95
+
+
+def _praise_candidate(snap, cands, lam=None, horizon=None) -> None:
     # Faith am Cap verfällt — Praise wandelt sie in dauerhaften Worship (15.1).
     faith = A.resource(snap, "faith")
     if not faith or faith.get("maxValue", 0) <= 0:
         return
-    if faith["value"] / faith["maxValue"] < 0.95:
-        return
-    # Aber: Faith ist auch Kaufwährung der Religion-Upgrades. Solange ein
-    # erreichbares (Cap reicht) Upgrade offen ist, wird gespart statt gepriesen.
+    # Sparregel (absoluter Vorrang, unverändert): Faith ist auch Kaufwährung
+    # der Religion-Upgrades. Solange ein erreichbares (Cap reicht) Upgrade
+    # offen ist, wird gespart statt gepriesen.
     cap = faith["maxValue"]
     for u in snap.get("religion", {}).get("upgrades", []):
         if not u["unlocked"] or (u["noStackable"] and (u["on"] or u["val"])):
@@ -954,6 +1076,34 @@ def _praise_candidate(snap, cands) -> None:
         price = next((p["val"] for p in u["prices"] if p["name"] == "faith"), None)
         if price is not None and price <= cap:
             return
+
+    fill = faith["value"] / cap
+    if lam:
+        # EV-Regel (Spec 15.1): Praise nur, wenn Cap-Verlust wirklich droht
+        # (Cap-Zeit unter dem Entscheidungspuffer oder Fallback-Füllstand) …
+        rate = faith.get("perSec", 0.0)
+        cap_time = ((cap - faith["value"]) / rate
+                    if rate > A.RATE_EPS else math.inf)
+        if fill < PRAISE_FILL_FALLBACK and cap_time >= PRAISE_CAP_BUFFER_S:
+            return
+        lam_f = lam.get("faith", 0.0)
+        if lam_f > 0.0:
+            # … und der integrierte Produktionsgewinn (vermiedene Cap-
+            # Verlustrate × λ_faith über den Horizont) den Wert des Haltens
+            # (λ_faith × Bestand — das Ziel braucht die Faith) übersteigt.
+            gain = lam_f * max(0.0, rate) * (horizon or shadow.HORIZON_MIN)
+            hold = lam_f * faith["value"]
+            if gain <= hold:
+                return
+            comp = {"capLoss": 1.5, "praiseValue": gain - hold}  # s-Wert, Anzeige
+            cands.append(Candidate(actions.praise(), _score(comp), comp))
+            return
+        cands.append(Candidate(actions.praise(), 1.5, {"capLoss": 1.5}))
+        return
+
+    # Fallback ohne λ-Daten (Bestandsverhalten): 95-%-Schwelle.
+    if fill < PRAISE_FILL_FALLBACK:
+        return
     cands.append(Candidate(actions.praise(), 1.5, {"capLoss": 1.5}))
 
 
@@ -1058,6 +1208,9 @@ REASON_TEMPLATES = {
     "costTime": "{label} kostet Ziel-Sekunden (Schattenpreis-Bewertung).",
     "jobScore": "{label} maximiert den Zielzeitgewinn pro Kitten (JobScore 12.2).",
     "csValue": "{label}: Carryover-Sekundenwert der nächsten Chronosphere (CS-Suche 19.1).",
+    "tradeValue": "{label}: positiver Handels-Erwartungswert über die Ergebnisverteilung (TradeValue 14.1).",
+    "huntValue": "{label}: erwartete Beute ist jetzt mehr wert als das Warten auf einen größeren Batch (14.2).",
+    "praiseValue": "{label}: drohender Faith-Cap-Verlust wiegt schwerer als das Halten (15.1).",
     "base": "{label}",
 }
 

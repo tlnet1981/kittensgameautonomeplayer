@@ -18,6 +18,9 @@ def make_snap(
     season: str = "spring",
     catnip_field_base: float = 0.0,
     crafts: list[dict] | None = None,
+    races: list[dict] | None = None,
+    trade_ratio: float = 0.0,
+    standing_ratio: float = 0.0,
 ) -> dict[str, Any]:
     """Erzeugt einen Snapshot im Format von driver/snapshot.js (inkl. derived)."""
     res_list = []
@@ -73,4 +76,11 @@ def make_snap(
         "effects": {"catnipPerTickBase": catnip_field_base / 5},
         "tabs": [],
     }
+    # Optionale Diplomacy-Daten (Format wie snapshot.js): nur setzen, wenn
+    # der Test races übergibt — Alt-Tests bleiben unverändert (kein Key).
+    if races is not None:
+        snap["diplomacy"] = {
+            "undiscovered": False, "races": races,
+            "standingRatio": standing_ratio, "tradeRatio": trade_ratio,
+        }
     return derive(snap)

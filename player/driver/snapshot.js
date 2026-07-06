@@ -203,18 +203,37 @@
     });
 
     section("diplomacy", () => {
-        out.diplomacy = { races: [], undiscovered: false };
+        out.diplomacy = { races: [], undiscovered: false, standingRatio: 0, tradeRatio: 0 };
         if (g.diplomacy && g.diplomacy.races) {
+            // Globale Handelsboni (diplomacy.js tradeImpl, 1.5.0.2):
+            // standingRatio verbessert Standing-Würfe (Tradeposts/Perks),
+            // tradeRatio erhöht die Erfolgsmenge (+1 % pro Trade Ship).
+            try { out.diplomacy.standingRatio = g.getEffect("standingRatio") || 0; } catch (e) { /* optional */ }
+            try { out.diplomacy.tradeRatio = g.getEffect("tradeRatio") || 0; } catch (e) { /* optional */ }
             for (const r of g.diplomacy.races) {
                 if (!r.unlocked) { out.diplomacy.undiscovered = true; continue; }
                 out.diplomacy.races.push({
                     name: r.name,
                     title: r.title,
+                    unlocked: !!r.unlocked,
+                    // Standing-Daten für die EV-Rechnung (Spec 14.1):
+                    // attitude "friendly"|"neutral"|"hostile", standing = Wurf-Basis.
+                    attitude: r.attitude || null,
+                    standing: (typeof r.standing === "number") ? r.standing : 0,
+                    embassyLevel: r.embassyLevel || 0,
                     // Was die Rasse pro Trade verlangt (zusätzlich zu 15 Gold + 50 Catpower):
                     buys: (r.buys || []).map(p => ({ name: p.name, val: p.val })),
-                    // Was sie liefert (value = Menge pro Trade, chance in %):
+                    // Was sie liefert (value = Menge pro Trade, chance in %,
+                    // seasons = additive Saison-Modifikatoren, delta = Streuung):
                     sells: (r.sells || []).map(s => ({
                         name: s.name, value: s.value, chance: s.chance,
+                        delta: (typeof s.delta === "number") ? s.delta : null,
+                        seasons: (s.seasons && typeof s.seasons === "object") ? {
+                            spring: +s.seasons.spring || 0,
+                            summer: +s.seasons.summer || 0,
+                            autumn: +s.seasons.autumn || 0,
+                            winter: +s.seasons.winter || 0,
+                        } : null,
                     })),
                 });
             }

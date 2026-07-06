@@ -68,6 +68,18 @@ def craft_recipe(snap: dict, name: str) -> dict | None:
     return None
 
 
+def races(snap: dict) -> list[dict]:
+    """Freigeschaltete Handelspartner aus der Diplomacy-Sektion."""
+    return snap.get("diplomacy", {}).get("races", [])
+
+
+def race(snap: dict, name: str) -> dict | None:
+    for r in races(snap):
+        if r["name"] == name:
+            return r
+    return None
+
+
 def job_count(snap: dict, name: str) -> int:
     for j in snap.get("village", {}).get("jobs", []):
         if j["name"] == name:
