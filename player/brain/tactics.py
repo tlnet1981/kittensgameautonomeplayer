@@ -20,7 +20,7 @@ from typing import Any
 
 from player.state import access as A
 from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
-from . import actions
+from . import actions, shadow
 from .records import Candidate
 
 # Verbrauch eines Kittens (0,85 Catnip/Tick × 5 Ticks/s), Fallback für die
@@ -76,6 +76,30 @@ CAP_RELIEF_CRAFTS = {
 }
 
 WAIT_SCORE = 0.01
+
+# Reine Anzeige-Komponenten (Sekundenwerte der Schattenpreis-Rechnung) —
+# sie fließen NICHT additiv in den Score ein; netValue geht normiert ein.
+SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore")
+# Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
+# Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
+NET_VALUE_SCALE = 60.0
+NET_VALUE_CLAMP = 1.2
+# Mindest-Zielzeitgewinn (JobScore-Differenz), ab dem sich eine
+# Umschulung lohnt (Anti-Thrashing, Spec 12.2 Schritt 7):
+REBALANCE_GAIN_MIN = 1.0
+# Feste Job-Reihenfolge für deterministische Auswertung/Tie-Breaks:
+JOB_ORDER = ("woodcutter", "farmer", "scholar", "miner",
+             "hunter", "geologist", "priest")
+
+
+def _score(comp: dict[str, float]) -> float:
+    """Score aus Komponenten: Sekundenwerte (SHADOW_INFO_KEYS) zählen nicht
+    additiv; netValue geht normiert ein (Kaufregel 10.3, NetValue primär)."""
+    s = sum(v for k, v in comp.items() if k not in SHADOW_INFO_KEYS)
+    if "netValue" in comp:
+        s += max(-NET_VALUE_CLAMP, min(NET_VALUE_CLAMP,
+                                       comp["netValue"] / NET_VALUE_SCALE))
+    return s
 
 
 def fmt_duration(sec: float | None) -> str:
@@ -166,16 +190,24 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     banking = _kitten_banking_mode(snap, bn)
     reserved = _reserved_resource(snap, bn, banking)
 
+    # Schattenpreise EINMAL pro Zyklus am aktiven Meilenstein-Ziel (10.2);
+    # ohne Preisvektor bleiben die Dicts leer → überall Fallback-Heuristik.
+    goal_prices = _target_prices(snap, target)
+    lam = shadow.shadow_prices(snap, goal_prices) if goal_prices else {}
+    lam_rate = shadow.rate_shadow_prices(snap, goal_prices) if goal_prices else {}
+    horizon = shadow.run_horizon(snap)
+
     _milestone_candidate(snap, target, bn, cands, blocked)
-    _job_candidates(snap, bn, cands)
+    _job_candidates(snap, bn, cands, lam_rate)
     _gather_candidates(snap, target, bn, cands)
-    _research_candidates(snap, target, cands)
-    _building_candidates(snap, target, bn, cands, blocked, reserved, banking)
+    _research_candidates(snap, target, cands, lam)
+    _building_candidates(snap, target, bn, cands, blocked, reserved, banking,
+                         lam, horizon)
     if banking:
         _banking_candidates(snap, cands)
-    _upgrade_candidates(snap, cands)
+    _upgrade_candidates(snap, cands, lam)
     _hunt_candidate(snap, cands)
-    _craft_candidates(snap, target, bn, cands)
+    _craft_candidates(snap, target, bn, cands, lam)
     _trade_candidates(snap, bn, cands)
     _praise_candidate(snap, cands)
     _festival_candidate(snap, cands)
@@ -273,17 +305,17 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
 
 # ---------------------------------------------------------------- Jobs
 
-def _job_candidates(snap, bn, cands) -> None:
+def _job_candidates(snap, bn, cands, lam_rate=None) -> None:
     village = snap.get("village", {})
     free = village.get("freeKittens", 0)
     food = snap.get("derived", {}).get("food", {})
     food_tight = food.get("status", "ok") != "ok"
 
     if free <= 0:
-        _job_rebalance_candidate(snap, bn, cands, village, food_tight)
+        _job_rebalance_candidate(snap, bn, cands, village, food_tight, lam_rate)
         return
 
-    # Food zuerst stabilisieren, wenn die Winter-Projektion angespannt ist:
+    # Mindestfarmer-/Food-Leitplanke hat VORRANG vor jeder λ-Bewertung:
     if food_tight and A.job_unlocked(snap, "farmer"):
         cands.append(Candidate(
             actions.assign_job("farmer", "Farmer", 1), 2.6,
@@ -291,33 +323,47 @@ def _job_candidates(snap, bn, cands) -> None:
         ))
         return
 
-    # Sonst: Job, der den Engpass produziert; ohne Engpass ausgewogen
-    # verteilen (den am dünnsten besetzten Basisjob auffüllen).
+    # JobScore-Zuweisung (Spec 12.2): freies Kitten dem Job mit dem
+    # höchsten positiven Zielzeitgewinn pro Sekunde. Ohne λ-Daten (leere
+    # Preise / keine Rate) Fallback: Engpass-Mapping, dann Balance.
     job = None
-    src = "Engpass"
-    if bn and bn.get("resource"):
-        job = RESOURCE_JOB.get(bn["resource"])
-    if not job or not A.job_unlocked(snap, job):
-        src = "Balance"
-        unlocked = [j for j in ("woodcutter", "farmer", "scholar", "miner",
-                                "hunter", "geologist", "priest")
-                    if A.job_unlocked(snap, j)]
-        if unlocked:
-            job = min(unlocked, key=lambda j: (A.job_count(snap, j), unlocked.index(j)))
+    src = None
+    job_sc = 0.0
+    if lam_rate:
+        scored = [(shadow.job_score(snap, j, lam_rate), j)
+                  for j in JOB_ORDER if A.job_unlocked(snap, j)]
+        scored = [(s, j) for s, j in scored if s > 1e-9]
+        if scored:
+            scored.sort(key=lambda t: (-t[0], t[1]))   # deterministisch
+            job_sc, job = scored[0]
+            src = "JobScore"
+    if not job:
+        src = "Engpass"
+        if bn and bn.get("resource"):
+            job = RESOURCE_JOB.get(bn["resource"])
+        if not job or not A.job_unlocked(snap, job):
+            src = "Balance"
+            unlocked = [j for j in JOB_ORDER if A.job_unlocked(snap, j)]
+            if unlocked:
+                job = min(unlocked, key=lambda j: (A.job_count(snap, j), unlocked.index(j)))
     if job:
         label = next((j["title"] for j in village.get("jobs", []) if j["name"] == job), job)
-        cands.append(Candidate(
-            actions.assign_job(job, label, 1), 2.4,
-            {"jobValue": 2.4},
-        ))
+        comp = {"jobValue": 2.4}
+        if src == "JobScore":
+            comp["jobScore"] = job_sc          # Sekundenwert, nur Anzeige
+        cands.append(Candidate(actions.assign_job(job, label, 1), 2.4, comp))
         if src == "Engpass":
             cands[-1].components["bottleneck"] = 0.0  # nur Anzeige-Marker
 
 
-def _job_rebalance_candidate(snap, bn, cands, village, food_tight) -> None:
+def _job_rebalance_candidate(snap, bn, cands, village, food_tight,
+                             lam_rate=None) -> None:
     """Lokale Tauschoperation (Spec 12.2 Schritt 7): Der Engpass-Job ist
     komplett unbesetzt und es gibt keine freien Kitten → ein Kitten aus dem
-    größten anderen Job umschulen. `job_count == 0` verhindert Thrashing."""
+    größten anderen Job umschulen. `job_count == 0` verhindert Thrashing
+    (höchstens ein Tausch-Kandidat pro Zyklus). Mit λ-Daten zusätzlich:
+    der Tausch muss sich lohnen — JobScore(Ziel) − JobScore(Spender) >
+    REBALANCE_GAIN_MIN; ohne λ-Daten bleibt das bisherige Verhalten."""
     if not bn or not bn.get("resource"):
         return
     job = RESOURCE_JOB.get(bn["resource"])
@@ -329,10 +375,16 @@ def _job_rebalance_candidate(snap, bn, cands, village, food_tight) -> None:
     if not donors:
         return
     biggest = max(donors, key=lambda j: (j["value"], j["name"]))
+    comp = {"jobValue": 1.2, "bottleneck": 1.0}
+    if lam_rate:
+        gain = shadow.job_score(snap, job, lam_rate)
+        loss = shadow.job_score(snap, biggest["name"], lam_rate)
+        if gain - loss <= REBALANCE_GAIN_MIN:
+            return   # Tausch lohnt sich nicht (Anti-Thrashing)
+        comp["jobScore"] = gain - loss         # Sekundenwert, nur Anzeige
     label = next((j["title"] for j in village.get("jobs", []) if j["name"] == job), job)
     cands.append(Candidate(
-        actions.shift_job(biggest["name"], job, label, 1), 2.2,
-        {"jobValue": 1.2, "bottleneck": 1.0},
+        actions.shift_job(biggest["name"], job, label, 1), 2.2, comp,
     ))
 
 
@@ -362,7 +414,7 @@ def _gather_candidates(snap, target, bn, cands) -> None:
 
 # ---------------------------------------------------------------- Forschung
 
-def _research_candidates(snap, target, cands) -> None:
+def _research_candidates(snap, target, cands, lam=None) -> None:
     target_name = target.get("name") if target and target["kind"] == "research" else None
     affordable_techs = []
     for t in snap.get("science", {}).get("techs", []):
@@ -374,8 +426,13 @@ def _research_candidates(snap, target, cands) -> None:
     # Determinismus: billigste zuerst, dann Name.
     affordable_techs.sort(key=lambda t: (sum(p["val"] for p in t["prices"]), t["name"]))
     for t in affordable_techs[:2]:
-        cands.append(Candidate(actions.research(t["name"], t["label"]), 1.9,
-                               {"unlock": 1.9}))
+        comp = {"unlock": 1.9}
+        # Sekundenkosten transparent machen — Unlocks werden aber nie durch
+        # die Payback-Regel gesperrt (Spec 10.4), der Score bleibt fix:
+        ct = shadow.cost_time(t["prices"], lam) if lam else 0.0
+        if ct > 1e-9:
+            comp["costTime"] = ct
+        cands.append(Candidate(actions.research(t["name"], t["label"]), 1.9, comp))
 
 
 # ---------------------------------------------------------------- Gebäude
@@ -400,10 +457,11 @@ def _banking_candidates(snap, cands) -> None:
 
 
 def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
-                         banking=False) -> None:
+                         banking=False, lam=None, horizon=None) -> None:
     target_name = target.get("name") if target and target["kind"] == "build" else None
     prices_target = _target_prices(snap, target)
     cap_blocked_res = A.cap_blocks(snap, prices_target) if prices_target else None
+    horizon = horizon if horizon is not None else shadow.HORIZON_MIN
 
     for b in snap.get("buildings", []):
         name = b["name"]
@@ -466,6 +524,32 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         else:
             comp["economy"] = 0.6      # generischer Ausbau
 
+        # --- Schattenpreis-Ökonomie (Spec 10.2–10.4) für Produktionsgebäude:
+        # Sekundenwerte als transparente Komponenten; NetValue fließt über
+        # _score normiert ein. Safety-/Unlock-/Energie-/Storage-/Housing-
+        # Käufe und der Banking-Modus bleiben unberührt (Vorrangregeln).
+        if lam and not banking and name in BUILDING_PRODUCES \
+                and not any(k in comp for k in ("storage", "energy", "housing")):
+            rate_delta = _building_rate_delta(snap, name, BUILDING_PRODUCES[name])
+            cost_t = shadow.cost_time(b["prices"], lam)
+            ben_t = shadow.benefit_time(rate_delta, lam, horizon)
+            if cost_t > 1e-9 or ben_t > 1e-9:
+                comp["costTime"] = cost_t
+                comp["benefitTime"] = ben_t
+                comp["netValue"] = shadow.net_value(ben_t, cost_t)
+                # Payback-Gate (10.4): NUR reine Produktions-/Ökonomiekäufe.
+                # Engpasslöser gelten als zwingende Dependency des Ziels.
+                if "bottleneck" not in comp and cost_t > 1e-9:
+                    pb = shadow.payback(cost_t, ben_t / horizon)
+                    if pb > horizon:
+                        cands.append(Candidate(
+                            actions.buy_building(name, b["label"], b["val"]),
+                            0.0, dict(comp), feasible=False,
+                            reject_reason=(f"Payback {fmt_duration(pb)} > "
+                                           f"Run-Horizont {fmt_duration(horizon)} "
+                                           f"(Payback-Regel 10.4)")))
+                        continue
+
         # Opportunitätskosten: Kauf verbraucht die für den Engpass reservierte
         # Ressource (z. B. Catnip, das eigentlich zu Holz veredelt werden muss).
         # Die Strafe drückt generische Käufe unter Null — und Aktionen mit
@@ -479,8 +563,30 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         # aus safety.py und trägt diese Strafe nicht.)
         _apply_food_risk(snap, comp, b["prices"])
 
-        score = sum(comp.values())
+        score = _score(comp)
         cands.append(Candidate(actions.buy_building(name, b["label"], b["val"]), score, comp))
+
+
+def _building_rate_delta(snap, name: str, produces: str) -> dict[str, float]:
+    """Geschätzter Produktionszuwachs des nächsten Exemplars (Näherung):
+    - field: bekannte Basisrate × aktueller Saisonmodifikator
+    - pasture: senkt den Verbrauch um 0,5 % des Catnip-Bedarfs
+    - sonst: beobachtete Netto-Rate / Gebäudeanzahl; erstes Exemplar ohne
+      Bestandsdaten ≈ +10 % der laufenden Produktion (Ratio-Gebäude).
+    Ohne Rate: leer → benefit_time = 0, Fallback greift."""
+    if name == "field":
+        mod = snap.get("calendar", {}).get("currentCatnipModifier", 1.0) or 1.0
+        return {"catnip": CATNIP_PER_FIELD_PER_SEC * mod}
+    if name == "pasture":
+        demand = snap.get("derived", {}).get("food", {}).get("demandPerSec", 0.0)
+        return {"catnip": 0.005 * demand} if demand > 0 else {}
+    val = A.bld_val(snap, name)
+    rate = A.res_rate(snap, produces)
+    if rate <= 0:
+        return {}
+    if val >= 1:
+        return {produces: rate / val}
+    return {produces: rate * 0.1}
 
 
 def _apply_food_risk(snap, comp: dict, prices: list[dict]) -> None:
@@ -560,13 +666,18 @@ def _bottleneck_near_cap(snap, bn) -> bool:
 
 # ---------------------------------------------------------------- Upgrades
 
-def _upgrade_candidates(snap, cands) -> None:
+def _upgrade_candidates(snap, cands, lam=None) -> None:
     ups = [u for u in snap.get("workshop", {}).get("upgrades", [])
            if u["unlocked"] and not u["researched"] and A.affordable(snap, u["prices"])]
     ups.sort(key=lambda u: (sum(p["val"] for p in u["prices"]), u["name"]))
     for u in ups[:2]:
-        cands.append(Candidate(actions.buy_upgrade(u["name"], u["label"]), 1.4,
-                               {"unlock": 1.4}))
+        comp = {"unlock": 1.4}
+        # Sekundenkosten nur als Transparenz — Unlocks unterliegen nicht der
+        # Payback-Regel (Spec 10.4):
+        ct = shadow.cost_time(u["prices"], lam) if lam else 0.0
+        if ct > 1e-9:
+            comp["costTime"] = ct
+        cands.append(Candidate(actions.buy_upgrade(u["name"], u["label"]), 1.4, comp))
 
 
 # ---------------------------------------------------------------- Jagd
@@ -589,7 +700,7 @@ def _hunt_candidate(snap, cands) -> None:
 
 # ---------------------------------------------------------------- Crafts
 
-def _craft_candidates(snap, target, bn, cands) -> None:
+def _craft_candidates(snap, target, bn, cands, lam=None) -> None:
     prices_target = _target_prices(snap, target) or []
 
     # a) Kaskadierendes Crafting Richtung Meilenstein (Craft-Graph 11.2 light):
@@ -601,7 +712,8 @@ def _craft_candidates(snap, target, bn, cands) -> None:
         if A.craft_recipe(snap, p["name"]) is not None:
             gap = p["val"] - A.res_value(snap, p["name"])
             if gap > 0:
-                _craft_toward(snap, p["name"], gap, cands, depth=0, seen=seen)
+                _craft_toward(snap, p["name"], gap, cands, depth=0, seen=seen,
+                              lam=lam)
 
     # b) Cap-Verlust am Input vermeiden (11.4):
     for input_res, craft_name in CAP_RELIEF_CRAFTS.items():
@@ -622,7 +734,7 @@ def _craft_candidates(snap, target, bn, cands) -> None:
 
 
 def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
-                  seen: set[str]) -> None:
+                  seen: set[str], lam=None) -> None:
     """Rekursiver Abstieg im Craft-Graphen (max. Tiefe 4)."""
     if depth > 4 or craft_name in seen:
         return
@@ -638,13 +750,26 @@ def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
              for q in recipe["prices"] if q["val"] > 0), default=1)
         batch = max(1, min(10, int(max_by_inputs), math.ceil(gap)))
         score = max(0.5, 2.0 - 0.1 * depth)
+        comp = {"milestone": score}
+        # Sekundenwerte transparent machen (Score bleibt fix — Crafts der
+        # Meilenstein-Kaskade sind zwingende Dependencies, Spec 10.4):
+        if lam:
+            cost_t = shadow.cost_time(
+                [{"name": q["name"], "val": q["val"] * batch}
+                 for q in recipe["prices"]], lam)
+            ben_t = lam.get(craft_name, 0.0) * batch
+            if cost_t > 1e-9 or ben_t > 1e-9:
+                comp["costTime"] = cost_t
+                comp["benefitTime"] = ben_t
+                comp["netValue"] = shadow.net_value(ben_t, cost_t)
         cands.append(Candidate(actions.craft(craft_name, recipe["label"], batch),
-                               score, {"milestone": score}))
+                               score, comp))
         return
     # Inputs fehlen → craftbare Inputs eine Ebene tiefer anstoßen
     for m in missing:
         if A.craft_recipe(snap, m["name"]) is not None:
-            _craft_toward(snap, m["name"], m["missing"], cands, depth + 1, seen)
+            _craft_toward(snap, m["name"], m["missing"], cands, depth + 1, seen,
+                          lam=lam)
 
 
 # ---------------------------------------------------------------- Religion
@@ -913,6 +1038,10 @@ REASON_TEMPLATES = {
     "economy": "{label} ist eine günstige Ökonomie-Investition.",
     "happiness": "{label}: Happiness wirkt als Multiplikator auf die gesamte Produktion.",
     "energy": "{label}: das Energie-Defizit drosselt die Produktion (Invariante I-04).",
+    "netValue": "{label} spart netto Zielzeit (Schattenpreis-Bewertung 10.2/10.3).",
+    "benefitTime": "{label} beschleunigt das Ziel (Benefit in Ziel-Sekunden).",
+    "costTime": "{label} kostet Ziel-Sekunden (Schattenpreis-Bewertung).",
+    "jobScore": "{label} maximiert den Zielzeitgewinn pro Kitten (JobScore 12.2).",
     "base": "{label}",
 }
 
