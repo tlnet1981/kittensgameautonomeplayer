@@ -61,6 +61,13 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": f"Unbekanntes Kommando: {cmd}"}, status_code=400)
         return JSONResponse({"ok": True, "state": runtime.state})
 
+    @app.post("/api/frontier/dismiss")
+    async def frontier_dismiss(payload: dict) -> JSONResponse:
+        """Ausbaugrenzen-Hinweis quittieren (kommt nicht wieder)."""
+        fid = payload.get("id", "")
+        runtime.frontier_dismiss(fid)
+        return JSONResponse({"ok": True, "active": runtime.frontier_active()})
+
     @app.post("/api/debug/eval")
     async def debug_eval(payload: dict) -> JSONResponse:
         """Debug/Test: beliebiges JS im Spielkontext ausführen (nur localhost).

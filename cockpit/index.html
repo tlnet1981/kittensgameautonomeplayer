@@ -34,6 +34,30 @@
   </div>
 </header>
 
+<!-- ============ AUSBAUGRENZEN-BANNER + POPUP ============ -->
+<div id="frontier-banner" class="hidden">
+  ⚠ <span id="frontier-banner-text"></span>
+  <button id="frontier-banner-open" class="ctl">Details</button>
+</div>
+
+<div id="frontier-overlay" class="hidden">
+  <div class="frontier-modal">
+    <h2 id="fr-title">–</h2>
+    <div class="fr-section"><h4>Was passiert gerade?</h4><p id="fr-happening"></p></div>
+    <div class="fr-section"><h4>Was der Agent (noch) nicht kann</h4><p id="fr-missing"></p></div>
+    <div class="fr-section"><h4>Wo nachlesen</h4><p id="fr-where"></p></div>
+    <div class="fr-section">
+      <h4>Fertiger Auftrag für Claude Code <button id="fr-copy" class="ctl">📋 Kopieren</button></h4>
+      <pre id="fr-prompt" class="mono"></pre>
+    </div>
+    <div class="fr-buttons">
+      <span id="fr-count" class="muted small"></span>
+      <button id="fr-later" class="ctl">Später erinnern</button>
+      <button id="fr-dismiss" class="ctl danger">✓ Verstanden — nicht mehr zeigen</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ TAB-NAVIGATION ============ -->
 <nav id="tabs">
   <button data-tab="mission" class="tab-btn active">Mission Control</button>

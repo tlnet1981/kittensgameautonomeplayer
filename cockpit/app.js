@@ -118,11 +118,14 @@ window.KGP = (() => {
     "narrative.chapter": e => e.payload.title + " — " + e.payload.body,
     "narrative.milestone": e => "★ " + e.payload.title + " — " + e.payload.body,
     "narrative.tactical": e => e.payload.title + " — " + e.payload.body,
+    "frontier.reached": e => "⚠ AUSBAUGRENZE: " + e.payload.title +
+      " — Details im Banner oben (fertiger Claude-Code-Auftrag liegt bei)",
   };
 
   function feedClass(e) {
     if (e.type === "model.error" || (e.type === "execution.result" && !e.payload.ok)) return "crit";
-    if (e.type === "model.warning" || e.type === "model.version_mismatch") return "warn";
+    if (e.type === "model.warning" || e.type === "model.version_mismatch"
+        || e.type === "frontier.reached") return "warn";
     if (e.type === "narrative.chapter" || e.type === "narrative.milestone") return "p1";
     return "";
   }
@@ -204,6 +207,75 @@ window.KGP = (() => {
     renderBtn();
   }
 
+  // ---------- Ausbaugrenzen (Frontier Guard) ----------
+  // Hinweise, dass der Spielstand eine noch nicht implementierte Schicht
+  // erreicht: Banner + Popup mit fertigem Claude-Code-Auftrag.
+  const frontier = { queue: [], current: null };
+
+  function frontierUpdate(list) {
+    frontier.queue = list || [];
+    renderFrontier();
+  }
+
+  function renderFrontier() {
+    const banner = document.getElementById("frontier-banner");
+    const overlay = document.getElementById("frontier-overlay");
+    if (frontier.queue.length === 0) {
+      banner.classList.add("hidden");
+      overlay.classList.add("hidden");
+      frontier.current = null;
+      return;
+    }
+    const n = frontier.queue[0];
+    banner.classList.remove("hidden");
+    document.getElementById("frontier-banner-text").textContent =
+      "Ausbaugrenze erreicht: " + n.title +
+      (frontier.queue.length > 1 ? " (+" + (frontier.queue.length - 1) + " weitere)" : "");
+    // Popup automatisch öffnen, wenn dieser Hinweis noch nie gezeigt wurde:
+    if (frontier.current !== n.id) {
+      frontier.current = n.id;
+      openFrontierModal(n);
+    }
+  }
+
+  function openFrontierModal(n) {
+    document.getElementById("fr-title").textContent = "⚠ " + n.title;
+    document.getElementById("fr-happening").textContent = n.happening;
+    document.getElementById("fr-missing").textContent = n.missing;
+    document.getElementById("fr-where").textContent = n.where;
+    document.getElementById("fr-prompt").textContent = n.prompt;
+    document.getElementById("fr-count").textContent =
+      frontier.queue.length > 1 ? frontier.queue.length + " Hinweise offen" : "";
+    document.getElementById("frontier-overlay").classList.remove("hidden");
+  }
+
+  function initFrontier() {
+    document.getElementById("frontier-banner-open").onclick = () => {
+      if (frontier.queue.length) openFrontierModal(frontier.queue[0]);
+    };
+    document.getElementById("fr-later").onclick = () => {
+      // Popup schließen, Banner bleibt — Details jederzeit über „Details".
+      document.getElementById("frontier-overlay").classList.add("hidden");
+    };
+    document.getElementById("fr-dismiss").onclick = async () => {
+      const n = frontier.queue[0];
+      if (!n) return;
+      try { await fetch("/api/frontier/dismiss", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: n.id }) }); } catch (e) { }
+      frontier.queue.shift();
+      frontier.current = null;
+      document.getElementById("frontier-overlay").classList.add("hidden");
+      renderFrontier();
+    };
+    document.getElementById("fr-copy").onclick = () => {
+      const text = document.getElementById("fr-prompt").textContent;
+      navigator.clipboard && navigator.clipboard.writeText(text);
+      document.getElementById("fr-copy").textContent = "✓ kopiert";
+      setTimeout(() => { document.getElementById("fr-copy").textContent = "📋 Kopieren"; }, 1500);
+    };
+  }
+
   // ---------- WebSocket ----------
   function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -252,6 +324,11 @@ window.KGP = (() => {
       }
     } else if (e.type === "plan.updated") {
       store.plan = e.payload;
+    } else if (e.type === "frontier.reached") {
+      frontier.queue.push(e.payload);
+      renderFrontier();
+      beep(880, 220); beep(660, 260, 240);   // markanter Hinweiston
+      return;
     } else if (e.type === "agent.state") {
       if (store.status) store.status.agentState = e.payload.to;
     } else {
@@ -272,6 +349,7 @@ window.KGP = (() => {
       store.decisions.unshift(payload.currentDecision);
     }
     if (payload.plan) store.plan = payload.plan;
+    if (payload.frontier) frontierUpdate(payload.frontier);
     renderAll();
   }
 
@@ -297,6 +375,7 @@ window.KGP = (() => {
   document.addEventListener("DOMContentLoaded", () => {
     initTabs();
     initMute();
+    initFrontier();
     document.getElementById("btn-start").onclick = () => control("start");
     document.getElementById("btn-stop").onclick = () => control("stop");
     document.getElementById("btn-pause").onclick = () => control("pause");

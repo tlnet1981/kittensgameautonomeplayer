@@ -16,6 +16,7 @@ Agent-Zustände folgen der Cockpit-Spec Kap. 26.1.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import traceback
 
@@ -47,6 +48,47 @@ class PlayerRuntime:
         self.pause_requested = False
         self.step_actions_remaining = 0
         self.step_until_decision = False
+        # Ausbaugrenzen-Wächter: ausgelöste + quittierte Hinweise
+        # (überleben Neustarts in data/frontier-state.json).
+        self._frontier_file = self.config.data_dir / "frontier-state.json"
+        self.frontier_fired: dict[str, dict] = {}    # id -> Hinweis-Payload
+        self.frontier_dismissed: set[str] = set()
+        self._load_frontier_state()
+
+    # ------------------------------------------------------------ Frontier
+
+    def _load_frontier_state(self) -> None:
+        try:
+            data = json.loads(self._frontier_file.read_text(encoding="utf-8"))
+            self.frontier_fired = {n["id"]: n for n in data.get("fired", [])}
+            self.frontier_dismissed = set(data.get("dismissed", []))
+        except Exception:
+            pass   # keine/kaputte Datei = frischer Zustand
+
+    def _save_frontier_state(self) -> None:
+        try:
+            self.config.data_dir.mkdir(parents=True, exist_ok=True)
+            self._frontier_file.write_text(json.dumps({
+                "fired": list(self.frontier_fired.values()),
+                "dismissed": sorted(self.frontier_dismissed),
+            }, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
+
+    def frontier_notify(self, notice: dict) -> None:
+        """Vom Brain gerufen, wenn eine Ausbaugrenze erreicht wird."""
+        self.frontier_fired[notice["id"]] = notice
+        self._save_frontier_state()
+        self.bus.publish("frontier.reached", notice)
+
+    def frontier_dismiss(self, fid: str) -> None:
+        self.frontier_dismissed.add(fid)
+        self._save_frontier_state()
+        self.bus.publish("frontier.dismissed", {"id": fid})
+
+    def frontier_active(self) -> list[dict]:
+        return [n for fid, n in self.frontier_fired.items()
+                if fid not in self.frontier_dismissed]
 
     # ------------------------------------------------------------------ Status
 
@@ -86,6 +128,7 @@ class PlayerRuntime:
             "systems": viewmodels.systems_vm(snap) if snap else None,
             "currentDecision": current_action,
             "plan": plan,
+            "frontier": self.frontier_active(),
         }
 
     # ------------------------------------------------------------------ Controls

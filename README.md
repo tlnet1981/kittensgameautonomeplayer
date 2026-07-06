@@ -82,6 +82,18 @@ nicht automatisiert — die Architektur (Ziel-Arten, Kandidaten-Scoring,
 Reset-Gates) ist dafür vorbereitet; in docs/brain.md steht, wie man eine
 neue Spielschicht ergänzt.
 
+### Ausbaugrenzen-Wächter 🚧
+
+Du musst dir die Grenzen nicht merken: Sobald der Spielstand in die **Nähe
+einer nicht implementierten Schicht** kommt, poppt im Cockpit automatisch ein
+Hinweis auf (amber Banner + Popup) mit vier Abschnitten: *Was passiert gerade*,
+*Was der Agent (noch) nicht kann*, *Wo nachlesen* (Spec-Kapitel, Doku, Spielcode)
+und einem **fertigen Copy-Paste-Auftrag für die nächste Claude-Code-Session**.
+„Verstanden" quittiert den Hinweis dauerhaft (data/frontier-state.json),
+„Später erinnern" lässt den Banner stehen. Überwacht werden: Policies,
+Challenges, Transcend, Shatter-Engine, Pacts/Necrocorns und die
+Chronosphere-/Seed-Strategie (`player/brain/frontier.py`).
+
 ## Debug-Spielereien
 
 - `POST /api/control/force_reset` — Reset-Transaktion sofort auslösen.

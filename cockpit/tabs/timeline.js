@@ -23,6 +23,7 @@
     "model.error": e => ({ cls: "model", text: "Fehler: " + e.payload.error }),
     "model.warning": e => ({ cls: "model", text: "Warnung: " + e.payload.error }),
     "model.version_mismatch": e => ({ cls: "model", text: "Versionsabweichung erkannt" }),
+    "frontier.reached": e => ({ cls: "safety", text: "⚠ Ausbaugrenze: " + e.payload.title }),
     "state.save_exported": e => ({ cls: "model", text: "Save-Backup exportiert" }),
   };
 

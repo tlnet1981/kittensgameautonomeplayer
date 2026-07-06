@@ -27,7 +27,7 @@ from player.narrator import Narrator
 from player.state import access as A
 from player.state.derived import derive
 
-from . import meta, reset, safety, tactics
+from . import frontier, meta, reset, safety, tactics
 from .records import Candidate, DecisionRecord
 
 
@@ -97,6 +97,11 @@ class Brain:
         meta_view = meta.evaluate(snap)
         self.last_meta = meta_view
         self._announce_milestones(meta_view)
+
+        # --- Ausbaugrenzen-Wächter: naht eine nicht implementierte Schicht? ---
+        known = set(self.rt.frontier_fired) | self.rt.frontier_dismissed
+        for notice in frontier.check(snap, meta_view.run_type, known):
+            self.rt.frontier_notify(notice)
 
         # --- Reset-Bewertung (Spec Kap. 20) ---
         self.paragon_samples.append((time.time(), snap["derived"]["resetParagon"]))
