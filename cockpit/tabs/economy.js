@@ -13,10 +13,13 @@
     const strip = document.getElementById("eco-safety");
     strip.innerHTML = "";
     if (eco.food) {
-      strip.appendChild(mkTile("Catnip-Reserve (Worst-Winter)",
-        eco.food.reserveSeconds === null ? "wächst" : fmtDuration(eco.food.reserveSeconds),
-        "aktuell " + fmtRate(eco.food.netNowPerSec) + "/s",
-        eco.food.safe ? "ok" : "crit"));
+      const f = eco.food;
+      const cls = f.status === "critical" ? "crit" : f.status === "warn" ? "warn" : "ok";
+      strip.appendChild(mkTile("Catnip-Projektion (bis Winterende)",
+        f.projectedMin === undefined ? "–" : "min. " + Math.round(f.projectedMin),
+        "aktuell " + fmtRate(f.netNowPerSec) + "/s · Bedarf " +
+        fmtRate(-(f.demandPerSec || 0)) + "/s",
+        cls));
     }
     if (eco.energy && (eco.energy.prod || eco.energy.cons)) {
       strip.appendChild(mkTile("Energie", fmtRate(eco.energy.balance) + " Wt",

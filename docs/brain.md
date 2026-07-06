@@ -17,23 +17,47 @@ Der Zyklus läuft alle `KGP_DECISION_INTERVAL` Sekunden (Default 1,5 s — als
 Zuschauer gut verfolgbar). Pause/Step-Flags aus dem Cockpit werden am
 Zyklusanfang ausgewertet.
 
-## Safety (`brain/safety.py`, Spec Kap. 7)
+## Safety (`brain/safety.py` + `state/derived.py`, Spec Kap. 7)
 
-Umgesetzt ist die **Food-Invariante I-01** über die Worst-Winter-Projektion:
+Die **Food-Invariante I-01** basiert auf der **Saisonprojektion**
+(`derived.project_catnip`, Spec 7.2): Der Catnip-Bestand wird segmentweise
+bis zum Ende des nächsten vollständigen Winters simuliert (1 Saison = 200 s;
+Feld-Modifikatoren Frühling 1,5 / Sommer 1,0 / Herbst 1,0 / Winter 0,25).
 
-```
-worstWinterNet = netJetzt − feldBasis·saisonMod + feldBasis·winterMod (0.25)
-Reserve        = catnip / max(ε, −worstWinterNet)
-```
+- **kritisch**: projizierter Tiefpunkt < max(50, 30 s · Bedarf)
+- **Warnstufe** (nur Housing-Sperre): Tiefpunkt < max(150, 120 s · Bedarf)
+- ohne Kitten (Bedarf 0) nie kritisch — niemand kann verhungern
 
-- Reserve < **5 min** → Schutzaktion mit Score 10 (Farmer zuweisen →
-  Kitten aus größtem Job ziehen → Feld bauen → Catnip sammeln).
-  Kalibrierung: ein kompletter Winter dauert ~200 s Realzeit.
-- Reserve < **10 min** → Housing-Käufe blockiert (neue Kitten = mehr Verbrauch).
-- Die Schutzaktion **ersetzt nicht** die Kandidatenliste, sie wird mit
-  Vorrang eingereiht — das Cockpit zeigt weiterhin alle Alternativen.
+**Leitplanke statt Monopol** (Fix der Gather-Endlosschleife): Bei „kritisch"
+liefert die Safety abgestufte Schutz-KANDIDATEN, die normal konkurrieren —
+food-neutrale Fortschritte (Forschung!) laufen weiter:
 
-Energie- (I-04) und Reset-Invarianten (I-02) folgen mit M4/M3.
+| Schutzkandidat | Score | Bedingung |
+|---|---|---|
+| Farmer zuweisen / umschulen | 6.0 | kostenlos, wirkt sofort |
+| Catnip-Feld bauen | 4.0 | **nur wenn** die Projektion nach dem Kauf (−Preis, +0,625/s·Saisonmod) nachweislich besser ist |
+| Catnip sammeln | 1.2 | letzter Ausweg, ehrlich schwach |
+
+Zusätzlich `foodRisk −3.0` auf alle Kandidaten mit Catnip-Preisen
+(Gebäude, Refine, Trades mit Catnip-Ware) — die Kaufregel (Score > 0)
+filtert sie in der Krise heraus.
+
+Energie- (I-04) und Reset-Invarianten (I-02/TC-Schutz) siehe unten.
+
+## Dynamisches Housing (`tactics._housing_eval`, Spec 12.1)
+
+Keine hut-Meilensteine mehr — Housing wird nach Bedarf entschieden:
+1. **Bedarfs-Gate:** nur bei voller Kapazität (`maxKittens == kittens`;
+   0 == 0 → die erste Hütte entsteht dynamisch).
+2. **Food-Gate:** Saisonprojektion inkl. Mehrlast der neuen Kitten
+   (Kapazität × Bedarf/Kitten) muss über der Warnschwelle bleiben.
+3. **Score:** 1.6 Basis + 0.4 Paragon-Grenzwert ab 68 Kitten.
+
+Generalprinzip: Bau-**Meilensteine** gibt es nur noch für Gate-Gebäude
+(Library, Workshop, Mine, Smelter, Tradepost, Temple, Ziggurat, Steamworks,
+Oil Well, Magneto); alle Pacing-Gebäude (Housing, Storage, Amphitheater,
+Pasture, Academies, Felder ab #10) kommen aus der Bedarfslogik.
+Vollständiger Dynamik-Abgleich mit der Spec: [spec-gaps.md](spec-gaps.md).
 
 ## Meta-Controller (`brain/meta.py`, Spec Kap. 8/9)
 

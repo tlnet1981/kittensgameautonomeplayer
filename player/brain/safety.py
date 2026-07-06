@@ -1,8 +1,20 @@
-"""Sicherheitsinvarianten (Spielmechanik-Spec Kap. 7, M1: Food-Invariante I-01).
+"""Sicherheitsinvarianten (Spielmechanik-Spec Kap. 7): Food-Invariante I-01.
 
-Safety hat Vorrang vor Nutzenoptimierung (Grundentscheidung G-04):
-Wenn die Worst-Winter-Catnip-Reserve unter den Sicherungshorizont fällt,
-wird ausschließlich die Schutzaktion ausgeführt und Housing blockiert.
+Grundlage ist die Catnip-SAISONPROJEKTION (state/derived.py, Spec 7.2):
+kritisch ist der Zustand nur, wenn der projizierte Bestands-Tiefpunkt bis
+zum Ende des nächsten Winters unter die Überlebensschwelle fällt.
+
+Design nach dem Schleifen-Bugfix: Safety ist eine **Leitplanke, kein
+Monopol**. Sie liefert abgestufte Schutz-KANDIDATEN, die mit allen anderen
+Aktionen konkurrieren — food-neutrale Fortschritte (Forschung kostet nur
+Science!) laufen weiter. Zusätzlich blockiert sie food-schädliche Aktionen
+über blocked_types/foodRisk (tactics.py):
+
+    Schutzkandidaten (nur bei Status critical):
+      6.0  Farmer zuweisen / größten Job zu Farmer umschulen (kostenlos, sofort)
+      4.0  Catnip-Feld bauen — NUR wenn der Kauf die Projektion nachweislich
+           verbessert (Preis senkt den Bestand, Rate hebt den Winter)
+      1.2  Catnip sammeln (ehrlich schwach: ~50 Catnip pro Charge)
 """
 
 from __future__ import annotations
@@ -10,21 +22,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from player.state import access as A
+from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
 from . import actions
-
-
-# Sicherungshorizont (Spec 7.2, vereinfacht): unter dieser Worst-Winter-Reserve
-# greift die Schutzlogik. Kalibrierung: ein kompletter Winter dauert ~200 s
-# Realzeit — 5 Minuten Reserve decken also mehr als einen vollen Winter ab.
-RESERVE_FLOOR_SECONDS = 5 * 60
-# Oberhalb dieser Reserve gilt Food als "komfortabel" — Housing wieder erlaubt.
-RESERVE_COMFORT_SECONDS = 10 * 60
+from .records import Candidate
 
 
 @dataclass
 class SafetyResult:
-    ok: bool = True
-    action: actions.Action | None = None      # Schutzaktion (hat höchste Priorität)
+    ok: bool = True                      # False = Food-Status kritisch
+    critical: bool = False
+    candidates: list = field(default_factory=list)   # abgestufte Schutzaktionen
     reason: str = ""
     blocked_types: set[str] = field(default_factory=set)   # z. B. {"housing"}
     view: dict = field(default_factory=dict)                # fürs Cockpit
@@ -32,62 +39,67 @@ class SafetyResult:
 
 def check(snap: dict) -> SafetyResult:
     food = snap.get("derived", {}).get("food", {})
-    reserve = food.get("reserveSeconds")
-    worst_net = food.get("worstWinterNetPerSec", 0.0)
+    status = food.get("status", "ok")
     result = SafetyResult()
-    result.view = {
-        "food": {
-            "reserveSeconds": reserve,
-            "worstWinterNetPerSec": worst_net,
-            "floor": RESERVE_FLOOR_SECONDS,
-            "status": "ok",
-        }
-    }
+    result.view = {"food": dict(food)}
 
-    # Reserve None bedeutet: Worst-Winter-Netto ist positiv -> sicher.
-    if reserve is None:
+    if status == "ok":
         return result
 
-    if reserve < RESERVE_COMFORT_SECONDS:
-        # Vorwarnstufe: kein Housing mehr (neue Kitten würden Verbrauch erhöhen).
-        result.blocked_types.add("housing")
-        result.view["food"]["status"] = "warn"
+    # Warnstufe: kein Housing (neue Kitten = mehr Verbrauch im knappen Winter).
+    result.blocked_types.add("housing")
 
-    if reserve < RESERVE_FLOOR_SECONDS:
-        result.ok = False
-        result.view["food"]["status"] = "critical"
-        result.reason = (f"Worst-Winter-Catnip-Reserve nur {reserve / 60:.1f} min "
-                         f"(Grenze {RESERVE_FLOOR_SECONDS / 60:.0f} min)")
-        result.action = _protective_action(snap)
+    if status != "critical":
+        return result
+
+    result.ok = False
+    result.critical = True
+    result.reason = (f"Winter-Projektion fällt auf {food.get('projectedMin', 0):.0f} Catnip "
+                     f"(Grenze {food.get('criticalFloor', 0):.0f})")
+    result.candidates = _protective_candidates(snap, food)
     return result
 
 
-def _protective_action(snap: dict) -> actions.Action | None:
-    """Wählt die beste Schutzaktion: Farmer aufstocken oder Felder bauen."""
+def _protective_candidates(snap: dict, food: dict) -> list[Candidate]:
+    out: list[Candidate] = []
     village = snap.get("village", {})
     free = village.get("freeKittens", 0)
 
-    # 1. Freie Kitten zum Farmer machen (falls Job freigeschaltet).
-    if A.job_unlocked(snap, "farmer") and free > 0:
-        return actions.assign_job("farmer", "Farmer", amount=min(free, 2))
-
-    # 2. Kitten aus dem größten Nicht-Farmer-Job abziehen.
+    # 1. Farmer: kostenlos und wirkt sofort auf die Winterrate.
     if A.job_unlocked(snap, "farmer"):
-        jobs = [j for j in village.get("jobs", []) if j["name"] != "farmer" and j["value"] > 0]
-        if jobs:
-            biggest = max(jobs, key=lambda j: j["value"])
-            return actions.shift_job(biggest["name"], "farmer", "Farmer", amount=1)
+        if free > 0:
+            out.append(Candidate(
+                actions.assign_job("farmer", "Farmer", amount=min(free, 2)),
+                6.0, {"safety": 6.0}))
+        else:
+            donors = [j for j in village.get("jobs", [])
+                      if j["name"] != "farmer" and j["value"] > 0]
+            if donors:
+                biggest = max(donors, key=lambda j: (j["value"], j["name"]))
+                out.append(Candidate(
+                    actions.shift_job(biggest["name"], "farmer", "Farmer", 1),
+                    6.0, {"safety": 6.0}))
 
-    # 3. Freie Kitten sind food-neutral (sie essen sowieso) — auf den
-    #    strategischen Fluchtweg setzen: Holz → Library → Agriculture → Farmer.
-    #    (Einmalige Maßnahme; danach greifen die Feld-Schritte weiter.)
-    if free > 0 and A.job_unlocked(snap, "woodcutter"):
-        return actions.assign_job("woodcutter", "Woodcutter", amount=free)
-
-    # 4. Kein Farmer-Job (noch keine Agriculture): Catnip-Feld bauen, wenn leistbar.
+    # 2. Feld bauen — Wirkungsprüfung (Fix der Kauf-und-wieder-arm-Schleife):
+    #    Der Kauf kostet Bestand (= Reserve), hebt aber die Winterrate.
+    #    Nur bauen, wenn die Projektion NACH dem Kauf besser ist als vorher.
     field_b = A.building(snap, "field")
     if field_b and A.affordable(snap, field_b["prices"]):
-        return actions.buy_building("field", field_b["label"], field_b["val"])
+        price = sum(p["val"] for p in field_b["prices"] if p["name"] == "catnip")
+        after = project_catnip(snap, stock_delta=-price,
+                               field_rate_delta=CATNIP_PER_FIELD_PER_SEC)
+        if after["projectedMin"] > food.get("projectedMin", 0):
+            out.append(Candidate(
+                actions.buy_building("field", field_b["label"], field_b["val"]),
+                4.0, {"safety": 4.0}))
+        else:
+            out.append(Candidate(
+                actions.buy_building("field", field_b["label"], field_b["val"]),
+                0.0, {"safety": 0.0}, feasible=False,
+                reject_reason=(f"Feldkauf würde die Winter-Projektion verschlechtern "
+                               f"({after['projectedMin']:.0f} < {food.get('projectedMin', 0):.0f})")))
 
-    # 5. Letzter Ausweg: Catnip von Hand sammeln.
-    return actions.gather_catnip(batch=20)
+    # 3. Sammeln: letzter Ausweg, bewusst schwach bewertet — food-neutrale
+    #    Fortschritte (Forschung 1.9–3.0) gewinnen dagegen.
+    out.append(Candidate(actions.gather_catnip(batch=20), 1.2, {"safety": 1.2}))
+    return out

@@ -41,6 +41,10 @@
             winterCatnipModifier: (c.seasons && c.seasons[3] && c.seasons[3].modifiers)
                 ? c.seasons[3].modifiers.catnip : 0.25,
             currentCatnipModifier: (c.getCurSeason().modifiers || {}).catnip || 1,
+            // Alle vier Saison-Modifikatoren (Frühling..Winter) für die
+            // Catnip-Saisonprojektion (Spec 7.2):
+            seasonCatnipModifiers: (c.seasons || []).map(s =>
+                (s.modifiers || {}).catnip !== undefined ? s.modifiers.catnip : 1),
         };
     });
 

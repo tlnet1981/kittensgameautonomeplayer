@@ -125,16 +125,19 @@ class Brain:
             self.run_started = time.time()
             return
 
-        # Kandidaten immer vollständig erzeugen (Cockpit zeigt Alternativen);
-        # eine nötige Schutzaktion wird mit Vorrang eingereiht (G-04).
+        # Kandidaten immer vollständig erzeugen (Cockpit zeigt Alternativen).
+        # Schutzaktionen sind seit dem Schleifen-Bugfix ABGESTUFTE Kandidaten
+        # (Leitplanke statt Monopol, G-04): food-neutrale Fortschritte wie
+        # Forschung konkurrieren normal weiter.
         candidates, bottleneck = tactics.generate(snap, meta_view, safety_result)
-        if not safety_result.ok and safety_result.action is not None:
-            protective = Candidate(safety_result.action, 10.0, {"safety": 10.0})
-            candidates.insert(0, protective)
-            trigger = f"SAFETY: {safety_result.reason}"
+        if safety_result.critical and safety_result.candidates:
+            candidates.extend(safety_result.candidates)
+            candidates.sort(key=lambda c: (-c.score, c.action.id))
         # Kaufregel (Spec 10.3): nur Aktionen mit positivem NetValue; sonst WAIT.
         selected = next((c for c in candidates if c.feasible and c.score > 0),
                         next(c for c in candidates if c.action.type == "WAIT"))
+        if "safety" in selected.components and safety_result.reason:
+            trigger = f"SAFETY: {safety_result.reason}"
         self.last_bottleneck = bottleneck
 
         # WAIT-Verdichtung: identisches Warten (gleiches Ziel, gleicher Engpass)

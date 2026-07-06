@@ -19,9 +19,13 @@ import math
 from typing import Any
 
 from player.state import access as A
+from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
 from . import actions
 from .records import Candidate
-from .safety import RESERVE_COMFORT_SECONDS
+
+# Verbrauch eines Kittens (0,85 Catnip/Tick × 5 Ticks/s), Fallback für die
+# Pro-Kopf-Rechnung, solange keine Kitten existieren:
+CATNIP_PER_KITTEN_PER_SEC = 4.25
 
 # Welcher Job produziert welche Ressource? (M1-Umfang)
 RESOURCE_JOB = {
@@ -159,13 +163,16 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     bn = bottleneck_info(snap, target)
     cands: list[Candidate] = []
     blocked = safety_result.blocked_types
-    reserved = _reserved_resource(snap, bn)
+    banking = _kitten_banking_mode(snap, bn)
+    reserved = _reserved_resource(snap, bn, banking)
 
     _milestone_candidate(snap, target, bn, cands, blocked)
     _job_candidates(snap, bn, cands)
     _gather_candidates(snap, target, bn, cands)
     _research_candidates(snap, target, cands)
-    _building_candidates(snap, target, bn, cands, blocked, reserved)
+    _building_candidates(snap, target, bn, cands, blocked, reserved, banking)
+    if banking:
+        _banking_candidates(snap, cands)
     _upgrade_candidates(snap, cands)
     _hunt_candidate(snap, cands)
     _craft_candidates(snap, target, bn, cands)
@@ -182,18 +189,39 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     return cands, bn
 
 
-def _reserved_resource(snap: dict, bn: dict | None) -> str | None:
+def _reserved_resource(snap: dict, bn: dict | None, banking: bool = False) -> str | None:
     """Opportunitätskosten-Regel (Spec 10.2, vereinfacht):
 
     Ist der Engpass nur über eine Konversion lösbar (z. B. Wood ganz früh
     ausschließlich über „Refine catnip", solange es keine Woodcutter gibt),
     dann ist die Input-Ressource der Konversion reserviert — Ökonomie-Käufe,
     die sie verbrauchen, würden den Engpass verlängern und werden bestraft.
+    Im Kitten-Bootstrap (Banking-Modus) ist Catnip ebenfalls reserviert:
+    der Vorrat ist die Eintrittskarte für die erste Hütte.
     """
+    if banking:
+        return "catnip"
     if bn and bn.get("resource") == "wood" and A.job_count(snap, "woodcutter") == 0 \
             and A.res_rate(snap, "wood") <= 0.001:
         return "catnip"
     return None
+
+
+def _kitten_banking_mode(snap: dict, bn: dict | None) -> bool:
+    """Kitten-Bootstrap (fehlendes Glied der Engpasskette, Spec 12.1):
+
+    Der Meilenstein-Engpass ist eine Job-Ressource (z. B. Science → Scholar),
+    aber es existieren NOCH KEINE Kitten. Dann ist die effektive Aufgabe:
+    Housing leistbar machen — d. h. Felder ausbauen und eine Catnip-Bank
+    ansparen, bis die Saisonprojektion neue Kitten trägt. In diesem Modus:
+    Felder = Engpasslöser, Catnip = reserviert (kein Refine-Abfluss außer
+    für das Housing-Holz selbst), Housing bekommt einen Engpass-Bonus.
+    """
+    if snap.get("village", {}).get("kittens", 0) > 0:
+        return False
+    if not bn or not bn.get("resource"):
+        return False
+    return bn["resource"] in RESOURCE_JOB
 
 
 # ---------------------------------------------------------------- Meilenstein
@@ -227,7 +255,12 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
         act = actions.research(target["name"], obj["label"])
 
     if A.affordable(snap, prices):
-        cands.append(Candidate(act, 3.0, {"milestone": 3.0}))
+        comp = {"milestone": 3.0}
+        if target["kind"] == "build":
+            # Auch Meilenstein-Bauten geben in der Food-Krise kein Catnip aus;
+            # sinnvolle Felder kommen dann als geprüfte Schutzaktion (safety.py).
+            _apply_food_risk(snap, comp, prices)
+        cands.append(Candidate(act, sum(comp.values()), comp))
     else:
         eta = bn.get("etaSeconds") if bn else None
         miss = ", ".join(f"{m['missing']:.0f} {m['name']}" for m in (bn or {}).get("missing", []))
@@ -244,14 +277,14 @@ def _job_candidates(snap, bn, cands) -> None:
     village = snap.get("village", {})
     free = village.get("freeKittens", 0)
     food = snap.get("derived", {}).get("food", {})
-    reserve = food.get("reserveSeconds")
+    food_tight = food.get("status", "ok") != "ok"
 
     if free <= 0:
-        _job_rebalance_candidate(snap, bn, cands, village, reserve)
+        _job_rebalance_candidate(snap, bn, cands, village, food_tight)
         return
 
-    # Food zuerst stabilisieren, wenn Reserve unter Komfortniveau:
-    if reserve is not None and reserve < RESERVE_COMFORT_SECONDS and A.job_unlocked(snap, "farmer"):
+    # Food zuerst stabilisieren, wenn die Winter-Projektion angespannt ist:
+    if food_tight and A.job_unlocked(snap, "farmer"):
         cands.append(Candidate(
             actions.assign_job("farmer", "Farmer", 1), 2.6,
             {"jobValue": 1.6, "safety": 1.0},
@@ -281,7 +314,7 @@ def _job_candidates(snap, bn, cands) -> None:
             cands[-1].components["bottleneck"] = 0.0  # nur Anzeige-Marker
 
 
-def _job_rebalance_candidate(snap, bn, cands, village, reserve) -> None:
+def _job_rebalance_candidate(snap, bn, cands, village, food_tight) -> None:
     """Lokale Tauschoperation (Spec 12.2 Schritt 7): Der Engpass-Job ist
     komplett unbesetzt und es gibt keine freien Kitten → ein Kitten aus dem
     größten anderen Job umschulen. `job_count == 0` verhindert Thrashing."""
@@ -290,7 +323,6 @@ def _job_rebalance_candidate(snap, bn, cands, village, reserve) -> None:
     job = RESOURCE_JOB.get(bn["resource"])
     if not job or not A.job_unlocked(snap, job) or A.job_count(snap, job) > 0:
         return
-    food_tight = reserve is not None and reserve < RESERVE_COMFORT_SECONDS
     donors = [j for j in village.get("jobs", [])
               if j["name"] != job and j["value"] > 0
               and not (j["name"] == "farmer" and food_tight)]
@@ -323,8 +355,9 @@ def _gather_candidates(snap, target, bn, cands) -> None:
     if wood_needed and A.job_count(snap, "woodcutter") == 0 and catnip_val >= 100:
         missing_wood = next((m["missing"] for m in bn.get("missing", []) if m["name"] == "wood"), 0)
         batch = max(1, min(5, int(catnip_val // 100), math.ceil(missing_wood)))
-        cands.append(Candidate(actions.refine_catnip(batch), 2.0,
-                               {"bottleneck": 2.0}))
+        comp = {"bottleneck": 2.0}
+        _apply_food_risk(snap, comp, [{"name": "catnip", "val": 100 * batch}])
+        cands.append(Candidate(actions.refine_catnip(batch), sum(comp.values()), comp))
 
 
 # ---------------------------------------------------------------- Forschung
@@ -347,7 +380,27 @@ def _research_candidates(snap, target, cands) -> None:
 
 # ---------------------------------------------------------------- Gebäude
 
-def _building_candidates(snap, target, bn, cands, blocked, reserved=None) -> None:
+def _banking_candidates(snap, cands) -> None:
+    """Kitten-Bootstrap-Zusatzkandidaten: Holz für das Housing selbst.
+
+    Catnip ist im Banking-Modus reserviert — mit einer Ausnahme: das Holz,
+    das das billigste Housing-Gebäude selbst kostet, darf veredelt werden
+    (sonst wäre die Hütte nie leistbar)."""
+    hut = A.building(snap, "hut")
+    if hut is None:
+        return
+    wood_needed = sum(p["val"] for p in hut["prices"] if p["name"] == "wood")
+    wood_have = A.res_value(snap, "wood")
+    missing = wood_needed - wood_have
+    if missing <= 0 or A.res_value(snap, "catnip") < 100:
+        return
+    batch = max(1, min(5, int(A.res_value(snap, "catnip") // 100), math.ceil(missing)))
+    cands.append(Candidate(actions.refine_catnip(batch), 1.5,
+                           {"bottleneck": 1.5}))
+
+
+def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
+                         banking=False) -> None:
     target_name = target.get("name") if target and target["kind"] == "build" else None
     prices_target = _target_prices(snap, target)
     cap_blocked_res = A.cap_blocks(snap, prices_target) if prices_target else None
@@ -378,13 +431,30 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None) -> Non
                 else:
                     continue  # Storage ohne Bedarf ist unzulässig (11.3)
         elif name in HOUSING_BUILDINGS:
-            if "housing" in blocked:
+            comp, reject = _housing_eval(snap, name, b, blocked)
+            if reject:
                 cands.append(Candidate(
                     actions.buy_building(name, b["label"], b["val"]), 0.0,
-                    {"housing": 0.0}, feasible=False,
-                    reject_reason="Food-Sicherheit blockiert Housing (I-01)"))
+                    dict(comp), feasible=False, reject_reason=reject))
                 continue
-            comp["housing"] = 1.6
+            if banking:
+                comp["bottleneck"] = 1.0   # Kitten SIND der Engpass (Bootstrap)
+        elif banking and name == "field":
+            # Kitten-Bootstrap: Felder heben die Projektion Richtung
+            # Housing-Schwelle — aber nur kaufen, wenn der Kauf die
+            # Projektion tatsächlich verbessert (gleiche Prüfung wie Safety).
+            price = sum(p["val"] for p in b["prices"] if p["name"] == "catnip")
+            food = snap.get("derived", {}).get("food", {})
+            after = project_catnip(snap, stock_delta=-price,
+                                   field_rate_delta=CATNIP_PER_FIELD_PER_SEC)
+            if after["projectedMin"] > food.get("projectedMin", 0):
+                comp["bottleneck"] = 1.8
+            else:
+                cands.append(Candidate(
+                    actions.buy_building(name, b["label"], b["val"]), 0.0,
+                    {"bottleneck": 0.0}, feasible=False,
+                    reject_reason="Feldkauf würde die Catnip-Bank fürs Housing schwächen"))
+                continue
         elif BUILDING_PRODUCES.get(name) and bn and BUILDING_PRODUCES[name] == bn.get("resource"):
             comp["bottleneck"] = 1.8   # produziert genau den Engpass
         elif name == "workshop" and A.bld_val(snap, "workshop") == 0:
@@ -404,8 +474,68 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None) -> Non
                 and "bottleneck" not in comp and "storage" not in comp:
             comp["opportunity"] = -0.7
 
+        # foodRisk (I-01): In der Food-Krise gibt niemand Catnip für
+        # Nicht-Schutz-Käufe aus. (Das geprüfte Schutz-Feld kommt separat
+        # aus safety.py und trägt diese Strafe nicht.)
+        _apply_food_risk(snap, comp, b["prices"])
+
         score = sum(comp.values())
         cands.append(Candidate(actions.buy_building(name, b["label"], b["val"]), score, comp))
+
+
+def _apply_food_risk(snap, comp: dict, prices: list[dict]) -> None:
+    """foodRisk-Komponente (I-01): Bei kritischer Winter-Projektion drückt
+    ein Catnip-Preis den Kandidaten unter Null (Kaufregel 10.3 filtert ihn)."""
+    if snap.get("derived", {}).get("food", {}).get("status") != "critical":
+        return
+    if any(p["name"] == "catnip" for p in prices):
+        comp["foodRisk"] = -3.0
+
+
+# Housing-Kapazitätszuwachs pro Gebäude (Spec 12.1 KittenArrival-Basis):
+HOUSING_CAPACITY = {"hut": 2, "logHouse": 1, "mansion": 1}
+
+
+def _housing_eval(snap, name: str, b: dict, blocked) -> tuple[dict, str | None]:
+    """HousingValue-Logik nach Spec 12.1 (deterministisch vereinfacht).
+
+    Liefert (Score-Komponenten, Ablehnungsgrund|None). Regeln:
+    1. Bedarfs-Gate: nur bauen, wenn die Kapazität voll ist — ungenutzte
+       Plätze haben keinen Produktionswert (12.1). maxKittens == 0 gilt
+       als voll → die erste Hütte entsteht dynamisch ohne Meilenstein.
+    2. Food-Gate: die Saisonprojektion muss die MEHRLAST der neuen Kitten
+       tragen (ersetzt die frühere Pauschalsperre).
+    3. Score: Basis 1.6 (Kitten = Arbeiter am Engpass) + 0.4 Paragon-
+       Grenzwert ab 68 Kitten (ab 70 zählt jedes Kitten beim Reset).
+    """
+    village = snap.get("village", {})
+    kittens = village.get("kittens", 0)
+    max_kittens = village.get("maxKittens", 0)
+    comp: dict[str, float] = {"housing": 1.6}
+    if kittens >= 68:
+        comp["paragon"] = 0.4
+
+    # 1. Bedarfs-Gate
+    if max_kittens > kittens:
+        return comp, (f"ungenutzte Housing-Kapazität ({kittens}/{max_kittens}) — "
+                      f"neue Plätze haben keinen Wert (12.1)")
+
+    # 2. Food-Gate über die Saisonprojektion
+    food = snap.get("derived", {}).get("food", {})
+    if "housing" in blocked:
+        return comp, "Food-Warnstufe blockiert Housing (I-01)"
+    capacity_add = HOUSING_CAPACITY.get(name, 1)
+    demand = food.get("demandPerSec", 0.0)
+    per_kitten = (demand / kittens) if kittens > 0 else CATNIP_PER_KITTEN_PER_SEC
+    price_catnip = sum(p["val"] for p in b["prices"] if p["name"] == "catnip")
+    after = project_catnip(snap, stock_delta=-price_catnip,
+                           demand_delta=capacity_add * per_kitten)
+    warn_floor_after = max(150.0, 120.0 * (demand + capacity_add * per_kitten))
+    if after["projectedMin"] < warn_floor_after:
+        return comp, (f"{capacity_add} neue Kitten würden den Winter kippen "
+                      f"(Projektion {after['projectedMin']:.0f} < {warn_floor_after:.0f})")
+
+    return comp, None
 
 
 def _storage_relieves(snap, storage_name, cap_blocked_res) -> bool:
@@ -642,9 +772,11 @@ def _trade_candidates(snap, bn, cands) -> None:
             have = A.res_value(snap, p["name"])
             batch = int(min(batch, have // p["val"])) if p["val"] else batch
         if batch >= 1:
+            comp = {"bottleneck": 1.7}
+            _apply_food_risk(snap, comp, race.get("buys", []))
             cands.append(Candidate(
-                actions.trade(race["name"], race["title"], batch), 1.7,
-                {"bottleneck": 1.7},
+                actions.trade(race["name"], race["title"], batch),
+                sum(comp.values()), comp,
             ))
 
     # Gold am Cap ist verschenkter Handelsspielraum (Cap-Regel 11.4):

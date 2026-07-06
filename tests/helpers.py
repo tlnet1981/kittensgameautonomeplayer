@@ -51,9 +51,12 @@ def make_snap(
         "ready": True, "errors": [],
         "meta": {"version": "1502", "buildRevision": 3, "paused": False, "ticksPerSecond": 5},
         "calendar": {
-            "year": 1, "season": 0, "seasonName": season, "day": 10, "daysPerSeason": 100,
+            "year": 1,
+            "season": ["spring", "summer", "autumn", "winter"].index(season),
+            "seasonName": season, "day": 10, "daysPerSeason": 100,
             "weather": "normal", "cycle": 0, "cycleYear": 0, "festivalDays": 0,
             "winterCatnipModifier": 0.25, "currentCatnipModifier": season_mod,
+            "seasonCatnipModifiers": [1.5, 1.0, 1.0, 0.25],
         },
         "resources": res_list,
         "village": {

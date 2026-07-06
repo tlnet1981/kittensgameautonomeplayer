@@ -67,11 +67,14 @@
     const strip = document.getElementById("safety-strip");
     strip.innerHTML = "";
     if (eco && eco.food) {
-      strip.appendChild(tile("Food (Worst-Winter)",
-        eco.food.reserveSeconds === null || eco.food.reserveSeconds === undefined
-          ? "stabil" : fmtDuration(eco.food.reserveSeconds),
-        fmtRate(eco.food.worstWinterNetPerSec) + "/s im Winter",
-        eco.food.safe ? "ok" : "crit"));
+      const f = eco.food;
+      const cls = f.status === "critical" ? "crit" : f.status === "warn" ? "warn" : "ok";
+      strip.appendChild(tile("Food (Winter-Projektion)",
+        f.projectedMin === undefined ? "–" :
+          "min. " + Math.round(f.projectedMin) + " Catnip",
+        "Tiefpunkt in " + fmtDuration(f.projectedMinInSeconds) +
+        " · Winter " + fmtRate(f.worstWinterNetPerSec) + "/s",
+        cls));
     }
     if (eco && eco.energy && (eco.energy.prod || eco.energy.cons)) {
       strip.appendChild(tile("Energie", fmtRate(eco.energy.balance) + " Wt",

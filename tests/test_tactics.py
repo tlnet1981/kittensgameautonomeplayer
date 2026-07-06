@@ -44,20 +44,29 @@ def test_wood_deadlock_resolved_by_refine():
     assert selected.action.id == "refine:catnip"
 
 
-def test_reserved_resource_penalizes_field_spam():
-    """Deadlock 2: Feldkauf darf das für Holz reservierte Catnip nicht dauernd fressen."""
+def test_kitten_bootstrap_banking_mode():
+    """Kitten-Bootstrap (0 Kitten, Job-Ressource als Engpass): Felder, die
+    die Projektion verbessern, sind Engpasslöser; Catnip ist reserviert
+    (generische Catnip-Käufe bestraft); Refine läuft nur fürs Housing-Holz."""
     snap = make_snap(
-        resources={"catnip": {"value": 90, "max": 5000, "rate": 10},
+        resources={"catnip": {"value": 300, "max": 5000, "rate": 10},
                    "wood": {"value": 1, "max": 200, "rate": 0}},
-        buildings={"field": {"val": 15, "prices": {"catnip": 60}}},
-        catnip_field_base=10,
+        buildings={"field": {"val": 15, "prices": {"catnip": 60}},
+                   "hut": {"val": 0, "prices": {"wood": 5}},
+                   "aqueduct": {"val": 0, "prices": {"catnip": 75}}},
+        catnip_field_base=10, kittens=0, max_kittens=0,
     )
     cands, bn, selected, _ = _generate(snap)
+    assert bn["resource"] == "wood"   # wood ist Job-Ressource → Banking aktiv
     field = next(c for c in cands if c.action.id == "build:field")
-    assert field.components.get("opportunity", 0) < 0
-    # Bei Catnip < 100 ist Refine nicht möglich → WAIT schlägt Feld-Spam nicht,
-    # aber Feld darf nur minimal positiv sein:
-    assert field.score < 0
+    assert field.components.get("bottleneck", 0) > 0   # verbessert die Bank
+    # Refine-Ausnahme fürs Hütten-Holz existiert:
+    refine = next(c for c in cands if c.action.id == "refine:catnip")
+    assert refine.feasible and refine.score > 0
+    # generischer Catnip-Kauf (Aqueduct) wird bestraft und fällt unter 0:
+    aqueduct = next(c for c in cands if c.action.id == "build:aqueduct")
+    assert aqueduct.components.get("opportunity", 0) < 0
+    assert aqueduct.score < 0
 
 
 def test_free_kitten_assigned_to_bottleneck_job():
