@@ -80,6 +80,26 @@
                 job: v.leader.job || null,
             };
         }
+        // Census-Kurzliste für die Leader-Wahl (Spec 12.3): nur die vier
+        // relevanten Felder, defensiv und auf 60 Einträge begrenzt —
+        // village.sim.kittens kann sehr groß werden.
+        const CENSUS_LIMIT = 60;
+        let census = [];
+        let censusTruncated = false;
+        try {
+            const sim = (v.sim && v.sim.kittens) || [];
+            censusTruncated = sim.length > CENSUS_LIMIT;
+            for (let i = 0; i < sim.length && i < CENSUS_LIMIT; i++) {
+                const k = sim[i];
+                census.push({
+                    index: i,
+                    name: ((k.name || "") + " " + (k.surname || "")).trim(),
+                    trait: (k.trait && k.trait.name) || null,
+                    job: k.job || null,
+                    isLeader: !!k.isLeader,
+                });
+            }
+        } catch (e) { census = []; censusTruncated = false; }
         out.village = {
             kittens: v.getKittens(),
             maxKittens: v.maxKittens,
@@ -87,6 +107,8 @@
             happiness: v.happiness,          // 1.0 = 100 %
             jobs: jobs,
             leader: leader,
+            census: census,
+            censusTruncated: censusTruncated,
             // Catnip-Verbrauch der Population pro Sekunde (positiv = Verbrauch):
             catnipDemandPerSec: (() => {
                 const cons = v.getResConsumption();
@@ -103,6 +125,9 @@
             if (!meta.unlocked && !(bd.val > 0)) { continue; }
             let prices = [];
             try { prices = g.bld.getPrices(bd.name) || []; } catch (e) { /* stage-Sonderfälle */ }
+            // Energie-Effekte PRO EINHEIT (Spec 16.4), defensiv: die Effekte
+            // liegen je nach Gebäude in buildingsData bzw. den Stage-Metadaten.
+            const effects = meta.effects || bd.effects || {};
             out.buildings.push({
                 name: bd.name,
                 label: meta.label || bd.name,
@@ -110,6 +135,8 @@
                 on: bd.on,
                 unlocked: !!meta.unlocked,
                 prices: prices.map(p => ({ name: p.name, val: p.val })),
+                energyConsumption: +effects.energyConsumption || 0,
+                energyProduction: +effects.energyProduction || 0,
             });
         }
     });

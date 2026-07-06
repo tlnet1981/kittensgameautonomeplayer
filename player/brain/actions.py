@@ -103,6 +103,29 @@ def shift_job(from_job: str, to_job: str, to_label: str, amount: int = 1) -> Act
     )
 
 
+def toggle_building(name: str, label: str, on: bool) -> Action:
+    """Verbraucher/Erzeuger um EINE Einheit an-/abschalten (Spec 16.4 / Anhang B
+    TOGGLE_BUILDING). `on=False` reduziert die aktive Anzahl um 1."""
+    verb = "Aktiviere" if on else "Deaktiviere"
+    return Action(
+        id=f"toggle:{name}:{'on' if on else 'off'}", type="TOGGLE_BUILDING",
+        label=f"{verb} 1× {label} (Energie-Steuerung)",
+        exec_spec={"kind": "toggle_building", "name": name, "on": on},
+        expected=f"{label}: aktive Anzahl {'+1' if on else '−1'}",
+    )
+
+
+def set_leader(kitten_index: int, label: str) -> Action:
+    """Leader setzen (Spec 12.3 / Anhang B SET_LEADER). `kitten_index` ist der
+    Index in village.sim.kittens (wie im Snapshot-Census)."""
+    return Action(
+        id=f"leader:{kitten_index}", type="SET_LEADER",
+        label=f"Ernenne {label} zum Leader",
+        exec_spec={"kind": "set_leader", "index": kitten_index},
+        expected=f"{label} ist Leader",
+    )
+
+
 def hunt() -> Action:
     return Action(
         id="hunt:all", type="HUNT",

@@ -61,6 +61,48 @@ FIND_AND_CLICK_TAB_JS = """
 }
 """
 
+# Gebäude-Einheit an-/abschalten (Spec 16.4): direkt über bld.get(name).on,
+# mit before/after-Verifikation. `on: true` aktiviert eine Einheit (on += 1),
+# `on: false` deaktiviert eine (on -= 1). Grenzen werden geprüft.
+TOGGLE_BUILDING_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const bld = g && g.bld ? g.bld.get(args.name) : null;
+    if (!bld) return { error: "not_found" };
+    const before = bld.on;
+    if (args.on) {
+        if (before >= bld.val) return { error: "all_on" };
+        bld.on = before + 1;
+    } else {
+        if (before <= 0) return { error: "all_off" };
+        bld.on = before - 1;
+    }
+    return { before: before, after: bld.on, val: bld.val };
+}
+"""
+
+# Leader setzen (Spec 12.3): über village.sim.kittens[index] + makeLeader
+# (falls vorhanden — der censusPanel-DOM-Weg ist fragil), sonst manuell.
+# before/after-Verifikation über die Leader-Identität.
+SET_LEADER_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const v = g ? g.village : null;
+    const kitten = (v && v.sim && v.sim.kittens) ? v.sim.kittens[args.index] : null;
+    if (!kitten) return { error: "kitten_not_found" };
+    const label = (k) => k ? ((k.name || "") + " " + (k.surname || "")).trim() : null;
+    const before = label(v.leader);
+    if (typeof v.makeLeader === "function") {
+        v.makeLeader(kitten);
+    } else {
+        if (v.leader) { v.leader.isLeader = false; }
+        kitten.isLeader = true;
+        v.leader = kitten;
+    }
+    return { ok: v.leader === kitten, before: before, after: label(v.leader) };
+}
+"""
+
 SHIFT_JOB_JS = """
 (args) => {
     const v = game.village;
@@ -104,6 +146,10 @@ class Actor:
                 return await self._adore()
             if kind == "shatter":
                 return await self._shatter(exec_spec)
+            if kind == "toggle_building":
+                return await self._toggle_building(exec_spec)
+            if kind == "set_leader":
+                return await self._set_leader(exec_spec)
             return {"ok": False, "method": "none", "detail": f"Unbekannter kind: {kind}"}
         except Exception as exc:
             return {"ok": False, "method": "error", "detail": str(exc)}
@@ -234,6 +280,33 @@ class Actor:
             {"batch": int(spec.get("batch", 1))},
         )
         return {"ok": done > 0, "method": "js", "detail": f"+{done} Jahre geshattert"}
+
+    async def _toggle_building(self, spec: dict) -> dict:
+        """Eine Gebäude-Einheit an-/abschalten (Energie-Drosselung 16.4).
+        Bonfire-Tab sichtbar machen (Zuschauer sieht die Änderung), dann die
+        exakte API — die kleinen (+/−)-Links sind schwer stabil zu treffen."""
+        await self._ensure_tab("Bonfire")
+        res = await self.browser.evaluate(TOGGLE_BUILDING_JS, {
+            "name": spec["name"], "on": bool(spec.get("on")),
+        })
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"toggle {spec['name']}: {res['error']}"}
+        ok = res.get("after") != res.get("before")   # before/after-Verifikation
+        return {"ok": ok, "method": "js",
+                "detail": (f"{spec['name']}.on: {res.get('before')} → "
+                           f"{res.get('after')} (von {res.get('val')})")}
+
+    async def _set_leader(self, spec: dict) -> dict:
+        """Leader setzen (Spec 12.3) über village.makeLeader — der Weg über
+        game.villageTab.censusPanel wäre DOM-fragil."""
+        await self._ensure_tab("Village")
+        res = await self.browser.evaluate(SET_LEADER_JS, {"index": int(spec["index"])})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"set_leader: {res['error']}"}
+        return {"ok": bool(res.get("ok")), "method": "js",
+                "detail": f"Leader: {res.get('before')} → {res.get('after')}"}
 
     async def _craft(self, spec: dict) -> dict:
         # Workshop-Tab zeigen (falls sichtbar), Craft über die exakte API —

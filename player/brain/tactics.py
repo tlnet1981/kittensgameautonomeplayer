@@ -80,7 +80,8 @@ WAIT_SCORE = 0.01
 # Reine Anzeige-Komponenten (Sekundenwerte der Schattenpreis-/CS-Rechnung) —
 # sie fließen NICHT additiv in den Score ein; netValue geht normiert ein.
 SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue",
-                    "tradeValue", "huntValue", "praiseValue")
+                    "tradeValue", "huntValue", "praiseValue",
+                    "storageB", "storageC", "leaderValue")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -206,6 +207,8 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
                          lam, horizon)
     if banking:
         _banking_candidates(snap, cands)
+    _energy_candidates(snap, cands, lam, horizon)
+    _leader_candidate(snap, cands, lam, goal_prices, horizon)
     _upgrade_candidates(snap, cands, lam)
     _hunt_candidate(snap, cands, lam)
     _craft_candidates(snap, target, bn, cands, lam)
@@ -478,17 +481,15 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
             # Energie-Defizit drosselt Produktion global — Erzeuger vorziehen (16.4).
             comp["energy"] = 2.0
         elif name in STORAGE_BUILDINGS:
-            # Storage-Regel 11.3 A: nur wenn ein Cap das Meilenstein-Ziel blockiert
-            # (oder der Engpass kurz vor Cap-Verlust steht).
-            relief = _storage_relieves(snap, name, cap_blocked_res)
-            if relief:
-                comp["storage"] = 2.2
-            else:
-                near_cap = _bottleneck_near_cap(snap, bn)
-                if near_cap:
-                    comp["storage"] = 1.0
-                else:
-                    continue  # Storage ohne Bedarf ist unzulässig (11.3)
+            # Storage-Regel 11.3: zulässig nur, wenn mindestens eine der
+            # Bedingungen A–D erfüllt ist (siehe _storage_eval).
+            comp, reject = _storage_eval(snap, name, b, bn, cap_blocked_res,
+                                         lam, horizon)
+            if reject:
+                cands.append(Candidate(
+                    actions.buy_building(name, b["label"], b["val"]), 0.0,
+                    dict(comp), feasible=False, reject_reason=reject))
+                continue
         elif name in HOUSING_BUILDINGS:
             comp, reject = _housing_eval(snap, name, b, blocked)
             if reject:
@@ -671,6 +672,132 @@ def _storage_relieves(snap, storage_name, cap_blocked_res) -> bool:
     return cap_blocked_res in relief_map.get(storage_name, set())
 
 
+# Cap-Zuwachs je Storage-Gebäude — REFERENZWERTE Kittens Game 1.5.0.2
+# (buildings.js effects "…Max"). Gekennzeichnete Konstanten: der Snapshot
+# liefert für Gebäude derzeit keine Cap-Effekte; sobald ein Snapshot ein
+# `effects`-Dict mit "…Max"-Einträgen mitbringt, hat das Vorrang
+# (_storage_cap_gains liest zuerst den Snapshot).
+STORAGE_CAP_GAINS: dict[str, dict[str, float]] = {
+    "barn": {"catnip": 5000, "wood": 200, "minerals": 250, "iron": 50},
+    "warehouse": {"wood": 150, "minerals": 200, "iron": 25, "coal": 30,
+                  "gold": 5, "titanium": 10},
+    "harbor": {"catnip": 2500, "wood": 700, "minerals": 950, "iron": 150,
+               "coal": 100, "gold": 25, "titanium": 50},
+}
+# Offline-/Batch-Puffer (11.3 C): ein Entscheidungs-/Snapshot-Intervall,
+# gleicher Referenzpuffer wie HUNT_CAP_BUFFER_S / PRAISE_CAP_BUFFER_S.
+STORAGE_CAP_BUFFER_S = 60.0
+
+
+def _storage_cap_gains(b: dict) -> dict[str, float]:
+    """Cap-Zuwachs des nächsten Exemplars je Ressource. Bevorzugt echte
+    Snapshot-Effekte ("…Max"-Einträge), sonst die Referenztabelle."""
+    effects = b.get("effects") or {}
+    gains = {k[:-3]: float(v) for k, v in effects.items()
+             if k.endswith("Max") and isinstance(v, (int, float)) and v > 0}
+    if gains:
+        return gains
+    return STORAGE_CAP_GAINS.get(b["name"], {})
+
+
+def _storage_carryover_value(snap, gains: dict[str, float],
+                             lam: dict[str, float]) -> float:
+    """Bedingung 11.3 B: zusätzlicher Carryover-Wert in Ziel-Sekunden.
+
+    Nur mit Chronospheres (sonst existiert kein Carryover): der Cap-Zuwachs
+    der gelagerten Ressourcen × Carryover-Anteil (k × 1,5 % je Chronosphere,
+    Referenzwert wie chrono.CARRYOVER_PER_CS) × λ. Zählt nur Ressourcen,
+    die im Snapshot existieren — ein Cap für nie Gelagertes trägt nichts."""
+    cs = A.bld_val(snap, "chronosphere")
+    if cs <= 0 or not lam:
+        return 0.0
+    frac = cs * chrono.CARRYOVER_PER_CS
+    total = 0.0
+    for res in sorted(gains):
+        if A.resource(snap, res) is None:
+            continue
+        total += gains[res] * frac * lam.get(res, 0.0)
+    return total
+
+
+def _storage_overflow_value(snap, gains: dict[str, float], lam: dict[str, float],
+                            horizon: float) -> float:
+    """Bedingung 11.3 C: bewerteter Cap-Verlust in Ziel-Sekunden.
+
+    Läuft eine Ressource mit λ > 0 innerhalb des Puffers (60 s, wie beim
+    Hunt-/Praise-Cap-Timing) über ihr Cap, verfällt ab dann die Produktion:
+    Verlust = Überlaufrate × λ × Horizont-Anteil nach dem Cap-Zeitpunkt.
+    Storage verhindert das nur für Ressourcen, deren Cap es anhebt."""
+    total = 0.0
+    for res in sorted(gains):
+        lam_i = lam.get(res, 0.0)
+        if lam_i <= 0.0:
+            continue
+        r = A.resource(snap, res)
+        if not r or r.get("maxValue", 0) <= 0:
+            continue
+        rate = r.get("perSec", 0.0)
+        if rate <= A.RATE_EPS:
+            continue
+        cap_time = (r["maxValue"] - r["value"]) / rate
+        if cap_time >= STORAGE_CAP_BUFFER_S:
+            continue
+        total += lam_i * rate * max(0.0, horizon - cap_time)
+    return total
+
+
+def _storage_challenge_requires(snap, gains: dict[str, float]) -> bool:
+    """Bedingung 11.3 D: eine Challenge-/Cryo-Bedingung verlangt das Cap.
+
+    Der Snapshot liefert derzeit KEINE Challenge-Sektion — das Gate ist
+    dokumentiert inaktiv (kein Fake) und greift automatisch, sobald ein
+    Snapshot `challenges.activeRequiresCap` (Liste von Ressourcennamen,
+    deren Cap gebraucht wird) mitbringt."""
+    required = snap.get("challenges", {}).get("activeRequiresCap") or []
+    return any(res in gains for res in required)
+
+
+def _storage_eval(snap, name: str, b: dict, bn, cap_blocked_res,
+                  lam, horizon) -> tuple[dict, str | None]:
+    """Storage-Zulässigkeit nach Spec 11.3: (Komponenten, Ablehnungsgrund|None).
+
+    Reihenfolge deterministisch A → D → B → C → Nähe-Cap-Heuristik; die
+    erste erfüllte Bedingung bestimmt die Komponenten. B/C tragen ihren
+    Sekunden-Nettowert als Anzeige-Komponente (storageB/storageC)."""
+    comp: dict[str, float] = {}
+    # A: Cap blockiert das Meilenstein-Ziel.
+    if _storage_relieves(snap, name, cap_blocked_res):
+        comp["storage"] = 2.2
+        return comp, None
+    gains = _storage_cap_gains(b)
+    # D: Challenge-/Cryo-Bedingung verlangt das Cap (harte Anforderung).
+    if _storage_challenge_requires(snap, gains):
+        comp["storage"] = 2.2
+        return comp, None
+    if lam:
+        cost_t = shadow.cost_time(b["prices"], lam)
+        # B: zusätzlicher Carryover-Wert übersteigt die Baukosten.
+        carry = _storage_carryover_value(snap, gains, lam)
+        if carry > cost_t and carry > 1e-9:
+            comp["storage"] = 1.0
+            comp["storageB"] = carry - cost_t   # Sekundenwert, nur Anzeige
+            return comp, None
+        # C: verhinderter Cap-Verlust übersteigt die Baukosten.
+        overflow = _storage_overflow_value(snap, gains, lam, horizon)
+        if overflow > cost_t and overflow > 1e-9:
+            comp["storage"] = 1.0
+            comp["storageC"] = overflow - cost_t   # Sekundenwert, nur Anzeige
+            return comp, None
+    # Bestandsheuristik (Teil von A, „Engpass > 90 % voll"):
+    if _bottleneck_near_cap(snap, bn):
+        comp["storage"] = 1.0
+        return comp, None
+    return {}, ("keine Storage-Bedingung erfüllt (11.3 A–D): kein Cap blockiert "
+                "das Ziel (A), Carryover-Gewinn unter Baukosten (B), kein "
+                "bewerteter Cap-Verlust im Puffer (C), keine Challenge "
+                "verlangt das Cap (D)")
+
+
 def _bottleneck_near_cap(snap, bn) -> bool:
     if not bn or not bn.get("resource"):
         return False
@@ -678,6 +805,173 @@ def _bottleneck_near_cap(snap, bn) -> bool:
     if not r or not r.get("maxValue"):
         return False
     return r["value"] / r["maxValue"] > 0.9
+
+
+# ---------------------------------------------------------------- Energie (16.4)
+
+# Lebenswichtige Gebäude (Housing/Food) werden NIE gedrosselt (16.4 Schritt 3:
+# „bis harte Anforderungen erfüllt sind" — Housing/Food SIND harte Anforderungen):
+ENERGY_VITAL_BUILDINGS = HOUSING_BUILDINGS | {"field", "pasture", "aqueduct"}
+# Anti-Flattern (Hysterese): Wieder anschalten erst, wenn der Überschuss den
+# Verbrauch der Einheit um diese Marge übersteigt — sonst würde derselbe
+# Verbraucher im nächsten Zyklus sofort wieder abgeschaltet.
+ENERGY_REACTIVATE_MARGIN = 1.0
+
+
+def _energy_unit_value(snap, name: str, lam, horizon: float) -> float:
+    """λ-bewerteter Produktionsbeitrag EINER aktiven Einheit in Ziel-Sekunden
+    (16.4 Schritt 2: marginale Output-Einbuße beim Abschalten)."""
+    produces = BUILDING_PRODUCES.get(name)
+    if not produces or not lam:
+        return 0.0
+    return shadow.benefit_time(_building_rate_delta(snap, name, produces),
+                               lam, horizon)
+
+
+def _energy_candidates(snap, cands, lam, horizon) -> None:
+    """Energie-Drosselung nach Spec 16.4 (Schritte 2, 3 und 5).
+
+    Defizit: unter den aktiven, nicht lebenswichtigen Verbrauchern
+    (on > 0, energyConsumption > 0) den mit dem KLEINSTEN Zielbeitrag pro
+    Energieeinheit abschalten. Überschuss: abgeschaltete Einheiten (on < val)
+    in absteigender Grenznutzen-Reihenfolge reaktivieren — aber nur mit
+    Hysterese (Überschuss > Einheitsverbrauch + Marge, Anti-Flattern).
+    Fallbacks: ohne Energie-Felder im Snapshot oder (beim Abschalten) ohne
+    λ-Daten entsteht kein Kandidat — Altverhalten (nur Erzeuger-Vorrang)."""
+    balance = snap.get("derived", {}).get("energy", {}).get("balance", 0)
+    consumers = [b for b in snap.get("buildings", [])
+                 if (b.get("energyConsumption") or 0) > 0
+                 and b["name"] not in ENERGY_VITAL_BUILDINGS]
+    if balance < 0:
+        if not lam:
+            return   # keine λ-Daten → kein Zielbeitrag bestimmbar (Fallback)
+        active = [b for b in consumers if b.get("on", 0) > 0]
+        if not active:
+            return
+        # Kleinster Zielbeitrag je Energieeinheit zuerst; Tie-Break Name:
+        b = min(active, key=lambda x: (
+            _energy_unit_value(snap, x["name"], lam, horizon)
+            / x["energyConsumption"], x["name"]))
+        comp = {"energyRelief": 1.5}
+        cands.append(Candidate(
+            actions.toggle_building(b["name"], b["label"], on=False),
+            _score(comp), comp))
+        return
+    # Reaktivierung nur bei echtem Überschuss inkl. Hysterese-Marge:
+    reactivatable = [b for b in consumers
+                     if b.get("on", 0) < b.get("val", 0)
+                     and balance > b["energyConsumption"] + ENERGY_REACTIVATE_MARGIN]
+    if not reactivatable:
+        return
+    # Größter Zielbeitrag zuerst (Grenznutzen-Reihenfolge, 16.4 Schritt 5);
+    # ohne λ-Daten sind alle Beiträge 0 → deterministisch nach Name.
+    b = min(reactivatable, key=lambda x: (
+        -_energy_unit_value(snap, x["name"], lam, horizon), x["name"]))
+    comp = {"energyRelief": 1.0}
+    cands.append(Candidate(
+        actions.toggle_building(b["name"], b["label"], on=True),
+        _score(comp), comp))
+
+
+# ---------------------------------------------------------------- Leader (12.3)
+
+# Leader-Trait-Effekte — REFERENZWERTE Kittens Game 1.5.0.2 (village.js
+# Traits + deren Verbraucher in workshop/science/religion/diplomacy).
+# Gekennzeichnete Konstanten: der Snapshot liefert keine Trait-Effektdaten.
+#   manager      +50 %  Jagd-Ertrag
+#   merchant     +3 %   Handelsertrag
+#   engineer     +5 %   Craft-Ausbeute (alle Rezepte)
+#   scientist    −5 %   Science-Preise (Forschung)
+#   wise         −10 %  Religion-Preise (Faith/Gold)
+#   chemist      +7,5 % Craft-Ausbeute Chemie (Kerosene/Eludium)
+#   metallurgist +10 %  Craft-Ausbeute Metall (Plate/Steel/Gear/Alloy)
+#   none         kein Effekt
+LEADER_TRAIT_BONUS: dict[str, float] = {
+    "manager": 0.5, "merchant": 0.03, "engineer": 0.05, "scientist": 0.05,
+    "wise": 0.1, "chemist": 0.075, "metallurgist": 0.1,
+}
+LEADER_TRAIT_RESOURCES: dict[str, tuple[str, ...]] = {
+    "manager": ("furs", "ivory", "unicorns"),
+    "scientist": ("science",),
+    "wise": ("faith", "gold"),
+    "chemist": ("kerosene", "eludium"),
+    "metallurgist": ("plate", "steel", "gear", "alloy"),
+}
+# Wechselschwelle in Ziel-Sekunden: der Wechselgewinn muss die Wechsel- und
+# Interaktionskosten bis zum nächsten Replanning übersteigen (Spec 12.3);
+# zwei Entscheidungsintervalle als Anti-Flattern-Marge.
+LEADER_SWITCH_MIN_S = 120.0
+
+
+def _leader_trait_resources(snap, trait: str | None) -> tuple[str, ...]:
+    """Adressierte Ressourcen eines Traits; engineer/merchant dynamisch aus
+    dem Snapshot (alle Craft-Produkte bzw. alle Trade-Angebote)."""
+    if trait == "engineer":
+        return tuple(sorted(c["name"] for c in
+                            snap.get("workshop", {}).get("crafts", [])))
+    if trait == "merchant":
+        return tuple(sorted({s["name"] for r in A.races(snap)
+                             for s in r.get("sells", [])}))
+    return LEADER_TRAIT_RESOURCES.get(trait or "", ())
+
+
+def _leader_trait_value(snap, trait: str | None, lam, goal_prices,
+                        horizon: float) -> float:
+    """Prognostizierte Zielzeitverkürzung eines Traits in Sekunden (12.3).
+
+    Heuristik: Bonus × λ-bewertete Menge der adressierten Ressourcen.
+    Menge = fehlende Zielmenge (steht die Ressource im aktiven Preisvektor —
+    Rabatte/Boni wirken auf die teuerste laufende Aktivität), sonst die
+    laufende Produktion über den Horizont. Ohne λ-Daten: 0."""
+    bonus = LEADER_TRAIT_BONUS.get(trait or "", 0.0)
+    if bonus <= 0.0 or not lam:
+        return 0.0
+    total = 0.0
+    for res in _leader_trait_resources(snap, trait):
+        lam_i = lam.get(res, 0.0)
+        if lam_i <= 0.0:
+            continue
+        need = next((max(0.0, p["val"] - A.res_value(snap, res))
+                     for p in (goal_prices or []) if p["name"] == res), None)
+        amount = (need if need is not None
+                  else max(0.0, A.res_rate(snap, res)) * horizon)
+        total += bonus * lam_i * amount
+    return total
+
+
+def _leader_candidate(snap, cands, lam, goal_prices, horizon) -> None:
+    """Leader-Wahl (Spec 12.3): Trait mit der größten Zielzeitverkürzung.
+
+    Kandidat nur, wenn (a) kein Leader gesetzt ist (Erstwahl) oder (b) der
+    Wechselgewinn die Schwelle LEADER_SWITCH_MIN_S übersteigt. Ohne
+    Census-Daten im Snapshot: kein Kandidat (Fallback = Altverhalten)."""
+    village = snap.get("village", {})
+    census = village.get("census") or []
+    if not census:
+        return
+    scored = [(_leader_trait_value(snap, k.get("trait"), lam, goal_prices,
+                                   horizon), k) for k in census]
+    # Deterministisch: größter Wert, dann echte Traits vor "none", dann Index.
+    scored.sort(key=lambda t: (
+        -t[0], 0 if (t[1].get("trait") or "none") != "none" else 1,
+        t[1].get("index", 0)))
+    best_val, best = scored[0]
+    leader = village.get("leader")
+    comp: dict[str, float] = {"leader": 1.2}
+    if leader:
+        if best.get("isLeader"):
+            return   # der beste Kandidat führt bereits
+        gain = best_val - _leader_trait_value(snap, leader.get("trait"), lam,
+                                              goal_prices, horizon)
+        if gain <= LEADER_SWITCH_MIN_S:
+            return   # Wechsel lohnt die Interaktionskosten nicht (12.3)
+        comp["leaderValue"] = gain          # Sekundenwert, nur Anzeige
+    elif best_val > 0:
+        comp["leaderValue"] = best_val      # Sekundenwert, nur Anzeige
+    trait = best.get("trait") or "none"
+    label = f"{best.get('name') or 'Kitten'} ({trait})"
+    cands.append(Candidate(
+        actions.set_leader(best.get("index", 0), label), _score(comp), comp))
 
 
 # ---------------------------------------------------------------- Upgrades
@@ -1198,11 +1492,16 @@ REASON_TEMPLATES = {
     "jobValue": "Freie Kitten sind ungenutzte Produktion — {label}.",
     "unlock": "{label} schaltet neue Möglichkeiten frei (Unlock-first-Regel).",
     "housing": "{label}: mehr Kitten = mehr Produktion (Food-Reserve ist sicher).",
-    "storage": "{label}: das aktuelle Cap blockiert den Fortschritt (Storage-Regel A).",
+    "storage": "{label}: eine Storage-Bedingung ist erfüllt (Storage-Regel 11.3 A–D).",
+    "storageB": "{label}: zusätzlicher Carryover-Wert übersteigt die Baukosten (11.3 B).",
+    "storageC": "{label}: verhindert bewerteten Cap-Verlust im Puffer (11.3 C).",
     "capLoss": "{label} verhindert Produktionsverlust am Ressourcen-Cap.",
     "economy": "{label} ist eine günstige Ökonomie-Investition.",
     "happiness": "{label}: Happiness wirkt als Multiplikator auf die gesamte Produktion.",
     "energy": "{label}: das Energie-Defizit drosselt die Produktion (Invariante I-04).",
+    "energyRelief": "{label}: Energie-Steuerung nach 16.4 (Zielbeitrag je Energieeinheit).",
+    "leader": "{label}: Trait mit der größten Zielzeitverkürzung (Leader-Regel 12.3).",
+    "leaderValue": "{label}: prognostizierter Zielzeitgewinn des Trait-Wechsels (12.3).",
     "netValue": "{label} spart netto Zielzeit (Schattenpreis-Bewertung 10.2/10.3).",
     "benefitTime": "{label} beschleunigt das Ziel (Benefit in Ziel-Sekunden).",
     "costTime": "{label} kostet Ziel-Sekunden (Schattenpreis-Bewertung).",
