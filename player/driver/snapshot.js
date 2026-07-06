@@ -196,6 +196,37 @@
         }
     });
 
+    section("space", () => {
+        out.space = { programs: [], planets: [] };
+        if (g.space && g.space.programs) {
+            for (const p of g.space.programs) {
+                if (!p.unlocked && !(p.val > 0)) { continue; }
+                out.space.programs.push({
+                    name: p.name, label: p.label, val: p.val || 0,
+                    unlocked: !!p.unlocked,
+                    prices: (p.prices || []).map(x => ({ name: x.name, val: x.val })),
+                });
+            }
+            for (const planet of (g.space.planets || [])) {
+                if (!planet.unlocked) { continue; }
+                out.space.planets.push({
+                    name: planet.name, label: planet.label,
+                    buildings: (planet.buildings || [])
+                        .filter(b => b.unlocked || b.val > 0)
+                        .map(b => ({
+                            name: b.name, label: b.label, val: b.val || 0,
+                            unlocked: !!b.unlocked,
+                            // Effektivpreise inkl. Price Ratio:
+                            prices: (b.prices || []).map(x => ({
+                                name: x.name,
+                                val: x.val * Math.pow(b.priceRatio || 1, b.val || 0),
+                            })),
+                        })),
+                });
+            }
+        }
+    });
+
     section("effects", () => {
         // Basis-Catnip-Produktion der Felder (pro Tick, vor Saison-Modifier).
         // Grundlage der Worst-Winter-Reserverechnung (Spec 7.2).

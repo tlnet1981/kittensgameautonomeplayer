@@ -15,11 +15,14 @@ from typing import Any
 
 from .browser import GameBrowser
 
-# Button per Titel finden, Glow setzen, Klickposition liefern.
+# Button per Titel finden, Glow setzen und DIREKT im selben Aufruf klicken.
+# Wichtig: Suche und Klick müssen atomar sein — das Spiel rendert seine
+# Tabs laufend neu, Koordinaten aus einem früheren Aufruf wären veraltet
+# (im Test verfehlten Maus-Klicks dadurch ihr Ziel).
 # args.panel (optional) grenzt die Suche auf einen Panel-Container ein —
 # wichtig bei Namenskollisionen (z. B. Policy „Diplomacy" vs. Metaphysics-
 # Perk „Diplomacy" im selben Science-Tab!).
-FIND_BUTTON_JS = """
+FIND_AND_CLICK_BUTTON_JS = """
 (args) => {
     let root = document;
     if (args.panel) {
@@ -40,21 +43,21 @@ FIND_BUTTON_JS = """
     el.scrollIntoView({ block: 'center' });
     el.classList.add('kgp-glow');
     setTimeout(() => el.classList.remove('kgp-glow'), args.glowMs);
-    const r = el.getBoundingClientRect();
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    if (args.click) { el.click(); }
+    return { clicked: !!args.click };
 }
 """
 
-# Spiel-Tab aktivieren (a.tab.<TabId>), Glow + Klickposition.
-FIND_TAB_JS = """
+# Spiel-Tab aktivieren (a.tab.<TabId>), Glow + Klick atomar.
+FIND_AND_CLICK_TAB_JS = """
 (args) => {
     const el = document.querySelector('a.tab.' + args.tab);
     if (!el) return { error: "not_found" };
     if (el.classList.contains('activeTab')) return { already: true };
     el.classList.add('kgp-glow');
     setTimeout(() => el.classList.remove('kgp-glow'), args.glowMs);
-    const r = el.getBoundingClientRect();
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    el.click();
+    return { clicked: true };
 }
 """
 
@@ -104,14 +107,13 @@ class Actor:
     # ------------------------------------------------------------ Grundbausteine
 
     async def _ensure_tab(self, tab: str) -> bool:
-        res = await self.browser.evaluate(FIND_TAB_JS, {"tab": tab, "glowMs": self.glow_ms})
+        res = await self.browser.evaluate(FIND_AND_CLICK_TAB_JS,
+                                          {"tab": tab, "glowMs": self.glow_ms})
         if res.get("already"):
             return True
         if res.get("error"):
             return False
-        await asyncio.sleep(0.25)   # Glow kurz sichtbar lassen
-        await self.browser.page.mouse.click(res["x"], res["y"])
-        await asyncio.sleep(0.35)   # Tab-Rendering abwarten
+        await asyncio.sleep(0.35)   # Tab-Rendering abwarten (Glow läuft parallel)
         return True
 
     async def _click_button(self, spec: dict) -> dict:
@@ -122,20 +124,18 @@ class Actor:
             return {"ok": False, "method": "dom", "detail": f"Tab {tab} nicht verfügbar"}
         clicks = 0
         for i in range(batch):
-            res = await self.browser.evaluate(FIND_BUTTON_JS, {
+            res = await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
                 "title": title, "glowMs": self.glow_ms, "panel": spec.get("panel"),
+                "click": True,
             })
             if res.get("error"):
                 if clicks > 0:
                     break   # Teilcharge ok (z. B. Ressourcen aufgebraucht)
                 return {"ok": False, "method": "dom",
                         "detail": f"Button „{title}“: {res['error']}"}
-            if i == 0:
-                await asyncio.sleep(0.25)  # ersten Glow zeigen
-            await self.browser.page.mouse.click(res["x"], res["y"])
             clicks += 1
-            if batch > 1:
-                await asyncio.sleep(0.09)
+            # Glow/Reaktion sichtbar lassen; bei Chargen zügig weiter:
+            await asyncio.sleep(0.12 if batch > 1 else 0.3)
         return {"ok": True, "method": "dom", "detail": f"{clicks}× geklickt"}
 
     # ------------------------------------------------------------ Spezialfälle
@@ -168,11 +168,11 @@ class Actor:
     async def _hunt(self) -> dict:
         await self._ensure_tab("Village")
         # Sichtbarer Versuch über den Button, sonst API:
-        res = await self.browser.evaluate(FIND_BUTTON_JS,
-                                          {"title": "Send hunters", "glowMs": self.glow_ms})
+        res = await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS,
+                                          {"title": "Send hunters", "glowMs": self.glow_ms,
+                                           "click": True})
         if not res.get("error"):
             await asyncio.sleep(0.25)
-            await self.browser.page.mouse.click(res["x"], res["y"])
             return {"ok": True, "method": "dom", "detail": "Send hunters geklickt"}
         await self.browser.evaluate("() => game.village.huntAll()")
         return {"ok": True, "method": "js-fallback", "detail": "huntAll()"}
@@ -195,11 +195,11 @@ class Actor:
 
     async def _praise(self) -> dict:
         await self._ensure_tab("Religion")
-        res = await self.browser.evaluate(FIND_BUTTON_JS,
-                                          {"title": "Praise the sun", "glowMs": self.glow_ms})
+        res = await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS,
+                                          {"title": "Praise the sun", "glowMs": self.glow_ms,
+                                           "click": True})
         if not res.get("error"):
             await asyncio.sleep(0.25)
-            await self.browser.page.mouse.click(res["x"], res["y"])
             return {"ok": True, "method": "dom", "detail": "Praise the sun geklickt"}
         await self.browser.evaluate("() => game.religion.praise()")
         return {"ok": True, "method": "js-fallback", "detail": "religion.praise()"}

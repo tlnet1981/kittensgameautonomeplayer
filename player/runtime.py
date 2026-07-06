@@ -83,6 +83,7 @@ class PlayerRuntime:
             "economy": viewmodels.economy_vm(snap) if snap else None,
             "population": viewmodels.population_vm(snap) if snap else None,
             "health": viewmodels.health_vm(self._state, age, self._errors),
+            "systems": viewmodels.systems_vm(snap) if snap else None,
             "currentDecision": current_action,
             "plan": plan,
         }

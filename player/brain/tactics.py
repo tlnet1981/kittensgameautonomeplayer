@@ -43,14 +43,24 @@ BUILDING_PRODUCES = {
     "lumberMill": "wood",
     "library": "science",
     "academy": "science",
+    "observatory": "starchart",  # erhöht Astro-Event-Ertrag & Science
+    "biolab": "science",
     "smelter": "iron",
+    "calciner": "iron",
     "quarry": "minerals",
+    "oilWell": "oil",
+    "accelerator": "uranium",
+    "reactor": "uranium",
 }
 HOUSING_BUILDINGS = {"hut", "logHouse", "mansion"}
 STORAGE_BUILDINGS = {"barn", "warehouse", "harbor"}
-# Gebäude, die der generische Ökonomie-Score in M1 überhaupt anfasst:
+# Energie-Erzeuger (Spec 16.4): bei Defizit priorisiert.
+ENERGY_PRODUCERS = {"steamworks", "magneto", "solarFarm", "hydroPlant", "reactor"}
+# Gebäude, die der generische Ökonomie-Score überhaupt anfasst:
 ECONOMY_WHITELIST = (set(BUILDING_PRODUCES) | HOUSING_BUILDINGS | STORAGE_BUILDINGS
-                     | {"workshop", "unicornPasture", "amphitheatre", "tradepost", "temple"})
+                     | ENERGY_PRODUCERS
+                     | {"workshop", "unicornPasture", "amphitheatre", "tradepost",
+                        "temple", "factory", "chapel", "aqueduct", "ziggurat"})
 
 # Craft-Rezepte zur Cap-Verlust-Vermeidung: Input-Ressource -> Craft-Name.
 CAP_RELIEF_CRAFTS = {
@@ -108,6 +118,11 @@ def _target_prices(snap: dict, target: dict | None) -> list[dict] | None:
             if p["name"] == target["name"] and not p["researched"]:
                 return p["prices"]
         return None
+    if target["kind"] == "space_program":
+        for p in snap.get("space", {}).get("programs", []):
+            if p["name"] == target["name"]:
+                return p["prices"]
+        return None
     return None
 
 
@@ -120,6 +135,9 @@ def _target_obj(snap: dict, target: dict | None) -> dict | None:
         return A.tech(snap, target["name"])
     if target["kind"] == "perk":
         return next((p for p in snap.get("prestige", {}).get("perks", [])
+                     if p["name"] == target["name"]), None)
+    if target["kind"] == "space_program":
+        return next((p for p in snap.get("space", {}).get("programs", [])
                      if p["name"] == target["name"]), None)
     return None
 
@@ -145,6 +163,7 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     _trade_candidates(snap, bn, cands)
     _praise_candidate(snap, cands)
     _festival_candidate(snap, cands)
+    _space_building_candidates(snap, bn, cands)
     _wait_candidate(snap, bn, cands, meta_view)
 
     # Deterministisch sortieren: Score absteigend, dann Action-ID (C.2).
@@ -189,6 +208,8 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
                                    reject_reason="Perk noch nicht freigeschaltet (Metaphysics/Vorgänger fehlt)"))
             return
         act = actions.buy_perk(target["name"], obj.get("label") or target["name"])
+    elif target["kind"] == "space_program":
+        act = actions.space_program(target["name"], obj.get("label") or target["name"])
     else:
         act = actions.research(target["name"], obj["label"])
 
@@ -224,17 +245,19 @@ def _job_candidates(snap, bn, cands) -> None:
         ))
         return
 
-    # Sonst: Job, der den Engpass produziert; Fallback-Prioritätsliste.
+    # Sonst: Job, der den Engpass produziert; ohne Engpass ausgewogen
+    # verteilen (den am dünnsten besetzten Basisjob auffüllen).
     job = None
     src = "Engpass"
     if bn and bn.get("resource"):
         job = RESOURCE_JOB.get(bn["resource"])
     if not job or not A.job_unlocked(snap, job):
-        src = "Basispriorität"
-        for j in ("woodcutter", "farmer", "scholar", "miner", "hunter"):
-            if A.job_unlocked(snap, j):
-                job = j
-                break
+        src = "Balance"
+        unlocked = [j for j in ("woodcutter", "farmer", "scholar", "miner",
+                                "hunter", "geologist", "priest")
+                    if A.job_unlocked(snap, j)]
+        if unlocked:
+            job = min(unlocked, key=lambda j: (A.job_count(snap, j), unlocked.index(j)))
     if job:
         label = next((j["title"] for j in village.get("jobs", []) if j["name"] == job), job)
         cands.append(Candidate(
@@ -323,8 +346,13 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None) -> Non
         if not A.affordable(snap, b["prices"]):
             continue
 
+        energy_deficit = snap.get("derived", {}).get("energy", {}).get("balance", 0) < 0
+
         comp: dict[str, float] = {}
-        if name in STORAGE_BUILDINGS:
+        if name in ENERGY_PRODUCERS and energy_deficit:
+            # Energie-Defizit drosselt Produktion global — Erzeuger vorziehen (16.4).
+            comp["energy"] = 2.0
+        elif name in STORAGE_BUILDINGS:
             # Storage-Regel 11.3 A: nur wenn ein Cap das Meilenstein-Ziel blockiert
             # (oder der Engpass kurz vor Cap-Verlust steht).
             relief = _storage_relieves(snap, name, cap_blocked_res)
@@ -418,8 +446,19 @@ def _hunt_candidate(snap, cands) -> None:
 
 def _craft_candidates(snap, target, bn, cands) -> None:
     prices_target = _target_prices(snap, target) or []
-    needed_crafts = {p["name"] for p in prices_target} & {"beam", "slab", "plate", "scaffold"}
 
+    # a) Kaskadierendes Crafting Richtung Meilenstein (Craft-Graph 11.2 light):
+    #    Braucht das Ziel z. B. Blueprints, deren Inputs (Compendia) fehlen,
+    #    steigt die Kaskade rekursiv ab: Parchment → Manuscript → Compendium
+    #    → Blueprint. Pro Zyklus entsteht der jeweils tiefste machbare Craft.
+    seen: set[str] = set()
+    for p in prices_target:
+        if A.craft_recipe(snap, p["name"]) is not None:
+            gap = p["val"] - A.res_value(snap, p["name"])
+            if gap > 0:
+                _craft_toward(snap, p["name"], gap, cands, depth=0, seen=seen)
+
+    # b) Cap-Verlust am Input vermeiden (11.4):
     for input_res, craft_name in CAP_RELIEF_CRAFTS.items():
         recipe = A.craft_recipe(snap, craft_name)
         if not recipe:
@@ -427,28 +466,74 @@ def _craft_candidates(snap, target, bn, cands) -> None:
         r = A.resource(snap, input_res)
         if not r or r.get("maxValue", 0) <= 0:
             continue
-        price = next((p["val"] for p in recipe["prices"] if p["name"] == input_res), None)
+        price = next((q["val"] for q in recipe["prices"] if q["name"] == input_res), None)
         if not price:
             continue
-
-        comp: dict[str, float] = {}
-        batch = 0
-        # a) Meilenstein braucht das Craftprodukt:
-        if craft_name in needed_crafts:
-            need = next((p["val"] for p in prices_target if p["name"] == craft_name), 0)
-            have = A.res_value(snap, craft_name)
-            gap = max(0.0, need - have)
-            if gap > 0 and r["value"] >= price:
-                batch = max(1, min(10, int(r["value"] // price), math.ceil(gap)))
-                comp["milestone"] = 2.0
-        # b) Cap-Verlust am Input vermeiden (11.4):
-        elif r["value"] / r["maxValue"] > 0.92 and r["value"] >= price:
+        if r["value"] / r["maxValue"] > 0.92 and r["value"] >= price \
+                and craft_name not in seen:
             batch = max(1, min(10, int((r["value"] * 0.3) // price)))
-            comp["capLoss"] = 1.6
-
-        if batch > 0:
             cands.append(Candidate(actions.craft(craft_name, recipe["label"], batch),
-                                   sum(comp.values()), comp))
+                                   1.6, {"capLoss": 1.6}))
+
+
+def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
+                  seen: set[str]) -> None:
+    """Rekursiver Abstieg im Craft-Graphen (max. Tiefe 4)."""
+    if depth > 4 or craft_name in seen:
+        return
+    seen.add(craft_name)
+    recipe = A.craft_recipe(snap, craft_name)
+    if recipe is None:
+        return
+    missing = A.missing_for(snap, recipe["prices"])
+    if not missing:
+        # Inputs vorhanden → so viele craften wie sinnvoll (bis 10)
+        max_by_inputs = min(
+            (A.res_value(snap, q["name"]) // q["val"]
+             for q in recipe["prices"] if q["val"] > 0), default=1)
+        batch = max(1, min(10, int(max_by_inputs), math.ceil(gap)))
+        score = max(0.5, 2.0 - 0.1 * depth)
+        cands.append(Candidate(actions.craft(craft_name, recipe["label"], batch),
+                               score, {"milestone": score}))
+        return
+    # Inputs fehlen → craftbare Inputs eine Ebene tiefer anstoßen
+    for m in missing:
+        if A.craft_recipe(snap, m["name"]) is not None:
+            _craft_toward(snap, m["name"], m["missing"], cands, depth + 1, seen)
+
+
+# ---------------------------------------------------------------- Space
+
+# Welche Planeten-Gebäude produzieren was (für Engpass-Kopplung):
+SPACE_BUILDING_PRODUCES = {
+    "sattelite": "starchart",
+    "moonOutpost": "unobtainium",
+    "planetCracker": "uranium",
+    "hydrofracturer": "oil",
+    "researchVessel": "starchart",
+    "sunlifter": "energy",
+}
+
+
+def _space_building_candidates(snap, bn, cands) -> None:
+    for planet in snap.get("space", {}).get("planets", []):
+        for b in planet.get("buildings", []):
+            if not b["unlocked"] or not A.affordable(snap, b["prices"]):
+                continue
+            comp: dict[str, float] = {}
+            produces = SPACE_BUILDING_PRODUCES.get(b["name"])
+            if bn and produces and produces == bn.get("resource"):
+                comp["bottleneck"] = 1.8
+            else:
+                comp["economy"] = 0.8   # Space-Ausbau ist fast immer Fortschritt
+            act = actions.Action(
+                id=f"space_bld:{b['name']}", type="BUY_BUILDING",
+                label=f"Baue {b['label']} ({planet['label']}, Nr. {b['val'] + 1})",
+                exec_spec={"kind": "click_button", "tab": "Space",
+                           "panel": planet["label"], "title": b["label"], "batch": 1},
+                expected=f"{b['label']} auf {b['val'] + 1}",
+            )
+            cands.append(Candidate(act, sum(comp.values()), comp))
 
 
 # ---------------------------------------------------------------- Handel
@@ -464,8 +549,10 @@ def _trade_candidates(snap, bn, cands) -> None:
     gold = A.res_value(snap, "gold")
     manpower = A.res_value(snap, "manpower")
 
-    # Kundschafter: neue Handelspartner sind ein Unlock (Optionswert).
-    if diplo.get("undiscovered") and manpower >= 1000:
+    # Kundschafter: WEITERE Handelspartner sind ein Unlock (Optionswert).
+    # Der erste kommt automatisch per Emissär — vorher wäre der Catpower-
+    # Einsatz verschwendet (diplomacy.js: unlockRandomRace via update()).
+    if diplo.get("undiscovered") and manpower >= 1000 and races:
         cands.append(Candidate(actions.explore(), 1.6, {"unlock": 1.6}))
 
     if not races:
@@ -564,6 +651,7 @@ REASON_TEMPLATES = {
     "capLoss": "{label} verhindert Produktionsverlust am Ressourcen-Cap.",
     "economy": "{label} ist eine günstige Ökonomie-Investition.",
     "happiness": "{label}: Happiness wirkt als Multiplikator auf die gesamte Produktion.",
+    "energy": "{label}: das Energie-Defizit drosselt die Produktion (Invariante I-04).",
     "base": "{label}",
 }
 

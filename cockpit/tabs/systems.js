@@ -36,6 +36,25 @@
       escapeHtml(g.name) + ' <span class="muted small">— ' + escapeHtml(g.detail) + "</span></div>"
     ).join("") || "<span class='muted'>–</span>";
 
+    // Space-Panel (M4)
+    const sys = store.systems;
+    const spaceBox = document.getElementById("space-box");
+    if (spaceBox && sys && sys.space) {
+      const programs = sys.space.programs || [];
+      const done = programs.filter(p => p.val > 0).map(p => escapeHtml(p.label));
+      const planets = (sys.space.planets || []).map(pl =>
+        "<strong>" + escapeHtml(pl.label) + "</strong>: " +
+        (pl.buildings.map(b => escapeHtml(b.label) + " ×" + b.val).join(", ") || "–")
+      );
+      const energy = sys.energy || {};
+      spaceBox.innerHTML = programs.length === 0
+        ? "<span class='muted'>Noch kein Zugang zum Weltraum (Rocketry fehlt).</span>"
+        : "Missionen: " + (done.join(" · ") || "<span class='muted'>keine abgeschlossen</span>") +
+          "<br>" + (planets.join("<br>") || "") +
+          "<br><span class='muted small'>Energie-Saldo: " +
+          (energy.balance !== undefined ? energy.balance.toFixed(1) + " Wt" : "–") + "</span>";
+    }
+
     // Metaphysics-Reihenfolge
     const metaBox = document.getElementById("metaphysics-box");
     const perk = plan && plan.nextPerk;

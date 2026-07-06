@@ -61,6 +61,18 @@ def create_app() -> FastAPI:
             return JSONResponse({"ok": False, "error": f"Unbekanntes Kommando: {cmd}"}, status_code=400)
         return JSONResponse({"ok": True, "state": runtime.state})
 
+    @app.post("/api/debug/eval")
+    async def debug_eval(payload: dict) -> JSONResponse:
+        """Debug/Test: beliebiges JS im Spielkontext ausführen (nur localhost).
+        Für Entwicklung und zum „Cheaten" beim privaten Zusehen gedacht."""
+        if runtime.browser is None:
+            return JSONResponse({"ok": False, "error": "Browser nicht gestartet"}, status_code=409)
+        try:
+            result = await runtime.browser.evaluate(payload.get("js", "() => null"))
+            return JSONResponse({"ok": True, "result": result})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
     @app.get("/api/timeline")
     async def timeline(limit: int = 500) -> JSONResponse:
         events = runtime.store.read_events(limit) if runtime.store else []

@@ -41,6 +41,11 @@ def _bld_visible(name: str) -> Callable[[dict], bool]:
     return lambda snap: A.building(snap, name) is not None
 
 
+def _tech_visible(name: str) -> Callable[[dict], bool]:
+    """Tech ist im Spiel sichtbar/erforschbar (Vorgänger erforscht)."""
+    return lambda snap: A.tech(snap, name) is not None
+
+
 # ---------------------------------------------------------------- P0-Meilensteine
 # Reihenfolge nach Spec 9 / Monstrous Advice: Food → Housing → Science →
 # Storage → Jagd → Mining → Workshop → Metall → Akademie → Konstruktion.
@@ -113,20 +118,31 @@ P0_MILESTONES: list[Milestone] = [
               {"kind": "research", "name": "civil"}),
     Milestone("currency", "Currency erforschen (Handel naht)", _tech("currency"),
               {"kind": "research", "name": "currency"}),
-    # --- M2: Handel, Kultur, Religion-Basis ---
+    # --- M2/M4: Handel, Schrift, Religion-Basis (Reihenfolge = echte
+    #     Unlock-Kette der Referenzversion, siehe docs/game-api.md) ---
     Milestone("tradepost_1", "Handelsposten bauen", _bld(1, "tradepost"),
               {"kind": "build", "name": "tradepost"},
               visible=_tech("currency")),
+    Milestone("engineering", "Engineering erforschen", _tech("engineering"),
+              {"kind": "research", "name": "engineering"},
+              visible=_tech_visible("engineering")),
+    Milestone("writing", "Writing erforschen", _tech("writing"),
+              {"kind": "research", "name": "writing"},
+              visible=_tech_visible("writing")),
     Milestone("philosophy", "Philosophy erforschen", _tech("philosophy"),
-              {"kind": "research", "name": "philosophy"}),
-    Milestone("explore_race", "Handelspartner entdecken (1000 Catpower)",
+              {"kind": "research", "name": "philosophy"},
+              visible=_tech_visible("philosophy")),
+    # Der ERSTE Handelspartner kommt automatisch per Emissär (Jahr 20; früher
+    # mit Karma/Diplomacy-Perk, diplomacy.js:336) — kein aktives Ziel nötig.
+    # Der Meilenstein wird erst kurz davor sichtbar, damit er die Kette nicht
+    # blockiert; weitere Rassen findet der Kundschafter-Kandidat (tactics).
+    Milestone("explore_race", "Erster Handelspartner (Emissär)",
               lambda snap: len(snap.get("diplomacy", {}).get("races", [])) > 0,
-              {"kind": "resource", "name": "manpower", "amount": 1000},
-              visible=_bld_visible("tradepost")),
-    Milestone("drama", "Drama and Poetry erforschen (Festivals!)", _tech("drama"),
-              {"kind": "research", "name": "drama"}),
+              None,
+              visible=lambda snap: snap.get("calendar", {}).get("year", 0) >= 19),
     Milestone("theology", "Theology erforschen (Religion!)", _tech("theology"),
-              {"kind": "research", "name": "theology"}),
+              {"kind": "research", "name": "theology"},
+              visible=_tech_visible("theology")),
     Milestone("temple_1", "Ersten Tempel bauen", _bld(1, "temple"),
               {"kind": "build", "name": "temple"},
               visible=_tech("theology")),
@@ -136,9 +152,77 @@ P0_MILESTONES: list[Milestone] = [
     Milestone("amphitheatre_1", "Amphitheater bauen (Happiness)", _bld(1, "amphitheatre"),
               {"kind": "build", "name": "amphitheatre"},
               visible=_tech("construction")),
-    Milestone("navigation", "Navigation erforschen (Tor zu P1)", _tech("navigation"),
-              {"kind": "research", "name": "navigation"}),
+    Milestone("astronomy", "Astronomy erforschen", _tech("astronomy"),
+              {"kind": "research", "name": "astronomy"},
+              visible=_tech_visible("astronomy")),
+    Milestone("navigation", "Navigation erforschen", _tech("navigation"),
+              {"kind": "research", "name": "navigation"},
+              visible=_tech_visible("navigation")),
+    # --- M4: Kultur-Komfort + Weg zu Rocketry & Mond (Spec 16.1) ---
+    Milestone("architecture", "Architecture erforschen", _tech("architecture"),
+              {"kind": "research", "name": "architecture"},
+              visible=_tech_visible("architecture")),
+    Milestone("acoustics", "Acoustics erforschen", _tech("acoustics"),
+              {"kind": "research", "name": "acoustics"},
+              visible=_tech_visible("acoustics")),
+    Milestone("drama", "Drama and Poetry erforschen (Festivals!)", _tech("drama"),
+              {"kind": "research", "name": "drama"},
+              visible=_tech_visible("drama")),
+    Milestone("steel_tech", "Steel erforschen", _tech("steel"),
+              {"kind": "research", "name": "steel"},
+              visible=_tech_visible("steel")),
+    Milestone("machinery", "Machinery erforschen", _tech("machinery"),
+              {"kind": "research", "name": "machinery"},
+              visible=_tech_visible("machinery")),
+    Milestone("physics", "Physics erforschen", _tech("physics"),
+              {"kind": "research", "name": "physics"},
+              visible=_tech_visible("physics")),
+    Milestone("steamworks_1", "Steamworks bauen (Energie!)", _bld(1, "steamworks"),
+              {"kind": "build", "name": "steamworks"},
+              visible=_bld_visible("steamworks")),
+    Milestone("chemistry", "Chemistry erforschen (Öl!)", _tech("chemistry"),
+              {"kind": "research", "name": "chemistry"},
+              visible=_tech_visible("chemistry")),
+    Milestone("electricity", "Electricity erforschen", _tech("electricity"),
+              {"kind": "research", "name": "electricity"},
+              visible=_tech_visible("electricity")),
+    Milestone("oilwell_1", "Ölquelle erschließen", _bld(1, "oilWell"),
+              {"kind": "build", "name": "oilWell"},
+              visible=_bld_visible("oilWell")),
+    Milestone("magneto_1", "Magneto bauen (Energie)", _bld(1, "magneto"),
+              {"kind": "build", "name": "magneto"},
+              visible=_bld_visible("magneto")),
+    Milestone("archeology", "Archeology erforschen (Geologen)", _tech("archeology"),
+              {"kind": "research", "name": "archeology"},
+              visible=_tech_visible("archeology")),
+    Milestone("industrialization", "Industrialization erforschen", _tech("industrialization"),
+              {"kind": "research", "name": "industrialization"},
+              visible=_tech_visible("industrialization")),
+    Milestone("mechanization", "Mechanization erforschen", _tech("mechanization"),
+              {"kind": "research", "name": "mechanization"},
+              visible=_tech_visible("mechanization")),
+    Milestone("electronics", "Electronics erforschen", _tech("electronics"),
+              {"kind": "research", "name": "electronics"},
+              visible=_tech_visible("electronics")),
+    Milestone("rocketry", "Rocketry erforschen — der Weltraum ruft!", _tech("rocketry"),
+              {"kind": "research", "name": "rocketry"},
+              visible=_tech_visible("rocketry")),
+    Milestone("orbital_launch", "Orbital Launch — erster Raketenstart!",
+              lambda snap: _space_program_val(snap, "orbitalLaunch") >= 1,
+              {"kind": "space_program", "name": "orbitalLaunch"},
+              visible=_tech("rocketry")),
+    Milestone("moon_mission", "Mond-Mission!",
+              lambda snap: _space_program_val(snap, "moonMission") >= 1,
+              {"kind": "space_program", "name": "moonMission"},
+              visible=lambda snap: _space_program_val(snap, "orbitalLaunch") >= 1),
 ]
+
+
+def _space_program_val(snap: dict, name: str) -> int:
+    for p in snap.get("space", {}).get("programs", []):
+        if p["name"] == name:
+            return int(p.get("val", 0))
+    return 0
 
 
 # Feste frühe Metaphysics-Reihenfolge (Spec 9.1). Hinweis: das Spec-Wort
@@ -227,10 +311,13 @@ def evaluate(snap: dict) -> MetaView:
     run_type = determine_run(snap)
     next_perk = next_metaphysics_target(snap)
     milestones = list(P0_MILESTONES)
+    # Phasen (Spec Kap. 9): P0 Erstwirtschaft, P1 Price-Ratio, P2 Core Meta & Space
     phase = "P0"
     if run_type == "PRICE_RATIO_RUN":
         phase = "P1"
         milestones = milestones + _perk_milestones(snap, next_perk)
+    if A.tech_researched(snap, "rocketry"):
+        phase = "P2"
 
     active: Milestone | None = None
     rows: list[dict] = []

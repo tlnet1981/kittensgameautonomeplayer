@@ -48,6 +48,16 @@ class GameBrowser:
         await self.page.goto(game_url, wait_until="domcontentloaded", timeout=60_000)
         await self._wait_for_game()
         await self.page.add_style_tag(content=GLOW_CSS)
+        await self._apply_game_options()
+
+    async def _apply_game_options(self) -> None:
+        """Spieloptionen für den autonomen Betrieb setzen.
+
+        noConfirm: Kauf-Bestätigungsdialoge aus — der Agent ist der Spieler,
+        seine Safety-Engine übernimmt den Schutz (sonst werden z. B.
+        Housing-Käufe still mit 'player-denied' verweigert)."""
+        assert self.page is not None
+        await self.page.evaluate("() => { game.opts.noConfirm = true; }")
 
     async def _wait_for_game(self, timeout_s: float = 60.0) -> None:
         """Wartet, bis window.game vollständig initialisiert ist."""
@@ -63,6 +73,12 @@ class GameBrowser:
             if asyncio.get_event_loop().time() > deadline:
                 raise TimeoutError("Kittens Game wurde nicht initialisiert (window.game fehlt)")
             await asyncio.sleep(0.5)
+
+    async def reinitialize(self, timeout_s: float = 90.0) -> None:
+        """Nach einem Seiten-Reload (Reset!) Spielzustand + Injections erneuern."""
+        await self._wait_for_game(timeout_s=timeout_s)
+        await self.page.add_style_tag(content=GLOW_CSS)
+        await self._apply_game_options()
 
     async def evaluate(self, js: str, arg: Any = None) -> Any:
         assert self.page is not None, "Browser nicht gestartet"

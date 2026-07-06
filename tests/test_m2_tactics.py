@@ -58,12 +58,19 @@ def test_no_trade_without_inputs():
     assert not any(c.action.id == "trade:lizards" for c in cands)
 
 
-def test_explore_when_manpower_available():
+def test_explore_only_after_first_race():
+    # Vor dem ersten Emissär (races leer): Kundschafter wären verschwendet.
     snap = make_snap(
         resources={**_rich_food(), "manpower": {"value": 1200, "max": 1500, "rate": 2}},
         catnip_field_base=60, jobs={"farmer": 5}, kittens=5,
     )
     snap["diplomacy"] = {"undiscovered": True, "races": []}
+    cands, _ = _generate(snap)
+    assert not any(c.action.id == "explore:races" for c in cands)
+
+    # Nach dem ersten Partner: weitere Rassen aktiv suchen.
+    snap["diplomacy"] = {"undiscovered": True, "races": [{
+        "name": "lizards", "title": "Lizards", "buys": [], "sells": []}]}
     cands, _ = _generate(snap)
     assert any(c.action.id == "explore:races" for c in cands)
 

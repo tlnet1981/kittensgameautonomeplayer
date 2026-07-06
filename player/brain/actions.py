@@ -121,6 +121,16 @@ def craft(name: str, label: str, times: int) -> Action:
     )
 
 
+def space_program(name: str, label: str) -> Action:
+    """Space-Mission starten (einmalig, z. B. Orbital Launch)."""
+    return Action(
+        id=f"space:{name}", type="BUY_BUILDING",
+        label=f"Space: {label}",
+        exec_spec={"kind": "click_button", "tab": "Space", "title": label, "batch": 1},
+        expected=f"Mission {label} abgeschlossen",
+    )
+
+
 def buy_perk(name: str, label: str) -> Action:
     """Metaphysics-Perk kaufen — irreversibel (Paragon wird ausgegeben).
     Panel-Scoping verhindert die Kollision mit gleichnamigen Policies!"""

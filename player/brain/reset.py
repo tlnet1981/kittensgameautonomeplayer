@@ -86,9 +86,9 @@ async def execute_reset(runtime, reset_eval: dict) -> None:
     # 4. Atomarer Reset (lädt die Seite neu)
     await browser.evaluate("() => game.resetAutomatic()")
 
-    # 5. Auf Reload + Neuinitialisierung warten
+    # 5. Auf Reload + Neuinitialisierung warten (inkl. Glow-CSS & Optionen)
     await asyncio.sleep(3.0)
-    await browser._wait_for_game(timeout_s=90)
+    await browser.reinitialize(timeout_s=90)
     bus.publish("narrative.chapter", {
         "priority": "P1",
         "title": "Neuer Run beginnt",

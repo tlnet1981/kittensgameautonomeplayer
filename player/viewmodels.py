@@ -66,6 +66,24 @@ def population_vm(snap: dict) -> dict:
     }
 
 
+def systems_vm(snap: dict) -> dict:
+    """SystemDomainVM (Spec 22.1): Space, Handel, Religion — wächst mit M4–M6."""
+    space = snap.get("space", {})
+    return {
+        "space": {
+            "programs": [{"name": p["name"], "label": p["label"], "val": p["val"]}
+                         for p in space.get("programs", [])],
+            "planets": [{"label": pl["label"],
+                         "buildings": [{"label": b["label"], "val": b["val"]}
+                                       for b in pl.get("buildings", []) if b["val"] > 0]}
+                        for pl in space.get("planets", [])],
+        },
+        "races": [r["title"] for r in snap.get("diplomacy", {}).get("races", [])],
+        "energy": snap.get("derived", {}).get("energy", {}),
+        "faith": snap.get("religion", {}),
+    }
+
+
 def health_vm(agent_state: str, snapshot_age: float | None, errors: list[str]) -> dict:
     return {
         "agentState": agent_state,

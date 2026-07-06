@@ -227,6 +227,7 @@ window.KGP = (() => {
     store.economy = payload.economy;
     store.population = payload.population;
     store.health = payload.health;
+    store.systems = payload.systems;
     if (payload.currentDecision && !store.currentDecision) {
       store.currentDecision = payload.currentDecision;
       store.decisions.unshift(payload.currentDecision);
