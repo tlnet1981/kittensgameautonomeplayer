@@ -20,7 +20,7 @@ from typing import Any
 
 from player.state import access as A
 from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
-from . import actions, shadow
+from . import actions, chrono, shadow
 from .records import Candidate
 
 # Verbrauch eines Kittens (0,85 Catnip/Tick × 5 Ticks/s), Fallback für die
@@ -77,9 +77,9 @@ CAP_RELIEF_CRAFTS = {
 
 WAIT_SCORE = 0.01
 
-# Reine Anzeige-Komponenten (Sekundenwerte der Schattenpreis-Rechnung) —
+# Reine Anzeige-Komponenten (Sekundenwerte der Schattenpreis-/CS-Rechnung) —
 # sie fließen NICHT additiv in den Score ein; netValue geht normiert ein.
-SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore")
+SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -520,7 +520,22 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         elif name == "amphitheatre" and snap.get("village", {}).get("happiness", 1.0) < 1.0:
             comp["happiness"] = 1.2    # unglückliche Kitten produzieren weniger
         elif name == "chronosphere":
-            comp["economy"] = 1.2      # Carryover über Resets (Spec 19.1)
+            # CS-Zielzahl-Suche (Spec 19.1): kaufen nur, solange der Bestand
+            # unter der optimalen Zahl liegt — nicht mehr opportunistisch.
+            n_target, cs_detail = chrono.optimal_chronosphere_count(snap, lam=lam)
+            if n_target is None:
+                comp["economy"] = 1.2  # Fallback: keine CS-Daten → Altverhalten
+            elif b["val"] >= n_target:
+                cands.append(Candidate(
+                    actions.buy_building(name, b["label"], b["val"]), 0.0,
+                    {"economy": 0.0}, feasible=False,
+                    reject_reason=(f"Chronosphere-Zielzahl {n_target} erreicht "
+                                   f"(CS-Suche 19.1, Bestand {b['val']})")))
+                continue
+            else:
+                comp["economy"] = 1.2  # Carryover über Resets (Spec 19.1)
+                if cs_detail.get("csValueNext") is not None:
+                    comp["csValue"] = cs_detail["csValueNext"]  # Sekundenwert, Anzeige
         else:
             comp["economy"] = 0.6      # generischer Ausbau
 
@@ -1042,6 +1057,7 @@ REASON_TEMPLATES = {
     "benefitTime": "{label} beschleunigt das Ziel (Benefit in Ziel-Sekunden).",
     "costTime": "{label} kostet Ziel-Sekunden (Schattenpreis-Bewertung).",
     "jobScore": "{label} maximiert den Zielzeitgewinn pro Kitten (JobScore 12.2).",
+    "csValue": "{label}: Carryover-Sekundenwert der nächsten Chronosphere (CS-Suche 19.1).",
     "base": "{label}",
 }
 

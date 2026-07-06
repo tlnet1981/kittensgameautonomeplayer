@@ -11,10 +11,14 @@ Ab M3 übernimmt hier die Run-Typ-Auswahl (PRICE_RATIO_RUN, ...).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from player.state import access as A
+
+from . import shadow, simulate
+from .reset import FIRST_RESET_MIN_PARAGON, MIN_PARAGON_GAIN
 
 
 @dataclass
@@ -229,18 +233,123 @@ def next_metaphysics_target(snap: dict) -> dict | None:
     return None
 
 
-def determine_run(snap: dict) -> str:
-    """Run-Typ aus dem persistenten Zustand ableiten (Spec 8.2, M3-Umfang)."""
+# ---------------------------------------------------------------- Run-Typen
+# Spec 8.2: die 13 Makroplan-Kandidaten. Aktiv wählbar sind in dieser
+# Ausbaustufe nur FIRST_RUN, PRICE_RATIO_RUN und PARAGON_RUN — für die
+# übrigen Run-Typen folgt die Zulässigkeit mit späterem Ausbau (es gibt
+# für sie noch keine Zielmeilensteine und keine Bewertungsformeln).
+RUN_TYPES = frozenset({
+    "FIRST_RUN", "PRICE_RATIO_RUN", "CORE_META_RUN", "RELIGION_RUN",
+    "UNICORN_RUN", "CHALLENGE_RUN", "LEVIATHAN_RUN", "RELIC_STATION_RUN",
+    "SHATTER_RUN", "PARAGON_RUN", "SEED_RUN", "POSITIVE_CS_RUN",
+    "MATURE_ENDGAME_RUN",
+})
+ACTIVE_RUN_TYPES = frozenset({"FIRST_RUN", "PRICE_RATIO_RUN", "PARAGON_RUN"})
+
+# Taktische Varianten je Makroplan (Spec 8.3 Schritt 3): invest-Anteil der
+# Projektions-Politik. Namen sind zugleich der deterministische Tie-Break
+# (lexikografisch, Anhang C.2).
+RUN_VARIANTS: tuple[tuple[str, float], ...] = (
+    ("a_minimal", 0.15),            # schneller Minimalpfad
+    ("b_ausgeglichen", 0.35),       # ausgeglichener Pfad
+    ("c_investitionsstark", 0.60),  # investitionsstarker Pfad
+)
+
+
+def _admissible_run_types(snap: dict) -> list[str]:
+    """Zulässigkeitsregeln wie die bisherige feste Ableitung (M3-Umfang):
+    FIRST_RUN nur ohne persistenten Fortschritt; PRICE_RATIO_RUN solange
+    die Metaphysics-Kette offen ist; PARAGON_RUN sonst."""
     prestige = snap.get("prestige", {})
     persistent = (prestige.get("paragon", 0) + prestige.get("burnedParagon", 0)
                   + prestige.get("karma", 0))
     any_perk = any(p["researched"] for p in prestige.get("perks", []))
     if persistent <= 0 and not any_perk:
-        return "FIRST_RUN"
+        return ["FIRST_RUN"]
     if next_metaphysics_target(snap) is not None:
-        return "PRICE_RATIO_RUN"
-    # Metaphysics-Kette komplett: Paragon pro Realzeit maximieren (Spec 8.2/20.4)
-    return "PARAGON_RUN"
+        return ["PRICE_RATIO_RUN"]
+    return ["PARAGON_RUN"]
+
+
+def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
+                   horizon: float) -> float:
+    """Erwartete Restzeit bis zum Run-Ziel (Score vor F = −Restzeit, Spec 6.2).
+
+    FIRST_RUN:       Zeit bis Reset-Paragon ≥ FIRST_RESET_MIN_PARAGON.
+    PRICE_RATIO_RUN: Zeit bis der nächste Perk finanzierbar ist (paragon_now
+                     + Projektion ≥ Preis) UND Metaphysics erforschbar war.
+    PARAGON_RUN:     Paragonrate pro Realzeit, als Restzeit normiert über
+                     die Zeit für MIN_PARAGON_GAIN Paragon (vergleichbar).
+    """
+    if run_type == "FIRST_RUN":
+        return proj.paragon_eta(FIRST_RESET_MIN_PARAGON)
+    if run_type == "PRICE_RATIO_RUN":
+        perk = next_metaphysics_target(snap)
+        if perk is None:
+            return math.inf
+        price = next((p["val"] for p in perk.get("prices", [])
+                      if p["name"] == "paragon"), 0)
+        paragon_now = snap.get("prestige", {}).get("paragon", 0)
+        t_fund = proj.paragon_eta(price - paragon_now)
+        t_tech = 0.0
+        tech = A.tech(snap, "metaphysics")
+        if tech and not tech["researched"]:
+            t_tech = proj.eta_of(tech["prices"])
+        return max(t_fund, t_tech)
+    # PARAGON_RUN (Spec 20.4): erwartete Paragonrate über den Horizont
+    gain = proj.paragon_projection(horizon) - proj.paragon_projection(0.0)
+    if gain <= 0:
+        return math.inf
+    return MIN_PARAGON_GAIN / (gain / horizon)
+
+
+def _score_plans(snap: dict, run_types: list[str], horizon: float) -> list[dict]:
+    rows: list[dict] = []
+    for rt in run_types:
+        for variant, invest in RUN_VARIANTS:
+            proj = simulate.project(snap, horizon, policy={"invest": invest})
+            rows.append({"runType": rt, "variant": variant, "invest": invest,
+                         "restzeit": _plan_restzeit(snap, rt, proj, horizon)})
+    return rows
+
+
+def determine_run_plan(snap: dict) -> tuple[str, str | None, dict]:
+    """Run-Typ + taktische Variante per Simulation wählen (Spec 8.3).
+
+    Für jeden zulässigen Run-Typ werden die drei Varianten a/b/c mit
+    simulate.project bewertet; das Paar mit der kleinsten erwarteten
+    Restzeit gewinnt, Ties lexikografisch (Anhang C.2). Reicht der
+    Snapshot nicht für eine Projektion (leere Alt-Test-Snapshots),
+    greift der Fallback auf die bisherige feste Ableitung.
+    """
+    admissible = _admissible_run_types(snap)
+    if not simulate.has_projection_data(snap):
+        return admissible[0], None, {"fallback": "keine Simulationsdaten — feste Ableitung"}
+    horizon = shadow.run_horizon(snap)
+    rows = _score_plans(snap, admissible, horizon)
+    order = lambda r: (r["restzeit"], r["runType"], r["variant"])  # noqa: E731
+    best = min(rows, key=order)
+    # PARAGON_RUN ist ZUSÄTZLICH zulässig, wenn das Price-Ratio-Ziel im
+    # Horizont unerreichbar ist (Spec 8.2 „sonst/zusätzlich") — aber nur,
+    # wenn er selbst eine endliche Restzeit hat (sonst bleibt das alte
+    # Verhalten: Price-Ratio-Kette hat Vorrang, solange sie offen ist).
+    if admissible == ["PRICE_RATIO_RUN"] and math.isinf(best["restzeit"]):
+        extra = _score_plans(snap, ["PARAGON_RUN"], horizon)
+        if any(math.isfinite(r["restzeit"]) for r in extra):
+            rows += extra
+            best = min(rows, key=order)
+    detail = {
+        "horizonS": horizon,
+        "scores": [{**r, "restzeit": (None if math.isinf(r["restzeit"])
+                                      else round(r["restzeit"], 1))}
+                   for r in rows],
+    }
+    return best["runType"], best["variant"], detail
+
+
+def determine_run(snap: dict) -> str:
+    """Run-Typ (Spec 8.2) — abwärtskompatible Sicht auf determine_run_plan."""
+    return determine_run_plan(snap)[0]
 
 
 @dataclass
@@ -250,6 +359,9 @@ class MetaView:
     active: Milestone | None
     milestones: list[dict]      # fürs Cockpit: [{id,label,state}]
     next_perk: dict | None = None
+    # Simulationsbasierte Planwahl (Spec 8.3) — None im Fallback:
+    run_variant: str | None = None
+    run_plan: dict | None = None
 
     @property
     def objective_label(self) -> str:
@@ -259,6 +371,8 @@ class MetaView:
         return {
             "phase": self.phase,
             "runType": self.run_type,
+            "runVariant": self.run_variant,
+            "runPlan": self.run_plan,
             "objective": self.objective_label,
             "milestones": self.milestones,
             "nextPerk": ({"name": self.next_perk["name"],
@@ -285,8 +399,8 @@ def _perk_milestones(snap: dict, next_perk: dict | None) -> list[Milestone]:
 
 
 def evaluate(snap: dict) -> MetaView:
-    """Bestimmt Phase, Run-Typ und den aktiven Meilenstein."""
-    run_type = determine_run(snap)
+    """Bestimmt Phase, Run-Typ (+ Variante) und den aktiven Meilenstein."""
+    run_type, run_variant, run_plan = determine_run_plan(snap)
     next_perk = next_metaphysics_target(snap)
     milestones = list(P0_MILESTONES)
     # Phasen (Spec Kap. 9): P0 Erstwirtschaft, P1 Price-Ratio, P2 Core Meta & Space
@@ -309,4 +423,5 @@ def evaluate(snap: dict) -> MetaView:
             state = "pending"
         rows.append({"id": m.id, "label": m.label, "state": state})
     return MetaView(phase=phase, run_type=run_type, active=active,
-                    milestones=rows, next_perk=next_perk)
+                    milestones=rows, next_perk=next_perk,
+                    run_variant=run_variant, run_plan=run_plan)

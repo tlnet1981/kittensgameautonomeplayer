@@ -77,6 +77,29 @@ def test_price_ratio_reset_funds_next_perk():
     assert not ev["recommended"]
 
 
+def test_reset_value_prefers_continuing_with_strong_growth():
+    # Starkes Kitten-Wachstum: Weiterlaufen bankt in T mehr Paragon als ein
+    # Neustart mit linearer Rampe → ResetValue < 0 → kein Reset trotz
+    # erfüllter FIRST-Schwelle (Spec 20.1).
+    snap = _with_prestige(make_snap(kittens=110, max_kittens=150))
+    snap["village"]["kittensPerSec"] = 0.05
+    ev = reset.evaluate(snap, "FIRST_RUN", None)
+    assert not ev["recommended"]
+    assert ev["resetValue"]["resetValue"] < 0
+    assert "Weiterlaufen dominiert" in ev["reason"]
+
+
+def test_reset_value_prefers_reset_without_growth():
+    # Kein Wachstum mehr (Housing voll, keine Ankunftsrate): der Neustart
+    # gewinnt über die Rampe → ResetValue > 0 → Reset.
+    snap = _with_prestige(make_snap(kittens=110, max_kittens=110))
+    ev = reset.evaluate(snap, "FIRST_RUN", None)
+    assert ev["recommended"]
+    assert ev["resetValue"]["resetValue"] > 0
+    # Beide V-Werte stehen im reason-Text (Cockpit-Transparenz):
+    assert "V(neu)" in ev["reason"] and "V(weiter)" in ev["reason"]
+
+
 def test_perk_milestone_becomes_target():
     perks = [{"name": "engeneering", "label": "Engineering", "researched": False,
               "unlocked": True, "prices": [{"name": "paragon", "val": 5}]}]

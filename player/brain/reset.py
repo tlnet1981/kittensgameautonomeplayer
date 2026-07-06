@@ -1,8 +1,11 @@
 """Reset-Bewertung und Pre-Reset-Transaktion (Spec Kap. 20, vereinfacht).
 
-Reset-Regeln (deterministisch, ohne volle Simulation):
-- FIRST_RUN: Reset, sobald die Paragon-Projektion >= FIRST_RESET_MIN_PARAGON.
-  (Community-Richtwert: erster Reset ab ~105 Kitten = 35 Paragon.)
+Reset-Regeln (deterministisch):
+- FIRST_RUN: Paragon-Projektion >= FIRST_RESET_MIN_PARAGON ist notwendige
+  Vorbedingung (Community-Richtwert: erster Reset ab ~105 Kitten = 35
+  Paragon); endgültig entscheidet ResetValue = V(post) − V(continue) über
+  die EV-Projektion (Spec 20.1, siehe _reset_value) — ohne Simulationsdaten
+  greift die Schwelle allein (Altverhalten).
 - PRICE_RATIO_RUN: Reset, sobald aktueller Paragon + Projektion den Preis des
   nächsten Metaphysics-Ziels deckt (Spec 20.2: „Finanzierung des nächsten
   Metaphysics-Ziels") UND die Projektion einen Mindestwert erreicht (damit
@@ -21,9 +24,16 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from . import simulate
+
 FIRST_RESET_MIN_PARAGON = 35
 # Mindestprojektion für Folge-Resets — verhindert Mini-Runs:
 MIN_PARAGON_GAIN = 10
+
+# Vergleichshorizont der ResetValue-Rechnung (Spec 20.1): T = bisherige
+# Runzeit, geklemmt auf [10 min, 2 h].
+RESET_VALUE_T_MIN = 600.0
+RESET_VALUE_T_MAX = 2 * 3600.0
 
 
 # Paragon-Speedrun (Spec 20.4): Mindestlaufzeit und Abbruchkriterium.
@@ -40,22 +50,40 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
 
     recommended = False
     reason = ""
+    reset_value: dict | None = None
     if run_type == "FIRST_RUN":
-        recommended = projection >= FIRST_RESET_MIN_PARAGON
-        reason = (f"Projektion {projection} ≥ {FIRST_RESET_MIN_PARAGON} Paragon"
-                  if recommended else
-                  f"Projektion {projection} / {FIRST_RESET_MIN_PARAGON} Paragon")
+        # Schwelle bleibt notwendige Vorbedingung (Sanity-Grenze); erst dann
+        # entscheidet ResetValue = V(post) − V(continue) (Spec 20.1):
+        if projection < FIRST_RESET_MIN_PARAGON:
+            reason = f"Projektion {projection} / {FIRST_RESET_MIN_PARAGON} Paragon"
+        else:
+            reset_value = _reset_value(snap, projection)
+            if reset_value is None:      # keine Simulationsdaten → Altverhalten
+                recommended = True
+                reason = f"Projektion {projection} ≥ {FIRST_RESET_MIN_PARAGON} Paragon"
+            else:
+                recommended = reset_value["resetValue"] > 0
+                reason = (f"Projektion {projection} ≥ {FIRST_RESET_MIN_PARAGON} Paragon; "
+                          + _reset_value_text(reset_value)
+                          + ("" if recommended else " — Weiterlaufen dominiert"))
     elif run_type == "PARAGON_RUN":
         # Spec 20.4: Run endet, wenn die marginale Paragonrate unter die
         # Durchschnittsrate des Runs fällt (Proxy für den Neustart-Ø).
+        # Diese Speedrun-Regel bleibt unangetastet (kein ResetValue-Gate).
         recommended, reason = _paragon_speedrun_rule(projection, paragon_samples)
     elif next_perk is not None:
         price = next((p["val"] for p in next_perk.get("prices", []) if p["name"] == "paragon"), 0)
         funds_after_reset = paragon_now + projection
+        # Harte Regel (Spec 20.2): Perk-Finanzierung erreicht → Reset, auch
+        # ohne positiven ResetValue; die V-Werte werden nur transparent gemacht.
         recommended = (projection >= MIN_PARAGON_GAIN and funds_after_reset >= price)
         reason = (f"{funds_after_reset} Paragon nach Reset decken {next_perk['label']} ({price})"
                   if recommended else
                   f"{funds_after_reset} / {price} Paragon für {next_perk['label']}")
+        if recommended:
+            reset_value = _reset_value(snap, projection)
+            if reset_value is not None:
+                reason += "; " + _reset_value_text(reset_value)
     else:
         reason = "Kein Reset-Ziel im aktuellen Run"
 
@@ -84,7 +112,46 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
         "reason": reason,
         "gates": gates,
         "nextPerk": next_perk["label"] if next_perk else None,
+        "resetValue": reset_value,
     }
+
+
+# ---------------------------------------------------------------- ResetValue
+
+def _reset_value(snap: dict, projection: float) -> dict | None:
+    """ResetValue = V(post) − V(continue) in Paragon bei gleicher Realzeit T
+    (Spec 20.1). None, wenn der Snapshot keine Projektion trägt (Fallback).
+
+    V(continue): Paragon-Stand, wenn der Run noch T Sekunden weiterläuft und
+    DANN resettet wird — Projektion + Kitten-/Jahreszuwachs aus simulate.
+    V(post): Paragon-Stand eines Neustarts JETZT nach T Sekunden — die
+    Projektion wird sofort gebankt, der neue Run fährt eine konservativ
+    LINEARE Rampe von 0 auf die historische Ø-Paragonrate des aktuellen
+    Runs (Fläche = avg_rate·T/2; der Neustart braucht Anlaufzeit, erreicht
+    aber dank permanenter Boni mindestens die alte Ø-Rate — dokumentierte
+    Näherung statt voller Neustart-Simulation)."""
+    if not simulate.has_projection_data(snap):
+        return None
+    elapsed = simulate.run_elapsed_seconds(snap)
+    t_cmp = min(max(elapsed, RESET_VALUE_T_MIN), RESET_VALUE_T_MAX)
+    proj = simulate.project(snap, t_cmp)
+    delta_continue = proj.paragon_projection(t_cmp) - proj.paragon_projection(0.0)
+    v_continue = projection + delta_continue
+    avg_rate = projection / max(elapsed, 1.0)
+    v_post = projection + avg_rate * t_cmp / 2.0
+    return {
+        "resetValue": round(v_post - v_continue, 2),
+        "vContinue": round(v_continue, 2),
+        "vPost": round(v_post, 2),
+        "horizonS": round(t_cmp, 1),
+    }
+
+
+def _reset_value_text(rv: dict) -> str:
+    """V-Werte für den reason-Text (Cockpit-Transparenz, Spec 20.1)."""
+    return (f"ResetValue {rv['resetValue']:+.1f} Paragon "
+            f"(V(neu) {rv['vPost']:.1f} vs V(weiter) {rv['vContinue']:.1f} "
+            f"über {rv['horizonS']:.0f} s)")
 
 
 def _paragon_speedrun_rule(projection: int,
