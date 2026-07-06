@@ -71,7 +71,7 @@ Unten läuft der **Live-Feed** mit Narrations-Karten und Ereignissen.
 | M3 Erster Reset | ✅ | Reset-Transaktion, Run-Typen, Metaphysics-Kaufkette |
 | M4 Space & Energie | ✅ | Rocketry-Kette, Craft-Kaskade, Energie-Regel, Space-Missionen |
 | M5 Religion tief | ✅ | Solar Revolution, Religion-Upgrades, Unicorn-Kette, Adore vor Reset (TAP-light) |
-| M6 Time | – | Leviathans, Time Crystals, Shatter, Chronospheres, Challenges |
+| M6 Time | ✅ | Time Crystals, konservative Shatter-Regel, Chronoforge/Cryochambers, Leviathan-Handel, TC-Schutz-Gate |
 | M7 Endgame | – | Seed-Runs, positive CS-Schleife, Paragon-Speedruns |
 
 ## Architektur (Kurzfassung)

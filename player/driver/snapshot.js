@@ -248,6 +248,26 @@
         }
     });
 
+    section("time", () => {
+        const mapTU = (list) => (list || [])
+            .filter(u => u.unlocked || u.val > 0)
+            .map(u => ({
+                name: u.name, label: u.label, val: u.val || 0,
+                unlocked: !!u.unlocked,
+                prices: (u.prices || []).map(p => ({
+                    name: p.name,
+                    val: p.val * Math.pow(u.priceRatio || 1, u.val || 0),
+                })),
+            }));
+        out.time = {
+            heat: (g.time && g.time.heat) || 0,
+            heatMax: g.getEffect("heatMax") || 0,
+            flux: (g.time && g.time.flux) || 0,
+            chronoforge: g.time ? mapTU(g.time.chronoforgeUpgrades) : [],
+            voidspace: g.time ? mapTU(g.time.voidspaceUpgrades) : [],
+        };
+    });
+
     section("effects", () => {
         // Basis-Catnip-Produktion der Felder (pro Tick, vor Saison-Modifier).
         // Grundlage der Worst-Winter-Reserverechnung (Spec 7.2).

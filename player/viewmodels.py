@@ -80,6 +80,18 @@ def systems_vm(snap: dict) -> dict:
         },
         "races": [r["title"] for r in snap.get("diplomacy", {}).get("races", [])],
         "energy": snap.get("derived", {}).get("energy", {}),
+        "time": {
+            "timeCrystal": next((r["value"] for r in snap.get("resources", [])
+                                 if r["name"] == "timeCrystal"), 0),
+            "heat": snap.get("time", {}).get("heat", 0),
+            "heatMax": snap.get("time", {}).get("heatMax", 0),
+            "chronospheres": next((b["val"] for b in snap.get("buildings", [])
+                                   if b["name"] == "chronosphere"), 0),
+            "resourceRetrieval": next((u["val"] for u in snap.get("time", {}).get("chronoforge", [])
+                                       if u["name"] == "ressourceRetrieval"), 0),
+            "cryochambers": next((u["val"] for u in snap.get("time", {}).get("voidspace", [])
+                                  if u["name"] == "cryochambers"), 0),
+        },
         "religion": {
             "worship": snap.get("religion", {}).get("worship", 0),
             "epiphany": snap.get("religion", {}).get("epiphany", 0),

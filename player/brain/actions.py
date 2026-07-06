@@ -221,6 +221,17 @@ def festival() -> Action:
     )
 
 
+def shatter(batch: int) -> Action:
+    """Time Crystals shattern (+1 Jahr je TC; Ertrag über Resource Retrieval)."""
+    return Action(
+        id="time:shatter", type="SHATTER",
+        label=f"Shatter {batch}× Time Crystal (+{batch} Jahre)",
+        exec_spec={"kind": "shatter", "batch": batch},
+        expected=f"+{batch} Jahre, Ressourcen via Resource Retrieval, +Heat",
+        irreversible=True, batch=batch,
+    )
+
+
 def wait(reason: str, wake: str) -> Action:
     return Action(
         id="wait", type="WAIT",

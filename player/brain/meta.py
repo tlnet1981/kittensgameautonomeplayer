@@ -236,9 +236,12 @@ def _space_program_val(snap: dict, name: str) -> int:
 
 # Feste frühe Metaphysics-Reihenfolge (Spec 9.1). Hinweis: das Spec-Wort
 # „Enlightenment" heißt in v1.5.0.2 „engeneering" (sic, -1 % Price Ratio).
+# Nach der Price-Ratio-Kette: Chronomancy/Astromancy (Events/Starcharts)
+# und Anachronomancy (TC-Schutz vor Resets — Pflicht laut Spec 9.1).
 METAPHYSICS_ORDER = [
     "engeneering", "diplomacy", "goldenRatio",
     "divineProportion", "vitruvianFeline", "renaissance",
+    "chronomancy", "astromancy", "anachronomancy",
 ]
 
 
@@ -252,7 +255,8 @@ def next_metaphysics_target(snap: dict) -> dict | None:
             # der Referenzversion, damit die Reset-Planung rechnen kann:
             defaults = {"engeneering": 5, "diplomacy": 5, "goldenRatio": 50,
                         "divineProportion": 100, "vitruvianFeline": 250,
-                        "renaissance": 750}
+                        "renaissance": 750, "chronomancy": 25, "astromancy": 50,
+                        "anachronomancy": 125}
             return {"name": name, "label": name, "researched": False,
                     "unlocked": False,
                     "prices": [{"name": "paragon", "val": defaults[name]}]}

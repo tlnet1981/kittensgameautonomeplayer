@@ -48,10 +48,22 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None) -> dict[str, Any
     else:
         reason = "Kein Reset-Ziel im aktuellen Run"
 
+    # TC-Schutz (Invariante I-02 / Spec 9.1): Reset mit relevantem
+    # Time-Crystal-Bestand nur mit Anachronomancy (TC überleben sonst nicht).
+    tc = next((r["value"] for r in snap.get("resources", []) if r["name"] == "timeCrystal"), 0)
+    anachronomancy = any(p["name"] == "anachronomancy" and p["researched"]
+                         for p in snap.get("prestige", {}).get("perks", []))
+    tc_safe = tc < 3 or anachronomancy
+    if not tc_safe:
+        recommended = False
+
     gates = [
         {"name": "Paragon-Projektion", "pass": projection > 0,
          "detail": f"+{projection} Paragon bei Reset"},
-        {"name": "Run-Ziel finanziert", "pass": recommended, "detail": reason},
+        {"name": "Run-Ziel finanziert", "pass": recommended or not tc_safe, "detail": reason},
+        {"name": "TC-Schutz (Anachronomancy)", "pass": tc_safe,
+         "detail": (f"{tc:.0f} TC " + ("geschützt" if anachronomancy else
+                    "UNGESCHÜTZT — Reset blockiert" if tc >= 3 else "— unkritisch"))},
         {"name": "Save-Export", "pass": True, "detail": "wird in der Transaktion ausgeführt"},
     ]
     return {

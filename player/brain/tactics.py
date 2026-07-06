@@ -60,7 +60,8 @@ ENERGY_PRODUCERS = {"steamworks", "magneto", "solarFarm", "hydroPlant", "reactor
 ECONOMY_WHITELIST = (set(BUILDING_PRODUCES) | HOUSING_BUILDINGS | STORAGE_BUILDINGS
                      | ENERGY_PRODUCERS
                      | {"workshop", "unicornPasture", "amphitheatre", "tradepost",
-                        "temple", "factory", "chapel", "aqueduct", "ziggurat"})
+                        "temple", "factory", "chapel", "aqueduct", "ziggurat",
+                        "chronosphere"})
 
 # Craft-Rezepte zur Cap-Verlust-Vermeidung: Input-Ressource -> Craft-Name.
 CAP_RELIEF_CRAFTS = {
@@ -173,6 +174,7 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     _festival_candidate(snap, cands)
     _religion_candidates(snap, target, cands)
     _space_building_candidates(snap, bn, cands)
+    _time_candidates(snap, cands)
     _wait_candidate(snap, bn, cands, meta_view)
 
     # Deterministisch sortieren: Score absteigend, dann Action-ID (C.2).
@@ -389,6 +391,8 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None) -> Non
             comp["unlock"] = 1.7       # erste Werkstatt schaltet Crafts frei
         elif name == "amphitheatre" and snap.get("village", {}).get("happiness", 1.0) < 1.0:
             comp["happiness"] = 1.2    # unglückliche Kitten produzieren weniger
+        elif name == "chronosphere":
+            comp["economy"] = 1.2      # Carryover über Resets (Spec 19.1)
         else:
             comp["economy"] = 0.6      # generischer Ausbau
 
@@ -615,6 +619,18 @@ def _trade_candidates(snap, bn, cands) -> None:
         return
 
     for race in races:
+        # Leviathans liefern Time Crystals + Relics — persistenter Endgame-
+        # Wert, solange sie da sind immer handeln (Spec 14.4 vereinfacht):
+        if race["name"] == "leviathans":
+            batch = int(min(manpower // TRADE_MANPOWER_COST, 5)) if manpower else 5
+            for p in race.get("buys", []):
+                have = A.res_value(snap, p["name"])
+                batch = int(min(batch, have // p["val"])) if p["val"] else batch
+            if batch >= 1:
+                cands.append(Candidate(
+                    actions.trade("leviathans", race["title"], batch), 1.7,
+                    {"economy": 1.7}))
+            continue
         # TradeValue-light (Spec 14.1): Handel nur, wenn die Rasse den
         # aktuellen Engpass liefert. EV-Rechnung folgt mit späterem Ausbau.
         sells_bottleneck = bn and bn.get("resource") and any(
@@ -688,6 +704,53 @@ def _festival_candidate(snap, cands) -> None:
     happiness = snap.get("village", {}).get("happiness", 1.0)
     score = 1.8 if happiness < 1.3 else 1.2
     cands.append(Candidate(actions.festival(), score, {"happiness": score}))
+
+
+# ---------------------------------------------------------------- Time (M6)
+
+HEAT_PER_SHATTER = 10   # time.js:1254 (5 mit 1000-Years-Challenge)
+
+
+def _time_candidates(snap, cands) -> None:
+    time_state = snap.get("time", {})
+
+    # Chronoforge-Ausbau (Resource Retrieval, Furnaces, Batteries):
+    for u in time_state.get("chronoforge", []):
+        if not u["unlocked"] or not A.affordable(snap, u["prices"]):
+            continue
+        # RR ist der Kern der Shatter-Engine (Spec 17.2) — höher gewichten:
+        comp = {"economy": 1.3} if u["name"] == "ressourceRetrieval" else {"economy": 0.8}
+        cands.append(Candidate(actions.Action(
+            id=f"chronoforge:{u['name']}", type="BUY_UPGRADE",
+            label=f"Chronoforge: {u['label']}",
+            exec_spec={"kind": "click_button", "tab": "Time", "title": u["label"], "batch": 1},
+            expected=f"{u['label']} auf {u['val'] + 1}",
+        ), sum(comp.values()), comp))
+
+    # Cryochambers (Kitten-Carryover über Resets, Spec 19):
+    for u in time_state.get("voidspace", []):
+        if u["name"] != "cryochambers" or not u["unlocked"] \
+                or not A.affordable(snap, u["prices"]):
+            continue
+        cands.append(Candidate(actions.Action(
+            id="voidspace:cryochambers", type="BUY_UPGRADE",
+            label="Cryochamber bauen (Kitten-Carryover)",
+            exec_spec={"kind": "click_button", "tab": "Time", "title": u["label"], "batch": 1},
+            expected="Ein Kitten überlebt den nächsten Reset",
+        ), 1.4, {"economy": 1.4}))
+
+    # Konservative Shatter-Regel (Spec 17.5, Basisausbaustufe): nur mit
+    # Resource-Retrieval-Infrastruktur und Heat-Spielraum.
+    tc = A.res_value(snap, "timeCrystal")
+    rr = next((u["val"] for u in time_state.get("chronoforge", [])
+               if u["name"] == "ressourceRetrieval"), 0)
+    heat = time_state.get("heat", 0)
+    heat_max = time_state.get("heatMax", 0)
+    if rr >= 1 and tc >= 10 and heat_max > 0:
+        headroom = int((heat_max - heat) // HEAT_PER_SHATTER)
+        batch = min(5, int(tc) - 5, headroom)   # 5 TC Reserve behalten
+        if batch >= 1:
+            cands.append(Candidate(actions.shatter(batch), 1.1, {"economy": 1.1}))
 
 
 # ---------------------------------------------------------------- WAIT

@@ -70,6 +70,18 @@
         (zig ? "<br>Ziggurat-Ausbau: " + zig : "");
     }
 
+    // Time-Panel (M6)
+    const timeBox = document.getElementById("time-box");
+    if (timeBox && sys && sys.time) {
+      const t = sys.time;
+      timeBox.innerHTML =
+        "Time Crystals: <strong>" + fmtNum(t.timeCrystal) + "</strong>" +
+        " · Heat: <strong>" + fmtNum(t.heat, 0) + (t.heatMax ? " / " + fmtNum(t.heatMax, 0) : "") + "</strong>" +
+        "<br>Chronospheres: <strong>" + t.chronospheres + "</strong>" +
+        " · Resource Retrieval: <strong>" + t.resourceRetrieval + "</strong>" +
+        " · Cryochambers: <strong>" + t.cryochambers + "</strong>";
+    }
+
     // Metaphysics-Reihenfolge
     const metaBox = document.getElementById("metaphysics-box");
     const perk = plan && plan.nextPerk;

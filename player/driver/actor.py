@@ -102,6 +102,8 @@ class Actor:
                 return await self._praise()
             if kind == "adore":
                 return await self._adore()
+            if kind == "shatter":
+                return await self._shatter(exec_spec)
             return {"ok": False, "method": "none", "detail": f"Unbekannter kind: {kind}"}
         except Exception as exc:
             return {"ok": False, "method": "error", "detail": str(exc)}
@@ -219,6 +221,19 @@ class Actor:
             "() => { if (!game.religion.getRU('apocripha').on) return false;"
             " game.religion.resetFaith(1.01, false); return true; }")
         return {"ok": bool(ok), "method": "js-fallback", "detail": "resetFaith(1.01)"}
+
+    async def _shatter(self, spec: dict) -> dict:
+        """TC-Shatter über die exakte API (Batchgröße ist sicherheitsgeprüft)."""
+        await self._ensure_tab("Time")
+        done = await self.browser.evaluate(
+            """(args) => {
+                const before = game.calendar.year;
+                game.time.shatter(args.batch);
+                return game.calendar.year - before;
+            }""",
+            {"batch": int(spec.get("batch", 1))},
+        )
+        return {"ok": done > 0, "method": "js", "detail": f"+{done} Jahre geshattert"}
 
     async def _craft(self, spec: dict) -> dict:
         # Workshop-Tab zeigen (falls sichtbar), Craft über die exakte API —
