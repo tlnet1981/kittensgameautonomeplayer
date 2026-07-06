@@ -53,6 +53,10 @@ def create_app() -> FastAPI:
             runtime.step_action()
         elif cmd == "step_decision":
             runtime.step_decision()
+        elif cmd == "force_reset":
+            # Debug/Test: Reset-Transaktion beim nächsten Zyklus erzwingen.
+            if runtime.brain is not None:
+                runtime.brain.force_reset = True
         else:
             return JSONResponse({"ok": False, "error": f"Unbekanntes Kommando: {cmd}"}, status_code=400)
         return JSONResponse({"ok": True, "state": runtime.state})

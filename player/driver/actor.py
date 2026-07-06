@@ -16,9 +16,21 @@ from typing import Any
 from .browser import GameBrowser
 
 # Button per Titel finden, Glow setzen, Klickposition liefern.
+# args.panel (optional) grenzt die Suche auf einen Panel-Container ein —
+# wichtig bei Namenskollisionen (z. B. Policy „Diplomacy" vs. Metaphysics-
+# Perk „Diplomacy" im selben Science-Tab!).
 FIND_BUTTON_JS = """
 (args) => {
-    const btns = Array.from(document.querySelectorAll('div.btn'));
+    let root = document;
+    if (args.panel) {
+        const panels = Array.from(document.querySelectorAll('div.panelContainer'));
+        root = panels.find(p => {
+            const t = p.querySelector('div.title');
+            return t && t.textContent.trim().toLowerCase().startsWith(args.panel.toLowerCase());
+        });
+        if (!root) return { error: "panel_not_found" };
+    }
+    const btns = Array.from(root.querySelectorAll('div.btn'));
     const el = btns.find(b => {
         const t = b.querySelector('.btnTitle');
         return t && t.textContent.trim().toLowerCase().startsWith(args.title.toLowerCase());
@@ -110,7 +122,9 @@ class Actor:
             return {"ok": False, "method": "dom", "detail": f"Tab {tab} nicht verfügbar"}
         clicks = 0
         for i in range(batch):
-            res = await self.browser.evaluate(FIND_BUTTON_JS, {"title": title, "glowMs": self.glow_ms})
+            res = await self.browser.evaluate(FIND_BUTTON_JS, {
+                "title": title, "glowMs": self.glow_ms, "panel": spec.get("panel"),
+            })
             if res.get("error"):
                 if clicks > 0:
                     break   # Teilcharge ok (z. B. Ressourcen aufgebraucht)

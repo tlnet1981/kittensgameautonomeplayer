@@ -27,7 +27,7 @@ from player.narrator import Narrator
 from player.state import access as A
 from player.state.derived import derive
 
-from . import meta, safety, tactics
+from . import meta, reset, safety, tactics
 from .records import Candidate, DecisionRecord
 
 
@@ -42,6 +42,8 @@ class Brain:
         self.last_record: DecisionRecord | None = None
         self.last_meta: meta.MetaView | None = None
         self.last_bottleneck: dict | None = None
+        self.last_reset_eval: dict | None = None
+        self.force_reset = False   # Debug-Control aus dem Cockpit
 
     # ------------------------------------------------------------ Hauptschleife
 
@@ -91,6 +93,21 @@ class Brain:
         meta_view = meta.evaluate(snap)
         self.last_meta = meta_view
         self._announce_milestones(meta_view)
+
+        # --- Reset-Bewertung (Spec Kap. 20) ---
+        reset_eval = reset.evaluate(snap, meta_view.run_type, meta_view.next_perk)
+        self.last_reset_eval = reset_eval
+        if reset_eval["recommended"] or self.force_reset:
+            self.force_reset = False
+            if not reset_eval["recommended"]:
+                reset_eval = dict(reset_eval)
+                reset_eval["reason"] = "Manuell ausgelöst (Cockpit-Debug)"
+            self.rt.set_state("EXECUTING", "Pre-Reset-Transaktion")
+            await reset.execute_reset(self.rt, reset_eval)
+            self._done_milestones = set()      # neuer Run, neue Meilensteine
+            self._last_wait_reason = None
+            self._first_cycle = True
+            return
 
         # Kandidaten immer vollständig erzeugen (Cockpit zeigt Alternativen);
         # eine nötige Schutzaktion wird mit Vorrang eingereiht (G-04).
@@ -195,6 +212,7 @@ class Brain:
     def _plan_payload(self, meta_view: meta.MetaView, bottleneck: dict | None) -> dict:
         payload = meta_view.to_dict()
         payload["bottleneck"] = bottleneck
+        payload["reset"] = self.last_reset_eval
         return payload
 
 

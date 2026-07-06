@@ -141,12 +141,53 @@ P0_MILESTONES: list[Milestone] = [
 ]
 
 
+# Feste frühe Metaphysics-Reihenfolge (Spec 9.1). Hinweis: das Spec-Wort
+# „Enlightenment" heißt in v1.5.0.2 „engeneering" (sic, -1 % Price Ratio).
+METAPHYSICS_ORDER = [
+    "engeneering", "diplomacy", "goldenRatio",
+    "divineProportion", "vitruvianFeline", "renaissance",
+]
+
+
+def next_metaphysics_target(snap: dict) -> dict | None:
+    """Nächster unerforschter Perk der festen Reihenfolge (oder None)."""
+    perks = {p["name"]: p for p in snap.get("prestige", {}).get("perks", [])}
+    for name in METAPHYSICS_ORDER:
+        p = perks.get(name)
+        if p is None:
+            # Perk noch nicht im Snapshot (nicht unlocked) — Standardpreise
+            # der Referenzversion, damit die Reset-Planung rechnen kann:
+            defaults = {"engeneering": 5, "diplomacy": 5, "goldenRatio": 50,
+                        "divineProportion": 100, "vitruvianFeline": 250,
+                        "renaissance": 750}
+            return {"name": name, "label": name, "researched": False,
+                    "unlocked": False,
+                    "prices": [{"name": "paragon", "val": defaults[name]}]}
+        if not p["researched"]:
+            return p
+    return None
+
+
+def determine_run(snap: dict) -> str:
+    """Run-Typ aus dem persistenten Zustand ableiten (Spec 8.2, M3-Umfang)."""
+    prestige = snap.get("prestige", {})
+    persistent = (prestige.get("paragon", 0) + prestige.get("burnedParagon", 0)
+                  + prestige.get("karma", 0))
+    any_perk = any(p["researched"] for p in prestige.get("perks", []))
+    if persistent <= 0 and not any_perk:
+        return "FIRST_RUN"
+    if next_metaphysics_target(snap) is not None:
+        return "PRICE_RATIO_RUN"
+    return "CORE_META_RUN"   # weitere Run-Typen folgen mit M4–M7
+
+
 @dataclass
 class MetaView:
     phase: str
     run_type: str
     active: Milestone | None
     milestones: list[dict]      # fürs Cockpit: [{id,label,state}]
+    next_perk: dict | None = None
 
     @property
     def objective_label(self) -> str:
@@ -158,14 +199,42 @@ class MetaView:
             "runType": self.run_type,
             "objective": self.objective_label,
             "milestones": self.milestones,
+            "nextPerk": ({"name": self.next_perk["name"],
+                          "label": self.next_perk.get("label") or self.next_perk["name"],
+                          "prices": self.next_perk.get("prices", [])}
+                         if self.next_perk else None),
         }
+
+
+def _perk_milestones(snap: dict, next_perk: dict | None) -> list[Milestone]:
+    """Zusätzliche Meilensteine für Price-Ratio-Runs (Metaphysics-Kauf)."""
+    if next_perk is None:
+        return []
+    out = [Milestone("metaphysics", "Metaphysics erforschen",
+                     _tech("metaphysics"),
+                     {"kind": "research", "name": "metaphysics"},
+                     visible=_tech("philosophy"))]
+    label = next_perk.get("label") or next_perk["name"]
+    out.append(Milestone(f"perk_{next_perk['name']}", f"Metaphysics: {label} kaufen",
+                         lambda s: False,   # erledigt sich über next_perk-Wechsel
+                         {"kind": "perk", "name": next_perk["name"]},
+                         visible=_tech("metaphysics")))
+    return out
 
 
 def evaluate(snap: dict) -> MetaView:
     """Bestimmt Phase, Run-Typ und den aktiven Meilenstein."""
+    run_type = determine_run(snap)
+    next_perk = next_metaphysics_target(snap)
+    milestones = list(P0_MILESTONES)
+    phase = "P0"
+    if run_type == "PRICE_RATIO_RUN":
+        phase = "P1"
+        milestones = milestones + _perk_milestones(snap, next_perk)
+
     active: Milestone | None = None
     rows: list[dict] = []
-    for m in P0_MILESTONES:
+    for m in milestones:
         if m.done(snap):
             state = "done"
         elif active is None and m.visible(snap):
@@ -174,4 +243,5 @@ def evaluate(snap: dict) -> MetaView:
         else:
             state = "pending"
         rows.append({"id": m.id, "label": m.label, "state": state})
-    return MetaView(phase="P0", run_type="FIRST_RUN", active=active, milestones=rows)
+    return MetaView(phase=phase, run_type=run_type, active=active,
+                    milestones=rows, next_perk=next_perk)

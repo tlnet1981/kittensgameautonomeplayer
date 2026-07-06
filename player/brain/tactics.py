@@ -103,6 +103,11 @@ def _target_prices(snap: dict, target: dict | None) -> list[dict] | None:
     if target["kind"] == "resource":
         # Ressourcen-Ziel (z. B. „10 Holz beschaffen"): wirkt wie ein Preisvektor.
         return [{"name": target["name"], "val": target["amount"]}]
+    if target["kind"] == "perk":
+        for p in snap.get("prestige", {}).get("perks", []):
+            if p["name"] == target["name"] and not p["researched"]:
+                return p["prices"]
+        return None
     return None
 
 
@@ -113,6 +118,9 @@ def _target_obj(snap: dict, target: dict | None) -> dict | None:
         return A.building(snap, target["name"])
     if target["kind"] == "research":
         return A.tech(snap, target["name"])
+    if target["kind"] == "perk":
+        return next((p for p in snap.get("prestige", {}).get("perks", [])
+                     if p["name"] == target["name"]), None)
     return None
 
 
@@ -174,6 +182,13 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
             cands.append(Candidate(act, 0.0, {"milestone": 0.0}, feasible=False,
                                    reject_reason="Food-Sicherheit blockiert Housing (I-01)"))
             return
+    elif target["kind"] == "perk":
+        if not obj.get("unlocked"):
+            cands.append(Candidate(actions.buy_perk(target["name"], obj.get("label") or target["name"]),
+                                   0.0, {"milestone": 0.0}, feasible=False,
+                                   reject_reason="Perk noch nicht freigeschaltet (Metaphysics/Vorgänger fehlt)"))
+            return
+        act = actions.buy_perk(target["name"], obj.get("label") or target["name"])
     else:
         act = actions.research(target["name"], obj["label"])
 

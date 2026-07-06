@@ -121,6 +121,29 @@ def craft(name: str, label: str, times: int) -> Action:
     )
 
 
+def buy_perk(name: str, label: str) -> Action:
+    """Metaphysics-Perk kaufen — irreversibel (Paragon wird ausgegeben).
+    Panel-Scoping verhindert die Kollision mit gleichnamigen Policies!"""
+    return Action(
+        id=f"perk:{name}", type="BUY_UPGRADE",
+        label=f"Kaufe Metaphysics: {label}",
+        exec_spec={"kind": "click_button", "tab": "Science",
+                   "panel": "Metaphysics", "title": label, "batch": 1},
+        expected=f"Permanenter Bonus: {label}",
+        irreversible=True,
+    )
+
+
+def reset_run() -> Action:
+    return Action(
+        id="reset:run", type="RESET",
+        label="RESET — neuen Run mit Paragon starten",
+        exec_spec={"kind": "reset"},
+        expected="Paragon-Gewinn, Neustart der Zivilisation",
+        irreversible=True,
+    )
+
+
 def trade(race: str, race_title: str, times: int) -> Action:
     return Action(
         id=f"trade:{race}", type="TRADE",

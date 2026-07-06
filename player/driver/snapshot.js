@@ -160,6 +160,13 @@
             paragon: get("paragon"),
             burnedParagon: get("burnedParagon"),
             karma: get("karma"),
+            perks: (g.prestige && g.prestige.perks ? g.prestige.perks : [])
+                .filter(p => p.unlocked || p.researched)
+                .map(p => ({
+                    name: p.name, label: p.label,
+                    researched: !!p.researched, unlocked: !!p.unlocked,
+                    prices: (p.prices || []).map(x => ({ name: x.name, val: x.val })),
+                })),
         };
     });
 
