@@ -3,14 +3,28 @@
 Das Spielfenster ist bewusst ein eigener, sichtbarer Browser — der Zuschauer
 soll dem Agenten beim Klicken zusehen können (headed). Für Tests läuft
 dasselbe headless.
+
+Zwei wichtige Eigenschaften:
+- **Persistentes Profil:** Kittens Game speichert den Spielstand in
+  localStorage. Deshalb läuft der Browser mit `launch_persistent_context`
+  auf einem festen Profilordner (config.profile_dir) — der Spielstand
+  überlebt Neustarts von run.py. Profilordner löschen = neu anfangen.
+- **Englische Spielsprache erzwungen:** Der Actor matcht englische
+  Button-Titel. Auf nicht-englischen Systemen würde das Spiel sonst der
+  Browser-Sprache folgen (i18n.js: localStorage-Schlüssel, sonst
+  navigator.language). Doppelt abgesichert: locale="en-US" am Kontext und
+  ein Init-Skript, das den localStorage-Schlüssel vor jedem Seitenstart
+  auf "en" setzt (wirkt auch nach Reset-Reloads und übersteuert eine
+  früher gespeicherte andere Sprache).
 """
 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Browser, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
 # CSS für das Klick-Highlight (Glow), wird einmalig ins Spiel injiziert.
 GLOW_CSS = """
@@ -23,28 +37,46 @@ GLOW_CSS = """
 """
 
 
+# Erzwingt Englisch, bevor irgendein Spiel-Skript läuft (i18n.js liest
+# diesen Schlüssel zuerst; Fallback wäre navigator.language):
+FORCE_ENGLISH_JS = """
+try { localStorage["com.nuclearunicorn.kittengame.language"] = "en"; } catch (e) {}
+"""
+
+
 class GameBrowser:
     """Kapselt Playwright: Start, Spielseite laden, Evaluate, Stop."""
 
     def __init__(self, headless: bool, window_size: tuple[int, int],
-                 chromium_path: str | None = None) -> None:
+                 chromium_path: str | None = None,
+                 profile_dir: Path | None = None) -> None:
         self.headless = headless
         self.window_size = window_size
         self.chromium_path = chromium_path
+        self.profile_dir = profile_dir
         self._pw: Playwright | None = None
-        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
         self.page: Page | None = None
 
     async def start(self, game_url: str) -> None:
         self._pw = await async_playwright().start()
         w, h = self.window_size
         args = [f"--window-size={w},{h}"]
-        launch_kwargs: dict = {"headless": self.headless, "args": args}
+        launch_kwargs: dict = {
+            "headless": self.headless,
+            "args": args,
+            "viewport": {"width": w, "height": h},
+            "locale": "en-US",   # navigator.language / Accept-Language
+        }
         if self.chromium_path:
             launch_kwargs["executable_path"] = self.chromium_path
-        self._browser = await self._pw.chromium.launch(**launch_kwargs)
-        context = await self._browser.new_context(viewport={"width": w, "height": h})
-        self.page = await context.new_page()
+        if self.profile_dir is not None:
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
+        self._context = await self._pw.chromium.launch_persistent_context(
+            str(self.profile_dir) if self.profile_dir else "", **launch_kwargs)
+        await self._context.add_init_script(FORCE_ENGLISH_JS)
+        self.page = self._context.pages[0] if self._context.pages \
+            else await self._context.new_page()
         await self.page.goto(game_url, wait_until="domcontentloaded", timeout=60_000)
         await self._wait_for_game()
         await self.page.add_style_tag(content=GLOW_CSS)
@@ -96,11 +128,18 @@ class GameBrowser:
             return None
 
     async def stop(self) -> None:
+        # Letzten Spielstand sichern (best effort), dann Kontext schließen —
+        # das persistiert localStorage (inkl. Save) im Profilordner.
         try:
-            if self._browser is not None:
-                await self._browser.close()
+            if self.page is not None:
+                try:
+                    await self.page.evaluate("() => game.save()")
+                except Exception:
+                    pass
+            if self._context is not None:
+                await self._context.close()
         finally:
-            self._browser = None
+            self._context = None
             self.page = None
             if self._pw is not None:
                 await self._pw.stop()

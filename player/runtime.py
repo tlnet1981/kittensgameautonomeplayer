@@ -141,7 +141,7 @@ class PlayerRuntime:
             self.store = SessionStore(self.config.data_dir)
             self.bus.set_persister(self.store.write_event)
             self.browser = GameBrowser(self.config.headless, self.config.game_window_size,
-                                       self.config.chromium_path)
+                                       self.config.chromium_path, self.config.profile_dir)
             url = self.config.effective_game_url
             self.bus.publish("narrative.chapter", {
                 "title": "Session gestartet",

@@ -51,6 +51,22 @@ git clone --depth 1 https://github.com/nuclear-unicorn/kittensgame.git gamefiles
 
 Alle Optionen gibt es auch als Umgebungsvariablen (`KGP_*`, siehe `config.py`).
 
+### Updaten (nach neuen Änderungen auf GitHub)
+
+```bash
+git pull                          # Branch trackt origin bereits
+pip install -r requirements.txt   # nur falls sich Abhängigkeiten geändert haben
+```
+
+### Spielstand & Sprache
+
+- Der **Spielstand** lebt im persistenten Browser-Profil `data/browser-profile/`
+  (localStorage des Spiels) und überlebt Neustarts von `run.py`.
+  Komplett neu anfangen: Ordner löschen (oder `POST /api/control/force_reset`
+  für einen regulären Spiel-Reset mit Paragon).
+- Die **Spielsprache wird auf Englisch erzwungen** (Browser-Locale + Init-Skript),
+  unabhängig von der Systemsprache — der Agent matcht englische Button-Titel.
+
 ## Bedienung des Cockpits
 
 - **▶ Start / ■ Stop** — Spielfenster öffnen/schließen, Agent starten/beenden.

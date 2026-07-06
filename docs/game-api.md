@@ -81,6 +81,17 @@ JS-API-Aufrufe des Actors (wo DOM-Klicks unpraktisch sind):
 
 ## Bekannte Stolpersteine
 
+- **Sprache:** Das Spiel wählt seine Sprache aus
+  `localStorage["com.nuclearunicorn.kittengame.language"]`, sonst aus
+  `navigator.language` (i18n.js:79-97). Auf deutschen Systemen wäre das Spiel
+  deutsch und die fest verdrahteten englischen Button-Titel des Actors
+  („Gather catnip" …) würden nicht matchen. Der Browser erzwingt deshalb
+  `locale="en-US"` plus ein Init-Skript, das den localStorage-Schlüssel vor
+  jedem Seitenstart auf `"en"` setzt (browser.py).
+- **Spielstand:** liegt im localStorage → nur mit persistentem Browser-Profil
+  (`launch_persistent_context`, `data/browser-profile/`) überlebt er
+  Programm-Neustarts.
+
 - **Version ohne Punkte:** `telemetry.version` liefert `"1502"`, nicht `"1.5.0.2"` —
   Vergleich normalisieren (runtime.py `_check_version`).
 - **Frisches Spiel:** vor dem ersten „Gather Catnip" ist `resources` leer und

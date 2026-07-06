@@ -45,6 +45,10 @@ class Config:
         # Optionaler Pfad zu einer Chromium-Binary; leer = Playwright-Default.
         # Nützlich, wenn Playwright-Version und installierte Browser abweichen.
         self.chromium_path: str | None = os.environ.get("KGP_CHROMIUM_PATH") or None
+        # Persistentes Browser-Profil: hier lebt der SPIELSTAND (localStorage).
+        # Ordner löschen = komplett neu anfangen.
+        self.profile_dir: Path = Path(os.environ.get("KGP_PROFILE_DIR")
+                                      or str(PROJECT_ROOT / "data" / "browser-profile"))
 
         # --- Agent-Timing ---
         # Telemetrie-Intervall: wie oft der komplette Spielzustand gelesen
