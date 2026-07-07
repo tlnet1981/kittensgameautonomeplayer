@@ -96,7 +96,11 @@ def signature(snap: dict) -> dict:
                            if t.get("unlocked") and not t.get("researched")},
         "unlocked_upgrades": {u["name"] for u in snap.get("workshop", {}).get("upgrades", [])
                               if u.get("unlocked") and not u.get("researched")},
-        "tabs": tuple(snap.get("tabs", []) or ()),
+        # Nur sichtbare Tab-IDs (hashbar!) — snapshot.js liefert Dicts
+        # {id, visible}; rohe Dicts wären in set() ein TypeError (Live-Bug,
+        # den der E2E-Smoke gefunden hat: make_snap hatte nur leere Listen).
+        "tabs": {t.get("id") for t in (snap.get("tabs") or ())
+                 if isinstance(t, dict) and t.get("visible")},
         "season": snap.get("calendar", {}).get("season"),
         "cycle": snap.get("calendar", {}).get("cycle"),
         "kittens": snap.get("village", {}).get("kittens", 0),
@@ -117,7 +121,7 @@ def classify_hard_trigger(prev: dict | None, cur: dict,
         (cur["techs"] - prev["techs"])
         | (cur["unlocked_techs"] - prev["unlocked_techs"])
         | (cur["unlocked_upgrades"] - prev["unlocked_upgrades"])
-        | (set(cur["tabs"]) - set(prev["tabs"])))
+        | (cur["tabs"] - prev["tabs"]))
     if new_unlocks:
         return {"type": "hard", "source": "unlock",
                 "detail": "Neu verfügbar: " + ", ".join(new_unlocks[:4])}

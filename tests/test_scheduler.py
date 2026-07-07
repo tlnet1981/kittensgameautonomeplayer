@@ -109,3 +109,20 @@ def test_hard_trigger_priority_is_deterministic():
     prev = _sig()
     cur = _sig(techs=prev["techs"] | {"calendar"}, caps_reached={"catnip"}, season=1)
     assert scheduler.classify_hard_trigger(prev, cur)["source"] == "unlock"
+
+
+def test_signature_with_real_tab_dicts_is_hashable():
+    """Live-Regression (E2E-Fund): snapshot.js liefert tabs als Dicts
+    {id, visible} — die Signatur muss daraus hashbare IDs machen, sonst
+    stirbt jeder Zyklus mit TypeError und der Agent steht komplett still."""
+    snap = make_snap()
+    snap["tabs"] = [{"id": "Bonfire", "visible": True},
+                    {"id": "Science", "visible": False}]
+    prev = scheduler.signature(snap)
+    assert prev["tabs"] == {"Bonfire"}          # nur sichtbare IDs
+
+    snap["tabs"][1]["visible"] = True           # Science-Tab erscheint
+    cur = scheduler.signature(snap)
+    trigger = scheduler.classify_hard_trigger(prev, cur)
+    assert trigger["source"] == "unlock"
+    assert "Science" in trigger["detail"]
