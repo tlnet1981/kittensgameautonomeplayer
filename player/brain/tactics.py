@@ -495,10 +495,15 @@ def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None) -> None:
                                              _min_farmers(snap, village))
 
     if free <= 0:
-        if alloc and _allocation_shift_candidate(snap, cands, village,
-                                                 food_tight, alloc):
-            return
-        _job_rebalance_candidate(snap, bn, cands, village, food_tight, lam_rate)
+        if alloc:
+            # Die Soll-Allokation ist die EINZIGE Umschul-Instanz, sobald
+            # sie rechnen kann — die Legacy-Regeln (Engpass-Tausch, Cap-
+            # Rebalance, Farmer-Freigabe) würden sonst gegen sie arbeiten
+            # (Flattern). Sie bleiben Fallback ohne Preisdaten.
+            _allocation_shift_candidate(snap, cands, village, food_tight, alloc)
+        else:
+            _job_rebalance_candidate(snap, bn, cands, village, food_tight,
+                                     lam_rate)
         return
 
     # Mindestfarmer-/Food-Leitplanke hat VORRANG vor jeder λ-Bewertung:
@@ -558,7 +563,11 @@ def _allocation_shift_candidate(snap, cands, village, food_tight,
                                 alloc: dict[str, int]) -> bool:
     """Konvergenz zur Soll-Allokation (12.2 Schritt 7): ein Kitten vom
     größten Überschuss-Job zum größten Defizit-Job — nur ganze Defizite
-    (inhärente Hysterese), Farmer nie unter die Allokations-Untergrenze."""
+    (inhärente Hysterese). Farmer-Hysterese-Band (Anti-Flattern,
+    Nutzer-Fund „4. Kitten springt Farmer↔Woodcutter"): Ein Farmer wird
+    nur abgezogen, wenn die Projektion OHNE ihn die 1.5-fache Warnschwelle
+    hält — zwischen 1.0× (Untergrenze zieht Farmer an) und 1.5× passiert
+    bewusst nichts."""
     deficits = sorted(((alloc[j] - A.job_count(snap, j), j) for j in alloc),
                       key=lambda t: (-t[0], shadow.ALLOC_JOB_ORDER.index(t[1])))
     surpluses = sorted(((A.job_count(snap, j) - alloc[j], j) for j in alloc),
@@ -566,17 +575,32 @@ def _allocation_shift_candidate(snap, cands, village, food_tight,
     if not deficits or not surpluses:
         return False
     d_count, d_job = deficits[0]
-    s_count, s_job = surpluses[0]
-    if d_count < 1 or s_count < 1 or d_job == s_job:
+    if d_count < 1:
         return False
-    if s_job == "farmer" and food_tight:
-        return False
-    label = next((j["title"] for j in village.get("jobs", [])
-                  if j["name"] == d_job), d_job)
-    cands.append(Candidate(
-        actions.shift_job(s_job, d_job, label, 1), 2.2,
-        {"jobValue": 1.2, "allocDeficit": 0.0}))
-    return True
+    for s_count, s_job in surpluses:
+        if s_count < 1 or s_job == d_job:
+            continue
+        if s_job == "farmer":
+            if food_tight or not _farmer_release_safe(snap, village):
+                continue
+        label = next((j["title"] for j in village.get("jobs", [])
+                      if j["name"] == d_job), d_job)
+        cands.append(Candidate(
+            actions.shift_job(s_job, d_job, label, 1), 2.2,
+            {"jobValue": 1.2, "allocDeficit": 0.0}))
+        return True
+    return False
+
+
+def _farmer_release_safe(snap, village) -> bool:
+    """Hysterese-Band der Farmer-Freigabe: Projektion mit einem Farmer
+    weniger muss die FARMER_RELEASE_MARGIN-fache Warnschwelle halten."""
+    happiness = village.get("happiness", 1.0) or 1.0
+    rate = shadow.JOB_BASE_RATES["farmer"]["catnip"] * happiness
+    after = project_catnip(snap, demand_delta=rate)
+    demand = snap.get("derived", {}).get("food", {}).get("demandPerSec", 0.0)
+    warn_floor = max(150.0, 120.0 * demand)
+    return after["projectedMin"] >= warn_floor * FARMER_RELEASE_MARGIN
 
 
 def _job_rebalance_candidate(snap, bn, cands, village, food_tight,

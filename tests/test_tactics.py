@@ -390,3 +390,58 @@ def test_allocation_respects_min_farmers_and_sums():
     assert sum(a1.values()) == 5
     assert a1.get("farmer", 0) >= mf
     assert a1.get("woodcutter", 0) >= 1 and a1.get("scholar", 0) >= 1
+
+
+def _flap_snap(catnip, jobs):
+    return make_snap(
+        resources={"catnip": {"value": catnip, "max": 5000, "rate": 2.0},
+                   "wood": {"value": 3, "max": 200, "rate": 0.09},
+                   "science": {"value": 50, "max": 500, "rate": 0.175}},
+        buildings={"field": {"val": 10, "prices": {"catnip": 400}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 31}, "unlocked": True}},
+        techs={"calendar": {"researched": True}, "agriculture": {"researched": True},
+               "archery": {"researched": False, "prices": {"science": 300}}},
+        jobs=jobs, kittens=4, max_kittens=4,
+        season="autumn", catnip_field_base=10 * 0.125,
+    )
+
+
+def test_no_farmer_flapping_inside_hysteresis_band():
+    """Nutzer-Fund: 4. Kitten sprang Farmer↔Woodcutter. Im Band zwischen
+    Farmer-Untergrenze (1.0×Warnschwelle) und Freigabe-Marge (1.5×) darf
+    KEIN Farmer abgezogen werden, auch wenn die Allokation einen
+    Überschuss sieht."""
+    from player.brain import meta, safety
+    snap = _flap_snap(1800, {"woodcutter": 1, "farmer": 2, "scholar": 1})
+    v = snap["village"]
+    assert tactics._min_farmers(snap, v) == 1          # Band-Vorbedingung
+    assert not tactics._farmer_release_safe(snap, v)   # Band-Vorbedingung
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    assert not any(c.action.id.startswith("shift:farmer>") for c in cands
+                   if c.feasible)
+
+
+def test_no_shift_reversal_across_cycles():
+    """Anti-Flattern-Simulation: Über mehrere Zyklen darf auf einen Tausch
+    A→B nie unmittelbar der Rücktausch B→A folgen."""
+    from player.brain import meta, safety
+    jobs = {"woodcutter": 1, "farmer": 2, "scholar": 1}
+    history = []
+    for _ in range(6):
+        snap = _flap_snap(1800, dict(jobs))
+        mv = meta.evaluate(snap)
+        cands = tactics.generate(snap, mv, safety.check(snap))[0]
+        best = max((c for c in cands if c.feasible),
+                   key=lambda c: (c.score, c.action.id))
+        history.append(best.action.id)
+        if not best.action.id.startswith("shift:"):
+            break
+        src, dst = best.action.exec_spec["from"], best.action.exec_spec["to"]
+        jobs[src] -= 1
+        jobs[dst] = jobs.get(dst, 0) + 1
+    for a, b in zip(history, history[1:]):
+        if a.startswith("shift:") and b.startswith("shift:"):
+            sa = a.split(":", 1)[1].split(">")
+            sb = b.split(":", 1)[1].split(">")
+            assert sa != sb[::-1], f"Ping-Pong erkannt: {a} → {b}"

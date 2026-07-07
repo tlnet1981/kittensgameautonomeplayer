@@ -412,14 +412,22 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
                 rates[res] += rate * happiness
         remaining -= 1
 
-    # Round-Robin-Rest: Jobs ohne volle Ertragsressource, feste Reihenfolge.
+    # Rest-Verteilung mit STICKINESS (Anti-Flattern, Nutzer-Fund): Kitten
+    # ohne positiven Grenzwert bleiben bevorzugt in ihren AKTUELLEN Jobs
+    # (minimale Bewegung), solange deren Ertrag nicht voll ist; nur ein
+    # echter Überhang wird round-robin auf offene Jobs verteilt.
     if remaining > 0:
         open_jobs = [j for j in jobs
                      if not all(_capped(r) for r in JOB_BASE_RATES.get(j, {}))]
-        if open_jobs:
-            i = 0
-            while remaining > 0:
-                alloc[open_jobs[i % len(open_jobs)]] += 1
-                i += 1
-                remaining -= 1
+        for j in open_jobs:
+            if remaining <= 0:
+                break
+            keep = min(remaining, max(0, A.job_count(snap, j) - alloc[j]))
+            alloc[j] += keep
+            remaining -= keep
+        i = 0
+        while remaining > 0 and open_jobs:
+            alloc[open_jobs[i % len(open_jobs)]] += 1
+            i += 1
+            remaining -= 1
     return alloc
