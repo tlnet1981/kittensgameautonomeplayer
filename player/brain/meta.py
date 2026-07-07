@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from player.state import access as A
 
-from . import challenge, shadow, simulate
+from . import challenge, chrono, shadow, simulate, timecrystal
 from .reset import FIRST_RESET_MIN_PARAGON, MIN_PARAGON_GAIN
 
 
@@ -202,6 +202,14 @@ def _space_program_val(snap: dict, name: str) -> int:
     return 0
 
 
+def _space_building(snap: dict, name: str) -> dict | None:
+    for planet in snap.get("space", {}).get("planets", []):
+        for b in planet.get("buildings", []):
+            if b.get("name") == name:
+                return b
+    return None
+
+
 # Feste frühe Metaphysics-Reihenfolge (Spec 9.1). Hinweis: das Spec-Wort
 # „Enlightenment" heißt in v1.5.0.2 „engeneering" (sic, -1 % Price Ratio).
 # Nach der Price-Ratio-Kette: Chronomancy/Astromancy (Events/Starcharts)
@@ -234,10 +242,11 @@ def next_metaphysics_target(snap: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------- Run-Typen
-# Spec 8.2: die 13 Makroplan-Kandidaten. Aktiv wählbar sind in dieser
-# Ausbaustufe nur FIRST_RUN, PRICE_RATIO_RUN und PARAGON_RUN — für die
-# übrigen Run-Typen folgt die Zulässigkeit mit späterem Ausbau (es gibt
-# für sie noch keine Zielmeilensteine und keine Bewertungsformeln).
+# Spec 8.2: die 13 Makroplan-Kandidaten. Aktiv wählbar sind neben den
+# Basistypen (FIRST/PRICE_RATIO/PARAGON/CHALLENGE) die Endgame-Typen
+# LEVIATHAN/SHATTER/RELIC_STATION/SEED/POSITIVE_CS — ihre Zulässigkeit
+# hängt an beobachtbaren Spielzuständen (siehe _admissible_run_types);
+# CORE_META/RELIGION/UNICORN/MATURE_ENDGAME folgen mit späterem Ausbau.
 RUN_TYPES = frozenset({
     "FIRST_RUN", "PRICE_RATIO_RUN", "CORE_META_RUN", "RELIGION_RUN",
     "UNICORN_RUN", "CHALLENGE_RUN", "LEVIATHAN_RUN", "RELIC_STATION_RUN",
@@ -245,7 +254,27 @@ RUN_TYPES = frozenset({
     "MATURE_ENDGAME_RUN",
 })
 ACTIVE_RUN_TYPES = frozenset({"FIRST_RUN", "PRICE_RATIO_RUN", "PARAGON_RUN",
-                              "CHALLENGE_RUN"})
+                              "CHALLENGE_RUN", "LEVIATHAN_RUN", "SHATTER_RUN",
+                              "RELIC_STATION_RUN", "SEED_RUN",
+                              "POSITIVE_CS_RUN"})
+
+# SHATTER_RUN-Restzeit (dokumentierte Näherung, siehe _plan_restzeit):
+# Ziel-TC-Bestand, ab dem die Engine „läuft" = Reserve + ein voller
+# konservativer Batch-Vorrat (Referenzgröße, kein Spielwert):
+SHATTER_RUN_TC_TARGET = timecrystal.TC_RESERVE + 15.0
+# RELIC_STATION_RUN: AM-Cap-Schwelle der vollen Relic-Station-Wirkung
+# (space.js:718-720: rrBoost × amMax/5000 unter 5000) und Referenzpreise
+# des relicStation-Upgrades (workshop.js:1538-1550):
+RELIC_STATION_AM_CAP = 5000.0
+RELIC_STATION_REF_PRICES = [{"name": "antimatter", "val": 5000},
+                            {"name": "eludium", "val": 100}]
+# AM-Cap je Containment Chamber (space.js:597, ohne Heatsink-Bonus —
+# konservative Basis; der Snapshot-Cap hat immer Vorrang):
+AM_MAX_PER_CONTAINMENT = 100.0
+# SEED_RUN: erwartete Dauer eines dedizierten Seed-Runs — REFERENZSCHÄTZUNG
+# (ehrlich gekennzeichnet, konservativ wie challenge.est_completion_s):
+# SEED_RUN gewinnt nur, wenn die anderen Pläne schlechter scoren.
+SEED_RUN_EST_S = 6 * 3600.0
 
 # Taktische Varianten je Makroplan (Spec 8.3 Schritt 3): invest-Anteil der
 # Projektions-Politik. Namen sind zugleich der deterministische Tie-Break
@@ -285,7 +314,55 @@ def _admissible_run_types(snap: dict) -> list[str]:
     if challenge.challenges_available(snap) \
             and challenge.best_challenge(snap) is not None:
         base.append("CHALLENGE_RUN")
+    base += _endgame_run_types(snap)
     return base
+
+
+def _leviathans_tradeable(snap: dict) -> bool:
+    """LEVIATHAN_RUN-Gate: Leviathans sind handelbar (diplomacy-Daten) und
+    die TC-Erwartung je Trade ist positiv (Spec 8.2/14.4/17.1)."""
+    if A.race(snap, "leviathans") is None:
+        return False
+    return timecrystal.tc_balance(snap)["leviathanTcPerTrade"] > 0
+
+
+def _relic_infra_visible(snap: dict) -> bool:
+    """RELIC_STATION_RUN-Gate: Space-Infrastruktur Richtung Antimatter ist
+    sichtbar — Sunlifter (AM-Produktion, space.js:560-580) im Space-Snapshot
+    oder Antimatter bereits als Ressource beobachtet (Spec 16.3)."""
+    if A.resource(snap, "antimatter") is not None:
+        return True
+    for planet in snap.get("space", {}).get("planets", []):
+        for b in planet.get("buildings", []):
+            if b.get("name") == "sunlifter" and (b.get("unlocked") or b.get("val", 0) > 0):
+                return True
+    return False
+
+
+def _relic_station_done(snap: dict) -> bool:
+    """AM-Cap-Makroplan abgeschlossen: relicStation erforscht UND AM-Cap
+    ≥ 5000 (volle Wirkung, space.js:718-720)."""
+    up = A.upgrade(snap, "relicStation")
+    return bool(up and up.get("researched")) \
+        and A.res_cap(snap, "antimatter") >= RELIC_STATION_AM_CAP
+
+
+def _endgame_run_types(snap: dict) -> list[str]:
+    """Zusätzlich zulässige Endgame-Run-Typen (Spec 8.2), rein aus
+    beobachtbaren Zuständen — Reihenfolge deterministisch."""
+    extra: list[str] = []
+    if _leviathans_tradeable(snap):
+        extra.append("LEVIATHAN_RUN")
+    if timecrystal.rr_level(snap) >= 1 \
+            and timecrystal.tc_balance(snap)["netPositive"]:
+        extra.append("SHATTER_RUN")
+    if _relic_infra_visible(snap) and not _relic_station_done(snap):
+        extra.append("RELIC_STATION_RUN")
+    if chrono.positive_cs_check(snap)[0]:
+        extra.append("POSITIVE_CS_RUN")
+    if chrono.seed_run_admissible(snap)[0]:
+        extra.append("SEED_RUN")
+    return extra
 
 
 def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
@@ -301,6 +378,19 @@ def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
                      Challenge — Referenzkonstante aus challenge.py, bewusst
                      KONSERVATIV (Stunden), damit CHALLENGE_RUN nur gewinnt,
                      wenn PRICE_RATIO/PARAGON schlechter scoren (Spec 18.2).
+
+    Endgame-Typen (dokumentierte Näherungen — Zeit bis positiver TC-/
+    Relic-Fluss über die EV-Projektion bzw. beobachtete Raten):
+    LEVIATHAN_RUN:   ETA des nächsten Leviathan-Trade-Kostenvektors
+                     (buys + 50 Catpower, diplomacy.js tradeImpl) über die
+                     Projektion — dann fließen TC (Spec 14.4/17.1).
+    SHATTER_RUN:     Zeit bis der TC-Bestand SHATTER_RUN_TC_TARGET trägt
+                     (beobachtete timeCrystal-Rate; Bestand reicht → 0).
+    RELIC_STATION_RUN: ETA des AM-Cap-Blocks = eta_of der relicStation-
+                     Preise (Snapshot, sonst Referenz workshop.js:1538-1550).
+    POSITIVE_CS_RUN: Dauer einer Schleifeniteration ≈ Wiederaufbau der
+                     Chronosphere-Flotte (REBUILD_DELAY_PER_CS_S × n, 19.4).
+    SEED_RUN:        Referenzschätzung SEED_RUN_EST_S (konservativ, 19.3).
     """
     if run_type == "FIRST_RUN":
         return proj.paragon_eta(FIRST_RESET_MIN_PARAGON)
@@ -325,6 +415,37 @@ def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
         if tech and not tech["researched"]:
             t_tech = proj.eta_of(tech["prices"])
         return max(t_fund, t_tech)
+    if run_type == "LEVIATHAN_RUN":
+        race = A.race(snap, "leviathans")
+        if race is None:
+            return math.inf
+        costs = [{"name": "manpower", "val": 50}] \
+            + [{"name": p["name"], "val": p["val"]} for p in race.get("buys", [])]
+        return proj.eta_of(costs)
+    if run_type == "SHATTER_RUN":
+        bal = timecrystal.tc_balance(snap)
+        need = SHATTER_RUN_TC_TARGET - bal["stock"]
+        if need <= 0:
+            return 0.0
+        if bal["ratePerSec"] <= 1e-9:
+            return math.inf
+        return need / bal["ratePerSec"]
+    if run_type == "RELIC_STATION_RUN":
+        up = A.upgrade(snap, "relicStation")
+        prices = (up or {}).get("prices") or RELIC_STATION_REF_PRICES
+        if up and up.get("researched"):
+            # Upgrade steht — es fehlt nur noch das AM-Cap: ETA der
+            # nächsten Containment Chamber (space.js:582-602) als Proxy.
+            cc = _space_building(snap, "containmentChamber")
+            prices = (cc or {}).get("prices") or []
+        return proj.eta_of(prices)
+    if run_type == "POSITIVE_CS_RUN":
+        n = A.bld_val(snap, "chronosphere")
+        if n < 1:
+            return math.inf
+        return chrono.REBUILD_DELAY_PER_CS_S * n
+    if run_type == "SEED_RUN":
+        return SEED_RUN_EST_S
     # PARAGON_RUN (Spec 20.4): erwartete Paragonrate über den Horizont
     gain = proj.paragon_projection(horizon) - proj.paragon_projection(0.0)
     if gain <= 0:
@@ -415,6 +536,28 @@ class MetaView:
         }
 
 
+def _am_cap_milestones(snap: dict) -> list[Milestone]:
+    """AM-Cap-Makroplan (Spec 16.3/17.4) als ZUSAMMENHÄNGENDER Meilenstein-
+    Block des RELIC_STATION_RUN: erst AM-Cap 5000 über Containment Chambers
+    (100 AM-Cap je Einheit, space.js:582-602 — der Snapshot-Cap der
+    Ressource hat Vorrang), dann das relicStation-Upgrade (workshop.js:
+    1538-1550, 5000 AM + 100 Eludium). Unter AM-Cap 5000 skaliert der
+    Beacon-Relic-Ertrag mit amMax/5000 herunter (space.js:718-720) — darum
+    ist der Cap das erste Ziel. Halbfertige Cap-Investitionen außerhalb
+    dieses Runs vermeidet der Block, weil er NUR im RELIC_STATION_RUN in
+    die Meilensteinliste kommt (16.3)."""
+    return [
+        Milestone("am_cap_5000", "Antimatter-Cap 5000 (Containment Chambers)",
+                  lambda s: A.res_cap(s, "antimatter") >= RELIC_STATION_AM_CAP,
+                  {"kind": "space_build", "name": "containmentChamber"},
+                  visible=lambda s: _space_building(s, "containmentChamber") is not None),
+        Milestone("relic_station", "Relic Station erforschen (Workshop)",
+                  lambda s: bool((A.upgrade(s, "relicStation") or {}).get("researched")),
+                  {"kind": "workshop_upgrade", "name": "relicStation"},
+                  visible=lambda s: A.upgrade(s, "relicStation") is not None),
+    ]
+
+
 def _perk_milestones(snap: dict, next_perk: dict | None) -> list[Milestone]:
     """Zusätzliche Meilensteine für Price-Ratio-Runs (Metaphysics-Kauf)."""
     if next_perk is None:
@@ -441,6 +584,9 @@ def evaluate(snap: dict) -> MetaView:
     if run_type == "PRICE_RATIO_RUN":
         phase = "P1"
         milestones = milestones + _perk_milestones(snap, next_perk)
+    if run_type == "RELIC_STATION_RUN":
+        # AM-Cap-Makroplan als zusammenhängendes Ziel (Spec 16.3/17.4):
+        milestones = milestones + _am_cap_milestones(snap)
     if A.tech_researched(snap, "rocketry"):
         phase = "P2"
 

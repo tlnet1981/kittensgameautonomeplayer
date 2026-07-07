@@ -22,8 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from player.state import access as A
-
 
 @dataclass
 class Frontier:
@@ -40,58 +38,13 @@ class Frontier:
 # brain/policy.py + tactics._policy_candidates), „challenges“ (Spec 18 →
 # brain/challenge.py, CHALLENGE_RUN in meta.py, 18.4-Reset-Gate in reset.py),
 # „transcend“ (Spec 15.2 → brain/religion.py tap_plan/transcend_value +
-# reset.execute_reset Schritt 5) und „pacts“ (Spec 15.4/15.5 →
+# reset.execute_reset Schritt 5), „pacts“ (Spec 15.4/15.5 →
 # brain/religion.py pact_value/alicorn_conversion_due +
-# tactics._religion_ev_candidates).
-FRONTIERS: list[Frontier] = [
-    Frontier(
-        id="shatter_engine",
-        title="Shatter-Engine-Potenzial — Agent shattert nur konservativ",
-        trigger=lambda snap, run: (
-            A.res_value(snap, "timeCrystal") >= 50
-            or any(u["name"] == "ressourceRetrieval" and u["val"] >= 3
-                   for u in snap.get("time", {}).get("chronoforge", []))),
-        happening=("Der Time-Crystal-Bestand bzw. Resource-Retrieval-Ausbau erreicht "
-                   "eine Größenordnung, in der eine profitable Shatter-Engine "
-                   "(Spec Kap. 17) den Endgame-Fortschritt dominieren würde."),
-        missing=("Der Agent nutzt nur die konservative Shatter-Regel (kleine Batches, "
-                 "Heat-Spielraum, 5-TC-Reserve). Es fehlen: TC-Rückfluss-Bilanz "
-                 "(17.1), RR-Wert-Formel (17.2), Chrono-Furnace-Steuerung (17.3), "
-                 "Cycle-Positionierung und die Batchgrößen-Optimierung (17.5)."),
-        where=("Spielmechanik-Spec Kap. 17 komplett + Anhang D (RR-Wert). "
-               "Spielcode: gamefiles/js/time.js (shatter, heat, getCFU). "
-               "Aktueller Stand: player/brain/tactics.py → _time_candidates."),
-        prompt=("Erweitere den Kittens-Player um die volle Shatter-Engine (Spec Kap. "
-                "17): TC-Nettobilanz 17.1, RR-Kaufregel 17.2 (RRValue-Formel Anhang D), "
-                "Chrono-Furnace-Bewertung 17.3, Shatter-Batchgrößen-Optimierung unter "
-                "Heat-/Cycle-Constraints 17.5 inkl. Cycle-Positionierung für "
-                "Trade-Boni (game.calendar.cycle). Ersetze die konservative Regel in "
-                "player/brain/tactics.py _time_candidates, ergänze ein Shatter-"
-                "Engine-Panel im Systems-Tab (TC-Rückfluss pro Shatter, Konfidenz) "
-                "und Tests mit Snapshot-Fixtures."),
-    ),
-    Frontier(
-        id="cs_loop",
-        title="Chronosphere-Bestand wächst — Seed-/Carryover-Strategie fehlt",
-        trigger=lambda snap, run: A.bld_val(snap, "chronosphere") >= 3,
-        happening=("Mehrere Chronospheres sind gebaut — Carryover über Resets wird "
-                   "strategisch relevant (Seed-Runs, positive Reset-Schleife)."),
-        missing=("Der Agent kauft Chronospheres nur opportunistisch. Es fehlen: "
-                 "CSValue-Formel (19.1), optimale Chronosphere-Zahl pro Run, "
-                 "Seed-Run-Typ und die positive Reset-Bedingung (19.2) inklusive "
-                 "Non-Carry-Restausgaben in der Pre-Reset-Transaktion (20.3 Schritt 8)."),
-        where=("Spielmechanik-Spec Kap. 19 komplett + 20.3. "
-               "Aktueller Stand: player/brain/reset.py (Pre-Reset-Transaktion) und "
-               "tactics.py (Chronosphere im Whitelist)."),
-        prompt=("Erweitere den Kittens-Player um Chronosphere-/Seed-Strategie (Spec "
-                "Kap. 19): CSValue-Formel 19.1 mit Suche über n−2…n+3, Run-Typen "
-                "SEED_RUN und POSITIVE_CS_RUN im Meta-Controller, positive "
-                "Reset-Bedingung 19.2 (Vektordominanz des Carryover), Pre-Reset-"
-                "Schritt 'nicht übertragbare Ressourcen mit Restwert ausgeben' "
-                "(20.3 Schritt 8) und Carryover-Abgleich nach dem Reset. Cockpit: "
-                "Continue-vs-Reset-Darstellung im Systems-Tab erweitern."),
-    ),
-]
+# tactics._religion_ev_candidates), „shatter_engine“ (Spec 17.1–17.5 →
+# brain/timecrystal.py + tactics._time_candidates, SHATTER_/LEVIATHAN_RUN
+# in meta.py) und „cs_loop“ (Spec 19.2/19.3 → chrono.positive_cs_check/
+# seed_run_admissible, SEED_/POSITIVE_CS_RUN in meta.py).
+FRONTIERS: list[Frontier] = []
 
 
 def check(snap: dict, run_type: str, already_fired: set[str]) -> list[dict[str, Any]]:

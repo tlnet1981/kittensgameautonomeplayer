@@ -16,15 +16,17 @@ def test_fresh_game_triggers_nothing():
 def test_implemented_frontiers_removed():
     # „policies" (Spec 13.4 → brain/policy.py), „challenges" (Spec 18 →
     # brain/challenge.py), „transcend" (Spec 15.2 → brain/religion.py +
-    # reset.execute_reset Schritt 5) und „pacts" (Spec 15.4/15.5 →
-    # brain/religion.py + tactics._religion_ev_candidates) sind umgesetzt —
-    # die Frontiers existieren nicht mehr und feuern auch bei ihren
-    # früheren Triggern nicht.
+    # reset.execute_reset Schritt 5), „pacts" (Spec 15.4/15.5 →
+    # brain/religion.py + tactics._religion_ev_candidates),
+    # „shatter_engine" (Spec 17 → brain/timecrystal.py +
+    # tactics._time_candidates) und „cs_loop" (Spec 19.2/19.3 →
+    # chrono.positive_cs_check/seed_run_admissible, SEED_/POSITIVE_CS_RUN
+    # in meta.py) sind umgesetzt — die Frontiers existieren nicht mehr und
+    # feuern auch bei ihren früheren Triggern nicht.
     ids = {f.id for f in frontier.FRONTIERS}
-    assert "policies" not in ids
-    assert "challenges" not in ids
-    assert "transcend" not in ids
-    assert "pacts" not in ids
+    for done in ("policies", "challenges", "transcend", "pacts",
+                 "shatter_engine", "cs_loop"):
+        assert done not in ids
     snap = make_snap(techs={"civil": {"researched": True, "prices": {"science": 1500}}})
     assert "policies" not in _ids(snap)
     assert "challenges" not in _ids(snap, run="PARAGON_RUN")
@@ -35,22 +37,27 @@ def test_implemented_frontiers_removed():
                       "val": 1, "unlocked": True, "prices": []}]})
     assert "transcend" not in _ids(snap)
     assert "pacts" not in _ids(snap)
-
-
-def test_shatter_engine_trigger_on_tc_stock():
+    # Frühere Shatter-/CS-Loop-Trigger (TC-Bestand, Chronosphere-Flotte):
     snap = make_snap(resources={"timeCrystal": {"value": 60, "max": 0, "rate": 0}})
-    assert "shatter_engine" in _ids(snap)
-
-
-def test_cs_loop_trigger_on_chronospheres():
+    assert "shatter_engine" not in _ids(snap)
     snap = make_snap(buildings={"chronosphere": {"val": 3, "prices": {"unobtainium": 2500}}})
-    assert "cs_loop" in _ids(snap)
+    assert "cs_loop" not in _ids(snap)
 
 
-def test_already_fired_not_repeated():
-    snap = make_snap(resources={"timeCrystal": {"value": 60, "max": 0, "rate": 0}})
-    assert "shatter_engine" in _ids(snap)
-    assert "shatter_engine" not in _ids(snap, fired={"shatter_engine"})
+def test_already_fired_not_repeated(monkeypatch):
+    # Die Liste ist aktuell leer — der Wächter-Mechanismus selbst bleibt
+    # bestehen und wird über eine Test-Frontier geprüft.
+    probe = frontier.Frontier(
+        id="probe", title="Test-Frontier für den Wächter-Mechanismus",
+        trigger=lambda snap, run: True,
+        happening="Konstruierter Trigger für den Unit-Test des Wächters.",
+        missing="Nichts — reine Mechanik-Prüfung von frontier.check().",
+        where="tests/test_frontier.py (kein Spielbezug, nur Testartefakt).",
+        prompt="Kittens-Player: Test-Frontier, niemals umsetzen (Testartefakt).")
+    monkeypatch.setattr(frontier, "FRONTIERS", [probe])
+    snap = make_snap()
+    assert "probe" in _ids(snap)
+    assert "probe" not in _ids(snap, fired={"probe"})
 
 
 def test_every_frontier_has_complete_guidance():

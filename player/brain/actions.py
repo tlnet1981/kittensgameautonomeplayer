@@ -395,6 +395,25 @@ def shatter(batch: int) -> Action:
     )
 
 
+def set_tempus_fugit(on: bool) -> Action:
+    """Tempus Fugit an-/abschalten (Anhang B SET_TEMPUS_FUGIT, REVERSIBLE).
+
+    Mechanik der Referenz: Toggle über time.isAccelerated (time.js:1086-1097,
+    AccelerateTimeBtnController.buyItem — „item-is-free", frei umschaltbar);
+    +50 % Spielgeschwindigkeit (game.js:3964/3984 timeAccelerationRatio),
+    Verbrauch 1 temporalFlux je Tick (time.js:153-155), automatisches AUS
+    bei Flux 0 (time.js:156-158)."""
+    verb = "Aktiviere" if on else "Deaktiviere"
+    return Action(
+        id=f"time:tempusFugit:{'on' if on else 'off'}", type="SET_TEMPUS_FUGIT",
+        label=f"{verb} Tempus Fugit (+50 % Spielgeschwindigkeit)",
+        exec_spec={"kind": "set_tempus_fugit", "on": on},
+        expected=("Zeit beschleunigt, Flux wird verbraucht" if on
+                  else "Normalgeschwindigkeit, Flux-Vorrat bleibt"),
+        atomicity=REVERSIBLE,
+    )
+
+
 def wait(reason: str, wake: str) -> Action:
     return Action(
         id="wait", type="WAIT",

@@ -20,7 +20,7 @@ from typing import Any
 
 from player.state import access as A
 from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
-from . import actions, chrono, policy, religion, shadow
+from . import actions, chrono, policy, religion, shadow, timecrystal
 from .records import Candidate
 
 # Verbrauch eines Kittens (0,85 Catnip/Tick × 5 Ticks/s), Fallback für die
@@ -82,7 +82,9 @@ WAIT_SCORE = 0.01
 SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue",
                     "tradeValue", "huntValue", "praiseValue",
                     "storageB", "storageC", "leaderValue", "policyValue",
-                    "tapValue", "pactValue")
+                    "tapValue", "pactValue",
+                    "rrValue", "furnaceValue", "shatterValue", "voidValue",
+                    "tfValue")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -155,12 +157,27 @@ def _target_prices(snap: dict, target: dict | None) -> list[dict] | None:
             if p["name"] == target["name"]:
                 return p["prices"]
         return None
+    if target["kind"] == "space_build":
+        _, b = _space_building_entry(snap, target["name"])
+        return b["prices"] if b else None
+    if target["kind"] == "workshop_upgrade":
+        u = A.upgrade(snap, target["name"])
+        return u["prices"] if (u and not u.get("researched")) else None
     if target["kind"] == "religion_upgrade":
         for u in snap.get("religion", {}).get("upgrades", []):
             if u["name"] == target["name"] and not (u["noStackable"] and (u["on"] or u["val"])):
                 return u["prices"]
         return None
     return None
+
+
+def _space_building_entry(snap: dict, name: str) -> tuple[dict | None, dict | None]:
+    """(Planet, Gebäude) eines Space-Gebäudes aus space.planets."""
+    for planet in snap.get("space", {}).get("planets", []):
+        for b in planet.get("buildings", []):
+            if b["name"] == name:
+                return planet, b
+    return None, None
 
 
 def _target_obj(snap: dict, target: dict | None) -> dict | None:
@@ -176,6 +193,10 @@ def _target_obj(snap: dict, target: dict | None) -> dict | None:
     if target["kind"] == "space_program":
         return next((p for p in snap.get("space", {}).get("programs", [])
                      if p["name"] == target["name"]), None)
+    if target["kind"] == "space_build":
+        return _space_building_entry(snap, target["name"])[1]
+    if target["kind"] == "workshop_upgrade":
+        return A.upgrade(snap, target["name"])
     if target["kind"] == "religion_upgrade":
         return next((u for u in snap.get("religion", {}).get("upgrades", [])
                      if u["name"] == target["name"]), None)
@@ -219,8 +240,9 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     _festival_candidate(snap, cands)
     _religion_candidates(snap, target, cands)
     _religion_ev_candidates(snap, cands, lam, horizon)
-    _space_building_candidates(snap, bn, cands)
-    _time_candidates(snap, cands)
+    _space_building_candidates(snap, target, bn, cands, lam)
+    _time_candidates(snap, cands, lam, horizon, meta_view.run_type)
+    _tempus_fugit_candidate(snap, cands, lam, horizon)
     _wait_candidate(snap, bn, cands, meta_view)
 
     # Deterministisch sortieren: Score absteigend, dann Action-ID (C.2).
@@ -291,7 +313,22 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
     elif target["kind"] == "space_program":
         act = actions.space_program(target["name"], obj.get("label") or target["name"],
                                     prices=prices)
-    elif target["kind"] == "religion_upgrade":
+    elif target["kind"] == "space_build":
+        # Space-Gebäude als Meilenstein-Ziel (AM-Cap-Makroplan 16.3):
+        # gleiche Action-Form wie _space_building_candidates (Panel = Planet).
+        planet, b = _space_building_entry(snap, target["name"])
+        deltas = actions.price_deltas(prices)
+        act = actions.Action(
+            id=f"space_bld:{target['name']}", type="BUY_BUILDING",
+            label=f"Baue {b['label']} ({planet['label']}, Nr. {b['val'] + 1})",
+            exec_spec={"kind": "click_button", "tab": "Space",
+                       "panel": planet["label"], "title": b["label"], "batch": 1},
+            expected=f"{b['label']} auf {b['val'] + 1}",
+            predicted={"deltas": deltas, "stochastic": False} if deltas else None,
+        )
+    elif target["kind"] == "workshop_upgrade":
+        act = actions.buy_upgrade(target["name"], obj.get("label") or target["name"],
+                                  prices=prices)
         act = actions.buy_religion_upgrade(target["name"], obj.get("label") or target["name"],
                                            prices=prices)
     else:
@@ -1315,9 +1352,20 @@ SPACE_BUILDING_PRODUCES = {
 }
 
 
-def _space_building_candidates(snap, bn, cands) -> None:
+def _space_building_candidates(snap, target, bn, cands, lam=None) -> None:
+    """Space-Gebäude-Kandidaten inkl. 16.2-Energieregel: ein Gebäude mit
+    positiver Rohproduktion bekommt einen Energie-Malus, wenn sein
+    Verbrauch (Snapshot-Feld energyConsumption, space.js effects) das
+    Energie-Budget ins Defizit drückt — das Defizit drosselt die effektive
+    Produktion der Critical-Path-Gebäude (I-04). Der Malus greift nur mit
+    λ-Daten (es gibt dann ein bewertetes Ziel, dessen Produktion leidet);
+    ohne λ- oder Energie-Daten bleibt das Altverhalten (Fallback)."""
+    target_name = target.get("name") if target and target["kind"] == "space_build" else None
+    balance = snap.get("derived", {}).get("energy", {}).get("balance", 0)
     for planet in snap.get("space", {}).get("planets", []):
         for b in planet.get("buildings", []):
+            if b["name"] == target_name:
+                continue   # läuft bereits als Meilenstein-Kandidat
             if not b["unlocked"] or not A.affordable(snap, b["prices"]):
                 continue
             comp: dict[str, float] = {}
@@ -1326,6 +1374,9 @@ def _space_building_candidates(snap, bn, cands) -> None:
                 comp["bottleneck"] = 1.8
             else:
                 comp["economy"] = 0.8   # Space-Ausbau ist fast immer Fortschritt
+            cons = float(b.get("energyConsumption") or 0)
+            if lam and cons > 0 and balance - cons < 0:
+                comp["energyCost"] = -1.5   # 16.2: Defizit drosselt den Critical Path
             deltas = actions.price_deltas(b["prices"])
             act = actions.Action(
                 id=f"space_bld:{b['name']}", type="BUY_BUILDING",
@@ -1335,7 +1386,7 @@ def _space_building_candidates(snap, bn, cands) -> None:
                 expected=f"{b['label']} auf {b['val'] + 1}",
                 predicted={"deltas": deltas, "stochastic": False} if deltas else None,
             )
-            cands.append(Candidate(act, sum(comp.values()), comp))
+            cands.append(Candidate(act, _score(comp), comp))
 
 
 # ---------------------------------------------------------------- Handel
@@ -1561,45 +1612,123 @@ def _festival_candidate(snap, cands) -> None:
     cands.append(Candidate(actions.festival(), score, {"happiness": score}))
 
 
-# ---------------------------------------------------------------- Time (M6)
+# ---------------------------------------------------------------- Time (M6/M8)
 
-HEAT_PER_SHATTER = 10   # time.js:1254 (5 mit 1000-Years-Challenge)
+HEAT_PER_SHATTER = 10   # time.js:1407 (5 mit 1000-Years-Erstabschluss)
+
+# Void-Struktur-Nutzenraten (Spec 19.3): breite Ratio-Effekte aus
+# gamefiles/js/time.js voidspaceUpgrades; schmale Spezialeffekte gehen als
+# REFERENZSCHÄTZUNG mit Gewicht 0.2 ein (Muster wie religion.PACT_UTILITY_RATIO).
+VOIDSPACE_UTILITY_RATIO: dict[str, float] = {
+    # globalResourceRatio 0.02 + umbraBoostRatio 0.1 (schmal, time.js:600-603):
+    "voidRift": 0.02 + 0.1 * 0.2,
+    # voidResonance 0.1 — nur Order-of-the-Void-Trigger (time.js:643-645):
+    "voidResonator": 0.1 * 0.2,
+    # temporalParadoxDay/Void — schmale Zeit-Effekte (time.js:588-590/618-623):
+    "voidHoover": 0.01 * 0.2,
+    "chronocontrol": 0.01 * 0.2,
+}
 
 
-def _time_candidates(snap, cands) -> None:
+def _time_candidates(snap, cands, lam=None, horizon=None, run_type=None) -> None:
+    """Time-Tab-Kandidaten: Chronoforge (RR-/Furnace-Wert 17.2/17.3),
+    Voidspace (19.3) und die Shatter-Engine (17.5, timecrystal.py).
+
+    Mit λ-Daten steuern rr_value/furnace_value die Chronoforge-Prioritäten
+    und shatter_decision die Shatter-Regel; ohne λ- oder Time-Daten bleibt
+    exakt das bisherige konservative Verhalten (Fallback, kein Crash)."""
     time_state = snap.get("time", {})
+    horizon = horizon if horizon is not None else shadow.HORIZON_MIN
+    rrv = timecrystal.rr_value(snap, lam) if lam else None
+    fnv = timecrystal.furnace_value(snap, lam, horizon) if lam else None
 
     # Chronoforge-Ausbau (Resource Retrieval, Furnaces, Batteries):
     for u in time_state.get("chronoforge", []):
         if not u["unlocked"] or not A.affordable(snap, u["prices"]):
             continue
-        # RR ist der Kern der Shatter-Engine (Spec 17.2) — höher gewichten:
-        comp = {"economy": 1.3} if u["name"] == "ressourceRetrieval" else {"economy": 0.8}
+        reject = None
+        if u["name"] == "ressourceRetrieval":
+            comp: dict[str, float] = {"economy": 1.3}
+            if rrv is not None:
+                # 17.2: nächstes RR nur bei positivem RRValue, der auch den
+                # Wert eines zusätzlichen Chrono Furnace übersteigt.
+                comp["rrValue"] = rrv["rrValueS"]
+                if rrv["rrValueS"] <= 0:
+                    reject = (f"RRValue {rrv['rrValueS']:.0f} s ≤ 0 — Ertrag "
+                              f"deckt den TC-Preis nicht (17.2)")
+                elif fnv is not None and fnv["furnaceValueS"] > rrv["rrValueS"]:
+                    reject = (f"Chrono Furnace ist wertvoller "
+                              f"({fnv['furnaceValueS']:.0f} s > "
+                              f"{rrv['rrValueS']:.0f} s, 17.2)")
+        elif u["name"] == "blastFurnace" and fnv is not None:
+            # 17.3: Furnace nur, wenn Heat die Batchgröße tatsächlich begrenzt.
+            comp = {"economy": 0.9, "furnaceValue": fnv["furnaceValueS"]}
+            if fnv["furnaceValueS"] <= 0:
+                reject = (f"FurnaceValue {fnv['furnaceValueS']:.0f} s ≤ 0 — "
+                          f"Heat begrenzt die Shatter-Batches nicht (17.3)")
+        else:
+            comp = {"economy": 0.8}
         deltas = actions.price_deltas(u["prices"])
-        cands.append(Candidate(actions.Action(
+        act = actions.Action(
             id=f"chronoforge:{u['name']}", type="BUY_UPGRADE",
             label=f"Chronoforge: {u['label']}",
             exec_spec={"kind": "click_button", "tab": "Time", "title": u["label"], "batch": 1},
             expected=f"{u['label']} auf {u['val'] + 1}",
             predicted={"deltas": deltas, "stochastic": False} if deltas else None,
-        ), sum(comp.values()), comp))
+        )
+        if reject:
+            cands.append(Candidate(act, 0.0, dict(comp), feasible=False,
+                                   reject_reason=reject))
+        else:
+            cands.append(Candidate(act, _score(comp), comp))
 
-    # Cryochambers (Kitten-Carryover über Resets, Spec 19):
+    # Voidspace (Spec 19/19.3):
     for u in time_state.get("voidspace", []):
-        if u["name"] != "cryochambers" or not u["unlocked"] \
-                or not A.affordable(snap, u["prices"]):
+        if not u["unlocked"] or not A.affordable(snap, u["prices"]):
             continue
         deltas = actions.price_deltas(u["prices"])
+        if u["name"] == "cryochambers":
+            # Cryochambers (Kitten-Carryover) bleiben in jedem Run wertvoll:
+            cands.append(Candidate(actions.Action(
+                id="voidspace:cryochambers", type="BUY_UPGRADE",
+                label="Cryochamber bauen (Kitten-Carryover)",
+                exec_spec={"kind": "click_button", "tab": "Time", "title": u["label"], "batch": 1},
+                expected="Ein Kitten überlebt den nächsten Reset",
+                predicted={"deltas": deltas, "stochastic": False} if deltas else None,
+            ), 1.4, {"economy": 1.4}))
+            continue
+        # Übrige Void-Strukturen NUR im SEED_RUN (19.3: Void-Farming ist ein
+        # eigener MacroPlan, kein Beiläufig-Einbau in Paragon-Runs):
+        if run_type != "SEED_RUN":
+            continue
+        ratio = VOIDSPACE_UTILITY_RATIO.get(u["name"])
+        if ratio is None:
+            continue
+        comp = {"economy": 0.9, "voidValue": ratio * horizon}
         cands.append(Candidate(actions.Action(
-            id="voidspace:cryochambers", type="BUY_UPGRADE",
-            label="Cryochamber bauen (Kitten-Carryover)",
+            id=f"voidspace:{u['name']}", type="BUY_UPGRADE",
+            label=f"Voidspace: {u['label']}",
             exec_spec={"kind": "click_button", "tab": "Time", "title": u["label"], "batch": 1},
-            expected="Ein Kitten überlebt den nächsten Reset",
+            expected=f"{u['label']} auf {u['val'] + 1}",
             predicted={"deltas": deltas, "stochastic": False} if deltas else None,
-        ), 1.4, {"economy": 1.4}))
+        ), _score(comp), comp))
 
-    # Konservative Shatter-Regel (Spec 17.5, Basisausbaustufe): nur mit
-    # Resource-Retrieval-Infrastruktur und Heat-Spielraum.
+    # Shatter (Spec 17.5): mit λ- und Time-Daten entscheidet die Engine
+    # (Regeln A–D, Batch-Maximierung unter Heat-/Cap-Constraints):
+    if lam and timecrystal.has_time_data(snap):
+        dec = timecrystal.shatter_decision(snap, lam, horizon)
+        if dec is not None:
+            batch, rule, detail = dec
+            comp = {"economy": 1.1}
+            if detail.get("valueS"):
+                comp["shatterValue"] = detail["valueS"]
+            act = actions.shatter(batch)
+            act.expected += f" — Regel {rule} (17.5): {detail}"
+            cands.append(Candidate(act, _score(comp), comp))
+        return
+
+    # Fallback ohne λ-Daten (Bestandsverhalten): konservative Shatter-Regel —
+    # nur mit Resource-Retrieval-Infrastruktur und Heat-Spielraum.
     tc = A.res_value(snap, "timeCrystal")
     rr = next((u["val"] for u in time_state.get("chronoforge", [])
                if u["name"] == "ressourceRetrieval"), 0)
@@ -1610,6 +1739,57 @@ def _time_candidates(snap, cands) -> None:
         batch = min(5, int(tc) - 5, headroom)   # 5 TC Reserve behalten
         if batch >= 1:
             cands.append(Candidate(actions.shatter(batch), 1.1, {"economy": 1.1}))
+
+
+# ---------------------------------------------------------------- Tempus Fugit (Anhang B)
+
+# Hysterese-Schwellen (Anti-Flattern, Muster wie ENERGY_REACTIVATE_MARGIN):
+# aktivieren erst ab 2 min Flux-Vorrat, deaktivieren unter 30 s — dazwischen
+# bleibt der Zustand unverändert (kein Kandidat). Flux-Verbrauch: 1 Tick
+# temporalFlux je Spieltick (time.js:153-155) → Vorrat in Sekunden = Ticks/tps.
+TEMPUS_ON_MIN_FLUX_S = 120.0
+TEMPUS_OFF_MIN_FLUX_S = 30.0
+# Beschleunigungsfaktor: +50 % Spielgeschwindigkeit (game.js:3964/3984).
+TEMPUS_ACCEL_RATIO = 0.5
+
+
+def _tempus_fugit_candidate(snap, cands, lam=None, horizon=None) -> None:
+    """Tempus-Fugit-Nutzenregel (Anhang B SET_TEMPUS_FUGIT):
+
+    AN, wenn Flux-Vorrat ≥ TEMPUS_ON_MIN_FLUX_S UND das aktive Ziel von
+    Beschleunigung profitiert (positives λ-gewichtetes Produktionsprofil —
+    Σ λ_i · Rate_i > 0); AUS, wenn Flux knapp (< TEMPUS_OFF_MIN_FLUX_S).
+    Fallback: ohne Tempus-Fugit-Zustand im Snapshot (isAccelerated fehlt)
+    oder ohne λ-Daten für die AN-Regel entsteht kein Kandidat."""
+    time_state = snap.get("time", {})
+    if "isAccelerated" not in time_state:
+        return
+    accelerated = bool(time_state.get("isAccelerated"))
+    tf = time_state.get("temporalFlux")
+    flux_ticks = (float(tf.get("value", 0.0)) if isinstance(tf, dict)
+                  else A.res_value(snap, "temporalFlux"))
+    tps = float(snap.get("meta", {}).get("ticksPerSecond", 5) or 5)
+    flux_s = flux_ticks / tps
+
+    if accelerated:
+        if flux_s < TEMPUS_OFF_MIN_FLUX_S:
+            comp = {"tempusFugit": 1.2}
+            cands.append(Candidate(
+                actions.set_tempus_fugit(False), _score(comp), comp))
+        return
+
+    if flux_s < TEMPUS_ON_MIN_FLUX_S or not lam:
+        return
+    # λ-gewichtetes Produktionsprofil: Ziel-Sekunden je Realsekunde Produktion.
+    prod = sum(lam.get(r["name"], 0.0) * r.get("perSec", 0.0)
+               for r in snap.get("resources", [])
+               if r.get("perSec", 0.0) > 0)
+    if prod <= 0:
+        return
+    # Gewinn: +50 % Produktion, solange der Flux-Vorrat trägt (max. Horizont).
+    gain = TEMPUS_ACCEL_RATIO * prod * min(flux_s, horizon or shadow.HORIZON_MIN)
+    comp = {"tempusFugit": 1.0, "tfValue": gain}
+    cands.append(Candidate(actions.set_tempus_fugit(True), _score(comp), comp))
 
 
 # ---------------------------------------------------------------- WAIT
@@ -1657,6 +1837,13 @@ REASON_TEMPLATES = {
     "praiseValue": "{label}: drohender Faith-Cap-Verlust wiegt schwerer als das Halten (15.1).",
     "tapValue": "{label}: λ-Grenzwert der Konvertierung übersteigt den Haltewert (15.3/15.4).",
     "pactValue": "{label}: PactValue = ΔBPU − Debt − Upkeep − Necrocorn-Alternativwert > 0 (15.5).",
+    "rrValue": "{label}: RRValue = Grenzertrag × erwartete Shatter − TC-Preis·λ_TC > 0 (17.2).",
+    "furnaceValue": "{label}: FurnaceValue = vermiedene Heat-Wartezeit + Batch-Wert − Kosten (17.3).",
+    "shatterValue": "{label}: Shatter-Regel A–D erfüllt, Batch unter Heat-/Cap-Constraints maximiert (17.5).",
+    "voidValue": "{label}: Void-Struktur-Beitrag im SEED_RUN (19.3, λ-bewertete Nutzenrate).",
+    "energyCost": "{label}: Energieverbrauch würde den Critical Path drosseln (16.2).",
+    "tempusFugit": "{label}: Tempus-Fugit-Nutzenregel mit Flux-Hysterese (Anhang B).",
+    "tfValue": "{label}: +50 % Produktion, solange der Flux-Vorrat trägt (game.js:3964).",
     "base": "{label}",
 }
 

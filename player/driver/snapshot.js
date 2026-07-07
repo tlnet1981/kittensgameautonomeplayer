@@ -338,15 +338,22 @@
                     name: planet.name, label: planet.label,
                     buildings: (planet.buildings || [])
                         .filter(b => b.unlocked || b.val > 0)
-                        .map(b => ({
-                            name: b.name, label: b.label, val: b.val || 0,
-                            unlocked: !!b.unlocked,
-                            // Effektivpreise inkl. Price Ratio:
-                            prices: (b.prices || []).map(x => ({
-                                name: x.name,
-                                val: x.val * Math.pow(b.priceRatio || 1, b.val || 0),
-                            })),
-                        })),
+                        .map(b => {
+                            // Energie-Effekte PRO EINHEIT (Spec 16.2/16.3),
+                            // defensiv wie in der buildings-Sektion:
+                            const eff = b.effects || {};
+                            return {
+                                name: b.name, label: b.label, val: b.val || 0,
+                                unlocked: !!b.unlocked,
+                                energyConsumption: +eff.energyConsumption || 0,
+                                energyProduction: +eff.energyProduction || 0,
+                                // Effektivpreise inkl. Price Ratio:
+                                prices: (b.prices || []).map(x => ({
+                                    name: x.name,
+                                    val: x.val * Math.pow(b.priceRatio || 1, b.val || 0),
+                                })),
+                            };
+                        }),
                 });
             }
         }
@@ -363,10 +370,20 @@
                     val: p.val * Math.pow(u.priceRatio || 1, u.val || 0),
                 })),
             }));
+        // Tempus-Fugit-Zustand (Anhang B): isAccelerated ist der Toggle
+        // (time.js:1086-1097), temporalFlux die verbrauchte Ressource
+        // (−1 je Tick, time.js:153-155) — defensiv, falls noch gesperrt.
+        let temporalFlux = null;
+        try {
+            const tf = g.resPool.get("temporalFlux");
+            if (tf) { temporalFlux = { value: tf.value, maxValue: tf.maxValue || 0 }; }
+        } catch (e) { /* optional */ }
         out.time = {
             heat: (g.time && g.time.heat) || 0,
             heatMax: g.getEffect("heatMax") || 0,
             flux: (g.time && g.time.flux) || 0,
+            isAccelerated: !!(g.time && g.time.isAccelerated),
+            temporalFlux: temporalFlux,
             chronoforge: g.time ? mapTU(g.time.chronoforgeUpgrades) : [],
             voidspace: g.time ? mapTU(g.time.voidspaceUpgrades) : [],
         };

@@ -262,6 +262,29 @@ BUY_PACT_JS = """
 }
 """
 
+# Tempus Fugit setzen (Anhang B SET_TEMPUS_FUGIT): idempotent statt Toggle —
+# der Spiel-Button TOGGELT isAccelerated (AccelerateTimeBtnController.buyItem,
+# time.js:1086-1097) und erzwingt AUS bei Flux ≤ 0; hier wird der Zielzustand
+# direkt gesetzt, mit derselben Flux-Prüfung. Verifikation: before/after.
+SET_TEMPUS_FUGIT_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    if (!g || !g.time || !g.resPool) return { error: "no_time" };
+    const flux = g.resPool.get("temporalFlux");
+    const before = !!g.time.isAccelerated;
+    if (args.on) {
+        if (!flux || flux.value <= 0) {
+            g.time.isAccelerated = false;   // wie time.js:1088-1090
+            return { error: "no_flux", before: before };
+        }
+        g.time.isAccelerated = true;
+    } else {
+        g.time.isAccelerated = false;
+    }
+    return { before: before, after: !!g.time.isAccelerated };
+}
+"""
+
 SHIFT_JOB_JS = """
 (args) => {
     const v = game.village;
@@ -313,6 +336,8 @@ class Actor:
                 return await self._buy_pact(exec_spec)
             if kind == "shatter":
                 return await self._shatter(exec_spec)
+            if kind == "set_tempus_fugit":
+                return await self._set_tempus_fugit(exec_spec)
             if kind == "toggle_building":
                 return await self._toggle_building(exec_spec)
             if kind == "set_leader":
@@ -521,6 +546,20 @@ class Actor:
             {"batch": int(spec.get("batch", 1))},
         )
         return {"ok": done > 0, "method": "js", "detail": f"+{done} Jahre geshattert"}
+
+    async def _set_tempus_fugit(self, spec: dict) -> dict:
+        """Tempus Fugit setzen (Anhang B): Time-Tab sichtbar machen, dann
+        idempotent über SET_TEMPUS_FUGIT_JS (der DOM-Button toggelt nur,
+        time.js:1086-1097). Verifikation: before/after isAccelerated."""
+        await self._ensure_tab("Time")
+        res = await self.browser.evaluate(SET_TEMPUS_FUGIT_JS,
+                                          {"on": bool(spec.get("on"))})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"set_tempus_fugit: {res['error']}"}
+        return {"ok": res.get("after") == bool(spec.get("on")), "method": "js",
+                "detail": (f"Tempus Fugit: {res.get('before')} → "
+                           f"{res.get('after')}")}
 
     async def _toggle_building(self, spec: dict) -> dict:
         """Eine Gebäude-Einheit an-/abschalten (Energie-Drosselung 16.4).

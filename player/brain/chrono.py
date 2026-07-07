@@ -1,4 +1,5 @@
-"""Chronosphere-Zielzahl-Suche (Spec 19.1 / Anhang D).
+"""Chronosphere-Zielzahl-Suche (Spec 19.1 / Anhang D) und positive
+Reset-Schleife / Seed-Zulässigkeit (Spec 19.2/19.3).
 
     CSValue(k) = CarryoverGain(k) + ResetTimeSaving(k) − UOCost(k) − RebuildDelay(k)
 
@@ -112,3 +113,144 @@ def optimal_chronosphere_count(snap: dict, lam: dict | None = None
                         else round(values[n + 1] - values[n], 1)),
     }
     return n_target, detail
+
+
+# ================================================================ 19.2 Positive Schleife
+
+# Ressourcen mit persists: true der Referenzversion — sie überleben den
+# Reset vollständig (gamefiles/js/resources.js: sorrow 286-291; paragon/
+# burnedParagon/karma sind persistente Prestige-Ressourcen; game.js:5054).
+PERSISTENT_RESOURCES = frozenset({"sorrow", "paragon", "burnedParagon", "karma"})
+
+
+def _has_perk(snap: dict, name: str) -> bool:
+    return any(p.get("name") == name and p.get("researched")
+               for p in snap.get("prestige", {}).get("perks", []))
+
+
+def carryover_vector(snap: dict) -> dict[str, float]:
+    """Projizierter Post-Reset-Carryover je Ressource — exakt die Fallliste
+    aus game.js _resetInternal (Zeilen 5008/5040-5065):
+
+    - saveRatio = resStasisRatio nur mit Chronospheres (0.015 × val,
+      buildings.js:2049; game.js:5008),
+    - timeCrystal: voll NUR mit Anachronomancy (game.js:5050-5053),
+    - persists-Ressourcen: voll (game.js:5054-5055, PERSISTENT_RESOURCES),
+    - craftbare außer Wood: ohne fluxCondensator verloren (game.js:5044-5047),
+      mit fluxCondensator sqrt(value) × saveRatio × 100 (game.js:5062-5064),
+    - sonst (nicht craftbar oder Wood): value × saveRatio; void wird
+      abgerundet (game.js:5057-5061).
+    Kurzlebige Pools (tears/alicorn/temporalFlux…, persists: false) fehlen
+    im Ergebnis — der Snapshot markiert sie nicht, aber ihre Werte laufen
+    über den saveRatio-Zweig und bleiben klein (dokumentierte Näherung:
+    persists-false-Sonderfälle außer den bekannten werden nicht abgezogen).
+    """
+    cs = A.bld_val(snap, "chronosphere")
+    save_ratio = cs * CARRYOVER_PER_CS if cs > 0 else 0.0
+    anachronomancy = _has_perk(snap, "anachronomancy")
+    flux_cond = A.upgrade(snap, "fluxCondensator")
+    flux_cond_ok = bool(flux_cond and flux_cond.get("researched"))
+    out: dict[str, float] = {}
+    for r in snap.get("resources", []):
+        name = r["name"]
+        value = float(r.get("value", 0.0))
+        if value <= 0:
+            continue
+        if name == "timeCrystal":
+            out[name] = value if anachronomancy else 0.0
+        elif name in PERSISTENT_RESOURCES:
+            out[name] = value
+        elif r.get("craftable") and name != "wood":
+            out[name] = (math.sqrt(value) * save_ratio * 100.0
+                         if flux_cond_ok else 0.0)
+        else:
+            carried = value * save_ratio
+            if name == "void":
+                carried = math.floor(carried)
+            out[name] = carried
+    return out
+
+
+def rebuild_cost_vector(snap: dict) -> dict[str, float] | None:
+    """Wiederaufbaukosten der Chronosphere-Flotte im Folgerun: Einheiten
+    1…n zum Basispreis × Preis-Ratio-Reihe (Ratio 1.25, Referenzversion).
+    Der Snapshot-Preis gilt für Einheit n+1 (= Basis × 1.25^n) — daraus
+    Basis und Summe. None ohne Chronosphere-Daten."""
+    b = A.building(snap, "chronosphere")
+    if b is None or not b.get("prices"):
+        return None
+    n = int(b.get("val", 0))
+    if n <= 0:
+        return {}
+    scale = sum(CS_PRICE_RATIO ** j for j in range(n)) / CS_PRICE_RATIO ** n
+    return {p["name"]: p["val"] * scale for p in b["prices"]}
+
+
+def positive_cs_check(snap: dict) -> tuple[bool, dict]:
+    """Vektordominanz-Test der positiven Reset-Bedingung (Spec 19.2):
+
+        R_after_reset − R_rebuild ≻ R_before_reset
+
+    Dokumentierte Näherung: Der Ausgangsvektor des Folgeruns ist der
+    Nullvektor eines frischen Runs (der Snapshot enthält den Startvektor
+    des LAUFENDEN Runs nicht). Dominanz heißt dann: der projizierte
+    Carryover (carryover_vector, game.js _resetInternal) deckt in JEDER
+    Wiederaufbau-Ressource die kompletten Kosten der Chronosphere-Flotte
+    (rebuild_cost_vector) und lässt in mindestens EINER kritischen
+    Ressource (Wiederaufbau- oder Carryover-Ressource) einen strikten
+    Überschuss. Rückgabe (dominates, detail)."""
+    n = A.bld_val(snap, "chronosphere")
+    if n < 1:
+        return False, {"reason": "keine Chronosphere — kein Carryover (19.2)"}
+    rebuild = rebuild_cost_vector(snap)
+    if rebuild is None:
+        return False, {"reason": "keine Chronosphere-Preisdaten — Fallback"}
+    carry = carryover_vector(snap)
+    critical = sorted(set(rebuild) | {res for res, v in carry.items() if v > EPS})
+    covers_all = all(carry.get(res, 0.0) + EPS >= need
+                     for res, need in rebuild.items())
+    surplus = {res: carry.get(res, 0.0) - rebuild.get(res, 0.0)
+               for res in critical}
+    strictly_better = any(v > EPS for v in surplus.values())
+    dominates = covers_all and strictly_better
+    detail = {
+        "chronospheres": n,
+        "carry": {k: round(v, 2) for k, v in sorted(carry.items()) if v > EPS},
+        "rebuild": {k: round(v, 2) for k, v in sorted(rebuild.items())},
+        "surplus": {k: round(v, 2) for k, v in sorted(surplus.items())},
+        "coversRebuild": covers_all,
+        "reason": ("Carryover dominiert Wiederaufbau (19.2)" if dominates else
+                   "Carryover deckt den Wiederaufbau nicht in allen "
+                   "kritischen Ressourcen (19.2)"),
+    }
+    return dominates, detail
+
+
+# ================================================================ 19.3 Seed-Run
+
+def seed_run_admissible(snap: dict) -> tuple[bool, dict]:
+    """SEED_RUN-Zulässigkeit (Spec 19.3, konservative Kriterien —
+    dokumentiert): Void-Farming ist ein EIGENER MacroPlan und wird nie
+    beiläufig eingebaut. Zulässig nur, wenn
+
+    1. mindestens eine Chronosphere steht (Carryover-Träger des Seeds) UND
+    2. ein Seed-Ziel beobachtbar erreichbar ist: Void-Bestand > 0,
+       Antimatter-Bestand > 0 oder ein freigeschaltetes voidspace-Upgrade
+       im Snapshot (time.voidspace, time.js voidspaceUpgrades).
+    """
+    cs = A.bld_val(snap, "chronosphere")
+    void_v = A.res_value(snap, "void")
+    am_v = A.res_value(snap, "antimatter")
+    vsu = any(u.get("unlocked") for u in
+              snap.get("time", {}).get("voidspace", []))
+    ok = cs >= 1 and (void_v > 0 or am_v > 0 or vsu)
+    detail = {
+        "chronospheres": cs,
+        "void": void_v,
+        "antimatter": am_v,
+        "voidspaceUnlocked": vsu,
+        "reason": ("Seed-Ziele erreichbar (19.3)" if ok else
+                   "Seed-Kriterien nicht erfüllt: Chronosphere ≥ 1 und "
+                   "Void/AM/voidspace-Zugang nötig (19.3)"),
+    }
+    return ok, detail
