@@ -186,3 +186,70 @@ def test_real_deadlock_without_conversion_still_detected():
     snap = make_snap(resources={"uranium": {"value": 0, "max": 100, "rate": 0.0}})
     assert tactics.is_deadlock([wait_c], {"resource": "uranium",
                                           "etaSeconds": None}, snap)
+
+
+def _user_stagnation_snap():
+    """Exakter Live-Zustand aus dem Nutzer-Save (Jahr 8): 55 Felder, Catnip
+    AM Cap, Science AM Cap, 0 Holz, beide Kitten Scholars, Ziel 'Erste
+    Mine' — die Mine ist wegen unlockRatio (0 Holz < 15) unsichtbar."""
+    from player.brain import meta, safety
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal"]}
+    snap = make_snap(
+        resources={"catnip": {"value": 5000, "max": 5000, "rate": 8.0},
+                   "wood": {"value": 0, "max": 200, "rate": 0.0},
+                   "science": {"value": 500, "max": 500, "rate": 0.35},
+                   "minerals": {"value": 0, "max": 250, "rate": 0.0}},
+        buildings={"field": {"val": 55, "prices": {"catnip": 5000}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 0, "farmer": 0, "scholar": 2},
+        kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    return snap, mv, safety.check(snap)
+
+
+def test_stagnation_state_escapes_with_rebalance_and_refine():
+    """Live-Regression (Nutzer-Save Jahr 8): Der Zustand darf kein Deadlock
+    sein — Umschulung weg vom Cap-Job und Refine-Cap-Ventil müssen als
+    positive Kandidaten existieren, der Engpass kommt aus den
+    Referenzpreisen der unsichtbaren Mine."""
+    snap, mv, sr = _user_stagnation_snap()
+    assert mv.objective_label == "Erste Mine"
+    cands, bn = tactics.generate(snap, mv, sr)[:2]
+    assert bn and bn.get("resource") == "wood"      # Referenzpreis-Fallback
+    best = max((c for c in cands if c.feasible), key=lambda c: c.score)
+    assert best.action.id == "shift:scholar>woodcutter"
+    assert any(c.action.id.startswith("refine") and c.feasible and c.score > 0
+               for c in cands)
+    assert not tactics.is_deadlock(cands, bn, snap)
+    # Und: kein weiteres Feld — Catnip ist am Cap, Payback-Gate greift.
+    field = next((c for c in cands if c.action.id == "build:field"), None)
+    assert field is None or not field.feasible
+
+
+def test_job_score_is_zero_for_capped_output():
+    """Cap-Klausel (Spec 11.1): Ein Job, dessen Ertragsressource voll ist,
+    hat Grenzwert 0 — auch mit hohem λ."""
+    from player.brain import shadow
+    snap = make_snap(resources={"science": {"value": 500, "max": 500, "rate": 0.3},
+                                "wood": {"value": 0, "max": 200, "rate": 0.0}})
+    lam_rate = {"science": 500.0, "wood": 500.0}
+    assert shadow.job_score(snap, "scholar", lam_rate) == 0.0
+    assert shadow.job_score(snap, "woodcutter", lam_rate) > 0.0
+
+
+def test_cap_rebalance_fires_without_bottleneck():
+    """Cap-Rebalance läuft auch ohne Engpass-Daten (bn null): Kitten am
+    vollen Science-Cap wird zum dünnsten nicht-vollen Job umgeschult."""
+    snap = make_snap(
+        resources={"science": {"value": 500, "max": 500, "rate": 0.3},
+                   "wood": {"value": 10, "max": 200, "rate": 0.0}},
+        jobs={"woodcutter": 0, "scholar": 2},
+    )
+    cands = []
+    village = snap.get("village", {})
+    tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
+    assert any(c.action.id == "shift:scholar>woodcutter" for c in cands)

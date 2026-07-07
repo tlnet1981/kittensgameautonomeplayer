@@ -39,6 +39,10 @@ RATE_PROBE_EPS = 1e-3    # ε für die numerische Raten-Ableitung
 LAMBDA_MAX = 3600.0             # s pro Einheit
 LAMBDA_RATE_MAX = 4 * 3600.0    # s pro (Einheit/s)
 
+# Ab diesem Füllstand gilt eine Ressource als „voll": weitere Produktion
+# läuft ins Cap und ist wertlos (Spec 11.1, Cap-Klausel im JobScore).
+CAP_FULL_RATIO = 0.975
+
 # Craft-Kaskade (wie tactics._craft_toward): maximale Rekursionstiefe.
 CASCADE_MAX_DEPTH = 4
 
@@ -296,5 +300,13 @@ def job_score(snap: dict, job_id: str, lam_rate: dict[str, float]) -> float:
     if not rates or not lam_rate:
         return 0.0
     happiness = snap.get("village", {}).get("happiness", 1.0) or 1.0
-    return sum(lam_rate.get(res, 0.0) * rate * happiness
-               for res, rate in rates.items())
+    total = 0.0
+    for res, rate in rates.items():
+        # Cap-Klausel (Spec 11.1): Produktion in eine VOLLE Ressource läuft
+        # ins Cap und ist wertlos — Grenzwert 0 (Live-Fund: beide Kitten
+        # Scholars bei Science am Cap).
+        cap = A.res_cap(snap, res)
+        if cap > 0 and A.res_value(snap, res) >= cap * CAP_FULL_RATIO:
+            continue
+        total += lam_rate.get(res, 0.0) * rate * happiness
+    return total

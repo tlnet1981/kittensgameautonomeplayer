@@ -139,12 +139,28 @@ def bottleneck_info(snap: dict, target: dict | None) -> dict | None:
     }
 
 
+# Referenz-Erstpreise für Zielgebäude, die das Spiel per unlockRatio erst
+# ab einem Ressourcenanteil anzeigt (buildings.js 1.5.0.2: Mine erscheint
+# z. B. erst ab 15 % ihres Holzpreises). Ohne Fallback wäre der Engpass
+# null, sobald das Ziel unsichtbar ist — Jobs/Refine/Wait fielen aus
+# (Live-Fund: Ziel „Erste Mine" bei 0 Holz).
+REFERENCE_BUILD_PRICES: dict[str, list[dict]] = {
+    "mine": [{"name": "wood", "val": 100}],
+    "workshop": [{"name": "wood", "val": 100}, {"name": "minerals", "val": 400}],
+    "smelter": [{"name": "minerals", "val": 200}],
+    "tradepost": [{"name": "wood", "val": 500}, {"name": "minerals", "val": 200},
+                  {"name": "gold", "val": 10}],
+}
+
+
 def _target_prices(snap: dict, target: dict | None) -> list[dict] | None:
     if not target:
         return None
     if target["kind"] == "build":
         b = A.building(snap, target["name"])
-        return b["prices"] if b else None
+        if b and b.get("prices"):
+            return b["prices"]
+        return REFERENCE_BUILD_PRICES.get(target["name"])
     if target["kind"] == "research":
         t = A.tech(snap, target["name"])
         return t["prices"] if (t and not t["researched"]) else None
@@ -424,28 +440,76 @@ def _job_rebalance_candidate(snap, bn, cands, village, food_tight,
     (höchstens ein Tausch-Kandidat pro Zyklus). Mit λ-Daten zusätzlich:
     der Tausch muss sich lohnen — JobScore(Ziel) − JobScore(Spender) >
     REBALANCE_GAIN_MIN; ohne λ-Daten bleibt das bisherige Verhalten."""
-    if not bn or not bn.get("resource"):
-        return
-    job = RESOURCE_JOB.get(bn["resource"])
-    if not job or not A.job_unlocked(snap, job) or A.job_count(snap, job) > 0:
-        return
-    donors = [j for j in village.get("jobs", [])
-              if j["name"] != job and j["value"] > 0
-              and not (j["name"] == "farmer" and food_tight)]
+    if bn and bn.get("resource"):
+        job = RESOURCE_JOB.get(bn["resource"])
+        if job and A.job_unlocked(snap, job) and A.job_count(snap, job) == 0:
+            donors = [j for j in village.get("jobs", [])
+                      if j["name"] != job and j["value"] > 0
+                      and not (j["name"] == "farmer" and food_tight)]
+            if donors:
+                biggest = max(donors, key=lambda j: (j["value"], j["name"]))
+                comp = {"jobValue": 1.2, "bottleneck": 1.0}
+                ok = True
+                if lam_rate:
+                    gain = shadow.job_score(snap, job, lam_rate)
+                    loss = shadow.job_score(snap, biggest["name"], lam_rate)
+                    ok = gain - loss > REBALANCE_GAIN_MIN
+                    comp["jobScore"] = gain - loss   # Sekundenwert, nur Anzeige
+                if ok:
+                    label = next((j["title"] for j in village.get("jobs", [])
+                                  if j["name"] == job), job)
+                    cands.append(Candidate(
+                        actions.shift_job(biggest["name"], job, label, 1), 2.2, comp))
+                    return
+
+    # Cap-Rebalance (Spec 11.1: Ressourcen mit λ=0 dürfen am Cap stehen —
+    # aber kein Kitten darf für eine VOLLE Ressource arbeiten). Live-Fund:
+    # beide Kitten Scholars bei Science am Cap, niemand fällt Holz. Läuft
+    # auch ohne Engpass-Daten (bn null, wenn das Zielgebäude per
+    # unlockRatio noch unsichtbar ist). Ein Tausch pro Zyklus.
+    _cap_rebalance_candidate(snap, cands, village, food_tight, lam_rate)
+
+
+def _cap_rebalance_candidate(snap, cands, village, food_tight,
+                             lam_rate=None) -> None:
+    """Kitten aus einem Job abziehen, dessen Ertragsressource(n) voll sind
+    (Produktion läuft ins Cap = wertlos), hin zum besten nicht-vollen Job."""
+    def _capped(res: str) -> bool:
+        cap = A.res_cap(snap, res)
+        return cap > 0 and A.res_value(snap, res) >= cap * 0.975
+
+    donors = []
+    for j in sorted(village.get("jobs", []), key=lambda j: j["name"]):
+        name, count = j["name"], j["value"]
+        outputs = shadow.JOB_BASE_RATES.get(name)
+        if count <= 0 or not outputs:
+            continue
+        if name == "farmer" and food_tight:
+            continue
+        if all(_capped(res) for res in outputs):
+            donors.append(j)
     if not donors:
         return
-    biggest = max(donors, key=lambda j: (j["value"], j["name"]))
-    comp = {"jobValue": 1.2, "bottleneck": 1.0}
+    donor = max(donors, key=lambda j: (j["value"], j["name"]))
+    # Bester Zieljob: JobScore, sonst dünnster freigeschalteter Basisjob —
+    # in beiden Fällen keiner, dessen Ertrag selbst schon voll ist.
+    targets = [t for t in JOB_ORDER
+               if t != donor["name"] and A.job_unlocked(snap, t)
+               and not all(_capped(r) for r in shadow.JOB_BASE_RATES.get(t, {}))]
+    if not targets:
+        return
     if lam_rate:
-        gain = shadow.job_score(snap, job, lam_rate)
-        loss = shadow.job_score(snap, biggest["name"], lam_rate)
-        if gain - loss <= REBALANCE_GAIN_MIN:
-            return   # Tausch lohnt sich nicht (Anti-Thrashing)
-        comp["jobScore"] = gain - loss         # Sekundenwert, nur Anzeige
-    label = next((j["title"] for j in village.get("jobs", []) if j["name"] == job), job)
+        scored = sorted(((shadow.job_score(snap, t, lam_rate), t) for t in targets),
+                        key=lambda x: (-x[0], x[1]))
+        target_job = scored[0][1]
+    else:
+        target_job = min(targets, key=lambda t: (A.job_count(snap, t),
+                                                 JOB_ORDER.index(t)))
+    label = next((j["title"] for j in village.get("jobs", [])
+                  if j["name"] == target_job), target_job)
     cands.append(Candidate(
-        actions.shift_job(biggest["name"], job, label, 1), 2.2, comp,
-    ))
+        actions.shift_job(donor["name"], target_job, label, 1), 2.2,
+        {"jobValue": 1.2, "capLoss": 1.0}))
 
 
 # ---------------------------------------------------------------- Sammeln/Veredeln
@@ -461,9 +525,22 @@ def _gather_candidates(snap, target, bn, cands) -> None:
     elif catnip_bottleneck and A.res_rate(snap, "catnip") < 2.0:
         cands.append(Candidate(actions.gather_catnip(10), 0.8, {"bottleneck": 0.8}))
 
+    # Cap-Ventil (11.4, werterhaltender Craft — Live-Fund: 55 Felder
+    # produzieren ins volle Catnip-Cap, 0 Holz): Catnip ≥ 92 % Cap und
+    # Holz hat Platz → Refine unabhängig vom Engpass. Score capLoss wie
+    # die übrigen Cap-Schutz-Kandidaten.
+    catnip_val = A.res_value(snap, "catnip")
+    cat_cap = A.res_cap(snap, "catnip")
+    wood_cap = A.res_cap(snap, "wood")
+    if (cat_cap > 0 and catnip_val >= 0.92 * cat_cap and catnip_val >= 100
+            and (wood_cap <= 0 or A.res_value(snap, "wood") < wood_cap * 0.99)):
+        batch = max(1, min(5, int(catnip_val // 100)))
+        comp = {"capLoss": 1.5}
+        cands.append(Candidate(actions.refine_catnip(batch), _score(comp), comp))
+        return   # kein zweiter Refine-Kandidat aus dem Engpass-Zweig nötig
+
     # Refine: Holz aus Catnip, solange es keine/kaum Woodcutter gibt.
     wood_needed = bn and bn.get("resource") == "wood"
-    catnip_val = A.res_value(snap, "catnip")
     if wood_needed and A.job_count(snap, "woodcutter") == 0:
         if catnip_val >= 100:
             missing_wood = next((m["missing"] for m in bn.get("missing", []) if m["name"] == "wood"), 0)
