@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from player.state.derived import derive
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def load_fixture(name: str) -> dict[str, Any]:
+    """Golden-Fixture laden (Spec 24.1): eingefrorener Snapshot als JSON,
+    deterministisch und ohne Zeitstempel. `derived` wird beim Laden frisch
+    berechnet (nicht in der Datei — eine Ableitungsänderung soll die
+    Fixtures nicht invalidieren, nur die Golden-Assertions)."""
+    snap = json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    snap.pop("derived", None)
+    return derive(snap)
 
 
 def make_snap(
@@ -18,6 +32,13 @@ def make_snap(
     season: str = "spring",
     catnip_field_base: float = 0.0,
     crafts: list[dict] | None = None,
+    races: list[dict] | None = None,
+    trade_ratio: float = 0.0,
+    standing_ratio: float = 0.0,
+    policies: list[dict] | None = None,
+    challenges: list[dict] | None = None,
+    religion: dict | None = None,
+    pacts: dict | None = None,
 ) -> dict[str, Any]:
     """Erzeugt einen Snapshot im Format von driver/snapshot.js (inkl. derived)."""
     res_list = []
@@ -73,4 +94,72 @@ def make_snap(
         "effects": {"catnipPerTickBase": catnip_field_base / 5},
         "tabs": [],
     }
+    # Optionale Diplomacy-Daten (Format wie snapshot.js): nur setzen, wenn
+    # der Test races übergibt — Alt-Tests bleiben unverändert (kein Key).
+    if races is not None:
+        snap["diplomacy"] = {
+            "undiscovered": False, "races": races,
+            "standingRatio": standing_ratio, "tradeRatio": trade_ratio,
+        }
+    # Optionale Policy-Daten (Format wie snapshot.js `policies`): nur setzen,
+    # wenn der Test sie übergibt — Alt-Tests bleiben unverändert (kein Key).
+    if policies is not None:
+        snap["policies"] = [{
+            "name": p["name"],
+            "label": p.get("label", p["name"].capitalize()),
+            "researched": p.get("researched", False),
+            "blocked": p.get("blocked", False),
+            "unlocked": p.get("unlocked", True),
+            "blocks": p.get("blocks", []),
+            "prices": [{"name": k, "val": v}
+                       for k, v in p.get("prices", {}).items()],
+        } for p in policies]
+    # Optionale Religion-Daten (Format wie snapshot.js `religion`): der Test
+    # übergibt nur die Keys, die er braucht — sie werden über die Minimal-
+    # Religion gelegt. Alt-Tests bleiben unverändert (kein Parameter).
+    if religion is not None:
+        rel = {"worship": 0, "epiphany": 0.0, "faith": 0.0,
+               "transcendenceTier": 0, "upgrades": [], "ziggurat": []}
+        rel.update(religion)
+        snap["religion"] = rel
+    # Optionale Pact-Daten (Format wie snapshot.js `pacts`): Default = Key
+    # fehlt komplett (Pact-Schicht nicht erreicht, Spec 15.5 inaktiv).
+    if pacts is not None:
+        lst = [{
+            "name": p["name"],
+            "label": p.get("label", p["name"]),
+            "val": p.get("val", 0), "on": p.get("on", p.get("val", 0)),
+            "unlocked": p.get("unlocked", True),
+            "special": p.get("special", False),
+            "prices": [{"name": k, "val": v}
+                       for k, v in p.get("prices", {"relic": 100}).items()],
+        } for p in pacts.get("list", [])]
+        snap["pacts"] = {
+            "list": lst,
+            "necrocorns": pacts.get("necrocorns", 0.0),
+            "necrocornDeficit": pacts.get("necrocornDeficit", 0.0),
+            "pactsAvailable": pacts.get("pactsAvailable", 0),
+            "necrocornPerDay": pacts.get("necrocornPerDay", 0.0),
+            "necrocornUpfrontCost": pacts.get("necrocornUpfrontCost", 0.0),
+            "siphoning": pacts.get("siphoning", False),
+            "fractured": pacts.get("fractured", False),
+            "deficitPenaltyRatio": pacts.get("deficitPenaltyRatio", 1.0),
+        }
+    # Optionale Challenge-Daten (Format wie snapshot.js `challenges`):
+    if challenges is not None:
+        lst = [{
+            "name": c["name"],
+            "label": c.get("label", c["name"].capitalize()),
+            "researched": c.get("researched", False),
+            "on": c.get("on", 0),
+            "unlocked": c.get("unlocked", True),
+            "active": c.get("active", False),
+            "pending": c.get("pending", False),
+        } for c in challenges]
+        snap["challenges"] = {
+            "list": lst,
+            "anyActive": any(c["active"] for c in lst),
+            "countPending": sum(1 for c in lst if c["pending"]),
+            "reservesExist": False,
+        }
     return derive(snap)

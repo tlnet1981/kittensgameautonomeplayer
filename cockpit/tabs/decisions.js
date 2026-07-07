@@ -39,7 +39,12 @@
 
     // Provenance-Kette (Spec 6.3, kompakt)
     html += "<div class='di-provenance mono small'>";
-    html += prov("Trigger", d.trigger);
+    html += prov("Trigger", d.trigger +
+      (d.replanReason ? " [" + d.replanReason.type + "/" + d.replanReason.source + "]" : ""));
+    if (d.stateHash) html += prov("State-Hash", d.stateHash);
+    if (d.predictionOk === false && d.observedDelta) {
+      html += prov("Prognose", "ABWEICHUNG — beobachtet: " + JSON.stringify(d.observedDelta));
+    }
     html += prov("Phase / Run", d.phase + " · " + d.runType);
     html += prov("Ziel", d.objective);
     if (d.bottleneck && d.bottleneck.resource) {

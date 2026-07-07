@@ -61,6 +61,230 @@ FIND_AND_CLICK_TAB_JS = """
 }
 """
 
+# Gebäude-Einheit an-/abschalten (Spec 16.4): direkt über bld.get(name).on,
+# mit before/after-Verifikation. `on: true` aktiviert eine Einheit (on += 1),
+# `on: false` deaktiviert eine (on -= 1). Grenzen werden geprüft.
+TOGGLE_BUILDING_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const bld = g && g.bld ? g.bld.get(args.name) : null;
+    if (!bld) return { error: "not_found" };
+    const before = bld.on;
+    if (args.on) {
+        if (before >= bld.val) return { error: "all_on" };
+        bld.on = before + 1;
+    } else {
+        if (before <= 0) return { error: "all_off" };
+        bld.on = before - 1;
+    }
+    return { before: before, after: bld.on, val: bld.val };
+}
+"""
+
+# Leader setzen (Spec 12.3): über village.sim.kittens[index] + makeLeader
+# (falls vorhanden — der censusPanel-DOM-Weg ist fragil), sonst manuell.
+# before/after-Verifikation über die Leader-Identität.
+SET_LEADER_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const v = g ? g.village : null;
+    const kitten = (v && v.sim && v.sim.kittens) ? v.sim.kittens[args.index] : null;
+    if (!kitten) return { error: "kitten_not_found" };
+    const label = (k) => k ? ((k.name || "") + " " + (k.surname || "")).trim() : null;
+    const before = label(v.leader);
+    if (typeof v.makeLeader === "function") {
+        v.makeLeader(kitten);
+    } else {
+        if (v.leader) { v.leader.isLeader = false; }
+        kitten.isLeader = true;
+        v.leader = kitten;
+    }
+    return { ok: v.leader === kitten, before: before, after: label(v.leader) };
+}
+"""
+
+# Policy kaufen (Spec 13.4/I-07) über den ECHTEN Spiel-Controller: die
+# PolicyBtnController-Kette (science.js:2426 ff) prüft blocked/requiredLeaderJob,
+# zahlt den Preis inkl. policyFakeBought und propagiert die blocks-Sperre
+# (onPurchase, science.js:2587-2597). event.boughtByQueue überspringt den
+# Confirm-Dialog (shouldBeBought, science.js:2513). Verifikation: researched.
+BUY_POLICY_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const policy = g && g.science ? g.science.getPolicy(args.name) : null;
+    if (!policy) return { error: "not_found" };
+    if (policy.researched) return { error: "already_researched" };
+    if (policy.blocked) return { error: "blocked" };
+    if (!policy.unlocked) return { error: "locked" };
+    try {
+        const ctrl = new classes.ui.PolicyBtnController(g);
+        const model = ctrl.fetchModel({ id: args.name });
+        const result = ctrl.buyItem(model, { boughtByQueue: true });
+        return {
+            bought: !!(result && result.itemBought),
+            reason: (result && result.reason) || null,
+            researched: !!g.science.getPolicy(args.name).researched,
+        };
+    } catch (e) {
+        return { error: "controller: " + (e && e.message) };
+    }
+}
+"""
+
+# Nur das researched-Flag lesen (Verifikation nach DOM-Fallback):
+POLICY_RESEARCHED_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const policy = g && g.science ? g.science.getPolicy(args.name) : null;
+    return policy ? !!policy.researched : false;
+}
+"""
+
+# Challenge als pending markieren (Spec 18): idempotent statt DOM-Klick —
+# der Challenge-Button TOGGELT pending (ChallengeBtnController.togglePending,
+# challenges.js:885-891), ein Doppelklick würde die Vormerkung aufheben.
+# Iron Will ist ausgenommen: dort resettet togglePending SOFORT
+# (applyPending(true), challenges.js:886-889). Der Reset wandelt pending →
+# active (game.js:5136-5141). Verifikation: before/after des pending-Flags.
+SET_CHALLENGE_PENDING_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const ch = g && g.challenges ? g.challenges.getChallenge(args.name) : null;
+    if (!ch) return { error: "not_found" };
+    if (args.name === "ironWill") return { error: "iron_will_manual" };
+    if (!ch.unlocked) return { error: "locked" };
+    if (ch.active) return { error: "already_active" };
+    const before = !!ch.pending;
+    ch.pending = true;
+    return { before: before, pending: !!ch.pending };
+}
+"""
+
+# Transcend (Spec 15.2) OHNE UI-Confirm: religion.transcend()
+# (gamefiles/js/religion.js:1624-1653) läuft komplett in game.ui.confirm —
+# hier laufen exakt die Kernschritte des Confirm-Callbacks: Preisprüfung
+# (faithRatio > _getTranscendNextPrice, strikt), Epiphany abziehen,
+# tcratio/transcendenceTier erhöhen, Effekte neu rechnen, Mausoleum-
+# Sonderfall (MAUSOLEUM_PACTS-Flag). Verifikation: before/after Tier.
+TRANSCEND_JS = """
+() => {
+    const g = window.gamePage || window.game;
+    const religion = g ? g.religion : null;
+    if (!religion) return { error: "no_religion" };
+    if (!religion.getRU("transcendence").on) return { error: "transcendence_missing" };
+    const before = religion.transcendenceTier;
+    const need = religion._getTranscendNextPrice();
+    if (!(religion.faithRatio > need)) {
+        return { error: "epiphany_insufficient", need: need, have: religion.faithRatio };
+    }
+    religion.faithRatio -= need;
+    religion.tcratio += need;
+    religion.transcendenceTier += 1;
+    g.calculateAllEffects();
+    if (g.getFeatureFlag && g.getFeatureFlag("MAUSOLEUM_PACTS")
+            && religion.getTU("mausoleum").val) {
+        religion.getZU("blackPyramid").cashPreDeficitEffects(g);
+    }
+    return { before: before, after: religion.transcendenceTier, paid: need };
+}
+"""
+
+# Alicorn-Opfer (Spec 15.4): der Button-Controller wird im Tab-Render
+# inline erzeugt (religion.js:3028-3049) und ist per API nicht erreichbar —
+# hier laufen die Kernschritte von TransformBtnController.transform
+# (religion.js:2131-2205): 25 Alicorns je Batch zahlen, (1 + tcRefineRatio)
+# TC je Batch gutschreiben, danach applyAtGain-Upgrade der Ziggurat-Kette.
+# Verifikation: before/after Time-Crystal-Bestand.
+CONVERT_ALICORNS_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    if (!g || !g.resPool) return { error: "no_game" };
+    const alicorn = g.resPool.get("alicorn");
+    const batches = Math.min(args.batches, Math.floor(alicorn.value / 25));
+    if (batches < 1) return { error: "not_enough_alicorns" };
+    const gainPer = 1 + g.getEffect("tcRefineRatio");
+    const before = g.resPool.get("timeCrystal").value;
+    g.resPool.addResEvent("alicorn", -25 * batches);
+    g.resPool.addResEvent("timeCrystal", gainPer * batches);
+    g.upgrade({ zigguratUpgrades: ["skyPalace", "unicornUtopia", "sunspire"] });
+    return { batches: batches, before: before,
+             after: g.resPool.get("timeCrystal").value };
+}
+"""
+
+# Tear-Refinement (Spec 15.3): Kernschritte von RefineTearsBtnController.
+# buyItem/refine (religion.js:2262-2311): je Batch 10 000 Tears zahlen,
+# sorrow.value++ — nur unterhalb des Sorrow-Caps. Verifikation: before/after.
+REFINE_TEARS_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    if (!g || !g.resPool) return { error: "no_game" };
+    const sorrow = g.resPool.get("sorrow");
+    const tears = g.resPool.get("tears");
+    const before = sorrow.value;
+    let done = 0;
+    for (let i = 0; i < args.batches; i++) {
+        if (tears.value < 10000) break;
+        if (sorrow.maxValue && sorrow.value >= sorrow.maxValue) break;
+        g.resPool.addResEvent("tears", -10000);
+        sorrow.value++;
+        done++;
+    }
+    if (!done) return { error: "nothing_refined" };
+    return { batches: done, before: before, after: sorrow.value };
+}
+"""
+
+# Pact-Kauf (Spec 15.5) über den ECHTEN Spiel-Controller (PactsBtnController,
+# religion.js:2404-2470): der prüft pactsAvailable, limitBuild und den
+# Upfront-Necrocorn-Preis (getPrices). Kein Confirm-Dialog in der Kette.
+# Verifikation: before/after pact.val.
+BUY_PACT_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const pact = g && g.religion ? g.religion.getPact(args.name) : null;
+    if (!pact) return { error: "not_found" };
+    if (!pact.unlocked) return { error: "locked" };
+    const before = pact.val;
+    try {
+        const ctrl = new com.nuclearunicorn.game.ui.PactsBtnController(g);
+        const model = ctrl.fetchModel({ id: args.name });
+        const result = ctrl.buyItem(model, {});
+        return {
+            bought: !!(result && result.itemBought),
+            reason: (result && result.reason) || null,
+            before: before,
+            after: g.religion.getPact(args.name).val,
+        };
+    } catch (e) {
+        return { error: "controller: " + (e && e.message) };
+    }
+}
+"""
+
+# Tempus Fugit setzen (Anhang B SET_TEMPUS_FUGIT): idempotent statt Toggle —
+# der Spiel-Button TOGGELT isAccelerated (AccelerateTimeBtnController.buyItem,
+# time.js:1086-1097) und erzwingt AUS bei Flux ≤ 0; hier wird der Zielzustand
+# direkt gesetzt, mit derselben Flux-Prüfung. Verifikation: before/after.
+SET_TEMPUS_FUGIT_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    if (!g || !g.time || !g.resPool) return { error: "no_time" };
+    const flux = g.resPool.get("temporalFlux");
+    const before = !!g.time.isAccelerated;
+    if (args.on) {
+        if (!flux || flux.value <= 0) {
+            g.time.isAccelerated = false;   // wie time.js:1088-1090
+            return { error: "no_flux", before: before };
+        }
+        g.time.isAccelerated = true;
+    } else {
+        g.time.isAccelerated = false;
+    }
+    return { before: before, after: !!g.time.isAccelerated };
+}
+"""
+
 SHIFT_JOB_JS = """
 (args) => {
     const v = game.village;
@@ -102,8 +326,26 @@ class Actor:
                 return await self._praise()
             if kind == "adore":
                 return await self._adore()
+            if kind == "transcend":
+                return await self._transcend()
+            if kind == "convert_alicorns":
+                return await self._convert_alicorns(exec_spec)
+            if kind == "refine_tears":
+                return await self._refine_tears(exec_spec)
+            if kind == "buy_pact":
+                return await self._buy_pact(exec_spec)
             if kind == "shatter":
                 return await self._shatter(exec_spec)
+            if kind == "set_tempus_fugit":
+                return await self._set_tempus_fugit(exec_spec)
+            if kind == "toggle_building":
+                return await self._toggle_building(exec_spec)
+            if kind == "set_leader":
+                return await self._set_leader(exec_spec)
+            if kind == "select_policy":
+                return await self._select_policy(exec_spec)
+            if kind == "activate_challenge":
+                return await self._activate_challenge(exec_spec)
             return {"ok": False, "method": "none", "detail": f"Unbekannter kind: {kind}"}
         except Exception as exc:
             return {"ok": False, "method": "error", "detail": str(exc)}
@@ -222,6 +464,76 @@ class Actor:
             " game.religion.resetFaith(1.01, false); return true; }")
         return {"ok": bool(ok), "method": "js-fallback", "detail": "resetFaith(1.01)"}
 
+    async def _transcend(self) -> dict:
+        """Transcend (Spec 15.2): Religion-Tab sichtbar machen, Button glowen
+        (ohne Klick — der DOM-Weg hängt am Confirm-Dialog), dann die
+        Kernschritte über TRANSCEND_JS (religion.js:1624-1653). Verifikation:
+        before/after transcendenceTier."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": "Transcend", "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(TRANSCEND_JS)
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"transcend: {res['error']}"}
+        ok = res.get("after", 0) == res.get("before", 0) + 1
+        return {"ok": ok, "method": "js",
+                "detail": (f"Transcendence Tier {res.get('before')} → "
+                           f"{res.get('after')} (−{res.get('paid', 0):.4f} Epiphany)")}
+
+    async def _convert_alicorns(self, spec: dict) -> dict:
+        """Alicorns → TC (Spec 15.4) über CONVERT_ALICORNS_JS
+        (Kernschritte religion.js:2131-2205/3028-3049)."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": "Sacrifice alicorns", "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(CONVERT_ALICORNS_JS,
+                                          {"batches": int(spec.get("batches", 1))})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"convert_alicorns: {res['error']}"}
+        ok = res.get("after", 0) > res.get("before", 0)
+        return {"ok": ok, "method": "js",
+                "detail": (f"{res.get('batches')}× 25 Alicorns → TC "
+                           f"{res.get('before'):.1f} → {res.get('after'):.1f}")}
+
+    async def _refine_tears(self, spec: dict) -> dict:
+        """Tears → BLS (Spec 15.3) über REFINE_TEARS_JS
+        (Kernschritte religion.js:2262-2311, Sorrow-Cap-gated)."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": "Refine tears", "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(REFINE_TEARS_JS,
+                                          {"batches": int(spec.get("batches", 1))})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"refine_tears: {res['error']}"}
+        ok = res.get("after", 0) > res.get("before", 0)
+        return {"ok": ok, "method": "js",
+                "detail": (f"{res.get('batches')}× 10000 Tears → BLS "
+                           f"{res.get('before')} → {res.get('after')}")}
+
+    async def _buy_pact(self, spec: dict) -> dict:
+        """Pact kaufen (Spec 15.5): Religion-Tab, Glow, dann der echte
+        PactsBtnController (BUY_PACT_JS, religion.js:2404-2470).
+        Verifikation: before/after pact.val."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": spec.get("label") or spec["name"],
+            "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(BUY_PACT_JS, {"name": spec["name"]})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"buy_pact {spec['name']}: {res['error']}"}
+        ok = res.get("after", 0) > res.get("before", 0)
+        return {"ok": ok, "method": "js",
+                "detail": (f"Pact {spec['name']}: val {res.get('before')} → "
+                           f"{res.get('after')} ({res.get('reason') or 'ok'})")}
+
     async def _shatter(self, spec: dict) -> dict:
         """TC-Shatter über die exakte API (Batchgröße ist sicherheitsgeprüft)."""
         await self._ensure_tab("Time")
@@ -234,6 +546,98 @@ class Actor:
             {"batch": int(spec.get("batch", 1))},
         )
         return {"ok": done > 0, "method": "js", "detail": f"+{done} Jahre geshattert"}
+
+    async def _set_tempus_fugit(self, spec: dict) -> dict:
+        """Tempus Fugit setzen (Anhang B): Time-Tab sichtbar machen, dann
+        idempotent über SET_TEMPUS_FUGIT_JS (der DOM-Button toggelt nur,
+        time.js:1086-1097). Verifikation: before/after isAccelerated."""
+        await self._ensure_tab("Time")
+        res = await self.browser.evaluate(SET_TEMPUS_FUGIT_JS,
+                                          {"on": bool(spec.get("on"))})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"set_tempus_fugit: {res['error']}"}
+        return {"ok": res.get("after") == bool(spec.get("on")), "method": "js",
+                "detail": (f"Tempus Fugit: {res.get('before')} → "
+                           f"{res.get('after')}")}
+
+    async def _toggle_building(self, spec: dict) -> dict:
+        """Eine Gebäude-Einheit an-/abschalten (Energie-Drosselung 16.4).
+        Bonfire-Tab sichtbar machen (Zuschauer sieht die Änderung), dann die
+        exakte API — die kleinen (+/−)-Links sind schwer stabil zu treffen."""
+        await self._ensure_tab("Bonfire")
+        res = await self.browser.evaluate(TOGGLE_BUILDING_JS, {
+            "name": spec["name"], "on": bool(spec.get("on")),
+        })
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"toggle {spec['name']}: {res['error']}"}
+        ok = res.get("after") != res.get("before")   # before/after-Verifikation
+        return {"ok": ok, "method": "js",
+                "detail": (f"{spec['name']}.on: {res.get('before')} → "
+                           f"{res.get('after')} (von {res.get('val')})")}
+
+    async def _set_leader(self, spec: dict) -> dict:
+        """Leader setzen (Spec 12.3) über village.makeLeader — der Weg über
+        game.villageTab.censusPanel wäre DOM-fragil."""
+        await self._ensure_tab("Village")
+        res = await self.browser.evaluate(SET_LEADER_JS, {"index": int(spec["index"])})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"set_leader: {res['error']}"}
+        return {"ok": bool(res.get("ok")), "method": "js",
+                "detail": f"Leader: {res.get('before')} → {res.get('after')}"}
+
+    async def _select_policy(self, spec: dict) -> dict:
+        """Policy wählen (Spec 13.4/I-07): Science-Tab sichtbar machen, den
+        Button im Policies-PANEL glowen (Panel-Scoping — Namenskollision mit
+        Metaphysics-Perks wie „Diplomacy"!), dann Kauf über die JS-Controller-
+        API (BUY_POLICY_JS, respektiert blocks/Preise/Confirm-Skip). DOM-Klick
+        nur als Fallback; Verifikation immer über das researched-Flag."""
+        await self._ensure_tab("Science")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": spec.get("label") or spec["name"], "panel": "Policies",
+            "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(BUY_POLICY_JS, {"name": spec["name"]})
+        if not res.get("error"):
+            ok = bool(res.get("researched"))
+            return {"ok": ok, "method": "js",
+                    "detail": (f"Policy {spec['name']}: "
+                               f"{'researched' if ok else res.get('reason') or 'nicht erforscht'}")}
+        if str(res["error"]).startswith("controller"):
+            # DOM-Fallback (nur wenn die Controller-API bricht); danach
+            # zwingend das researched-Flag verifizieren:
+            dom = await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+                "title": spec.get("label") or spec["name"], "panel": "Policies",
+                "glowMs": self.glow_ms, "click": True,
+            })
+            await asyncio.sleep(0.3)
+            researched = await self.browser.evaluate(
+                POLICY_RESEARCHED_JS, {"name": spec["name"]})
+            return {"ok": bool(researched) and not dom.get("error"),
+                    "method": "js-fallback",
+                    "detail": f"Policy {spec['name']} via DOM: researched={bool(researched)}"}
+        return {"ok": False, "method": "js",
+                "detail": f"Policy {spec['name']}: {res['error']}"}
+
+    async def _activate_challenge(self, spec: dict) -> dict:
+        """Challenge pending setzen (Spec 18): Challenges-Tab sichtbar machen
+        (falls freigeschaltet), Button glowen, dann idempotent über die JS-API
+        (SET_CHALLENGE_PENDING_JS statt togglendem DOM-Klick)."""
+        await self._ensure_tab("Challenges")   # Tab evtl. unsichtbar → egal
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": spec.get("label") or spec["name"],
+            "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(SET_CHALLENGE_PENDING_JS,
+                                          {"name": spec["name"]})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"Challenge {spec['name']}: {res['error']}"}
+        return {"ok": bool(res.get("pending")), "method": "js",
+                "detail": (f"Challenge {spec['name']} pending: "
+                           f"{res.get('before')} → {res.get('pending')}")}
 
     async def _craft(self, spec: dict) -> dict:
         # Workshop-Tab zeigen (falls sichtbar), Craft über die exakte API —

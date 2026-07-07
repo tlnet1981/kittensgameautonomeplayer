@@ -22,8 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from player.state import access as A
-
 
 @dataclass
 class Frontier:
@@ -36,156 +34,17 @@ class Frontier:
     prompt: str         # Fertiger Prompt für die nächste Claude-Code-Session
 
 
-def _perks_done(snap: dict) -> bool:
-    from .meta import METAPHYSICS_ORDER
-    perks = {p["name"]: p for p in snap.get("prestige", {}).get("perks", [])}
-    return all(perks.get(n, {}).get("researched") for n in METAPHYSICS_ORDER)
-
-
-def _ziggurat_upgrade_val(snap: dict, name: str) -> int:
-    for z in snap.get("religion", {}).get("ziggurat", []):
-        if z["name"] == name:
-            return int(z.get("val", 0))
-    return 0
-
-
-FRONTIERS: list[Frontier] = [
-    Frontier(
-        id="policies",
-        title="Policies verfügbar — Agent wählt keine",
-        trigger=lambda snap, run: A.tech_researched(snap, "civil"),
-        happening=("Civil Service ist erforscht — im Science-Tab gibt es jetzt das "
-                   "Policies-Panel mit exklusiven Regierungs-Entscheidungen."),
-        missing=("Der Agent wählt bewusst keine Policies: sie sind exklusiv und "
-                 "irreversibel (z. B. Monarchy vs. Republic). Die Boni bleiben "
-                 "ungenutzt — das kostet auf Dauer Produktionsgeschwindigkeit."),
-        where=("Spielmechanik-Spec Kap. 13.4 (Kontext-Tabelle mit Startkandidaten je "
-               "Run-Typ) und Invariante I-07. Umsetzungsrezept: docs/brain.md → "
-               "„Erweitern\". Actor kann Panels bereits gezielt ansteuern "
-               "(player/driver/actor.py, Panel-Scoping)."),
-        prompt=("Erweitere den Kittens-Player um automatische Policy-Wahl (Spec 13.4): "
-                "Snapshot-Sektion für game.science.policies (oder passenden Ort in "
-                "v1.5.0.2 verifizieren), Ziel-Art 'policy' in player/brain/tactics.py, "
-                "Kontext-Tabelle aus Spec 13.4 als Auswahlregel je Run-Typ, Kandidaten "
-                "mit irreversible=True und Panel-Scoping im Actor. Invariante I-07 "
-                "beachten: exklusive Alternativen im DecisionRecord dokumentieren. "
-                "Tests auf Snapshot-Fixtures ergänzen."),
-    ),
-    Frontier(
-        id="challenges",
-        title="Challenge-Runs würden jetzt Wert bringen",
-        trigger=lambda snap, run: run == "PARAGON_RUN",
-        happening=("Die Metaphysics-Grundkette ist komplett — der Agent fährt jetzt "
-                   "Paragon-Speedruns. Ab hier bringen Challenge-Erstabschlüsse "
-                   "(Winter Challenge, Anarchy, …) permanente Belohnungen, die "
-                   "Paragon-Runs überlegen sind."),
-        missing=("Der Agent aktiviert keine Challenges: sie ändern die Spielregeln "
-                 "des ganzen Runs (z. B. permanenter Winter) und brauchen eigene "
-                 "Safety-/Taktik-Anpassungen."),
-        where=("Spielmechanik-Spec Kap. 18 (Challenge-Profile, Auswahlregel 18.2, "
-               "Kombinationen, Challenge-Reset 18.4) und Kap. 8.2 CHALLENGE_RUN. "
-               "Spielcode: gamefiles/js/challenges.js. Rezept: docs/brain.md."),
-        prompt=("Erweitere den Kittens-Player um Challenge-Runs (Spec Kap. 18): "
-                "Snapshot-Sektion für game.challenges (Katalog, aktiv, pending, "
-                "Erstabschluss-Flags), Challenge-Aktivierung als irreversible Aktion "
-                "vor dem Reset (ACTIVATE_CHALLENGE, Anhang B), Run-Typ CHALLENGE_RUN "
-                "im Meta-Controller mit Auswahlregel 18.2 (größte Reduktion der "
-                "Restzeit zuerst, einfache Erstabschlüsse wie Winter zuerst), "
-                "challenge-spezifische Safety-Anpassungen (z. B. Winter: "
-                "Worst-Case-Catnip dauerhaft), Reset-Gate 'Challenge-Ziel erfüllt' "
-                "(18.4). Cockpit: Challenge-Briefing-Panel (Cockpit-Spec Kap. 15)."),
-    ),
-    Frontier(
-        id="transcend",
-        title="Transcendence lohnt sich — TAP ist unvollständig",
-        trigger=lambda snap, run: snap.get("religion", {}).get("worship", 0) > 50_000,
-        happening=("Der Worship-Vorrat ist groß genug, dass Transcendence-Tiers "
-                   "erreichbar werden."),
-        missing=("Der Agent führt vor Resets nur Adore aus (TAP-light). Transcend "
-                 "— der bewusste Epiphany-Einsatz für permanente Tier-Boni — fehlt, "
-                 "inklusive der Abwägung aus Spec 15.2 (Wiederanlaufzeit vs. Tier-Gewinn)."),
-        where=("Spielmechanik-Spec Kap. 15.2 (TAP-Transaktion) und 15.1. "
-               "Spielcode: gamefiles/js/religion.js (transcend, getTranscendenceRatio). "
-               "Aktueller Stand: player/brain/reset.py (TAP-light) und docs/brain.md."),
-        prompt=("Erweitere den Kittens-Player um die vollständige TAP-Transaktion "
-                "(Spec 15.2): Transcend-Aktion in player/brain/actions.py + Actor "
-                "(game.religion.transcend() in gamefiles/js/religion.js verifizieren), "
-                "Zulässigkeitsregel: neues Tier erreichbar UND verbleibende Epiphany-"
-                "Struktur verbessert den Restplan UND Wiederanlaufzeit verschlechtert "
-                "die Milestone-Zeit nicht. In die Pre-Reset-Transaktion "
-                "(player/brain/reset.py, vor dem Adore-Schritt) integrieren, "
-                "Transcendence-Tier ins Reset-Gate und Systems-Religion-Panel."),
-    ),
-    Frontier(
-        id="shatter_engine",
-        title="Shatter-Engine-Potenzial — Agent shattert nur konservativ",
-        trigger=lambda snap, run: (
-            A.res_value(snap, "timeCrystal") >= 50
-            or any(u["name"] == "ressourceRetrieval" and u["val"] >= 3
-                   for u in snap.get("time", {}).get("chronoforge", []))),
-        happening=("Der Time-Crystal-Bestand bzw. Resource-Retrieval-Ausbau erreicht "
-                   "eine Größenordnung, in der eine profitable Shatter-Engine "
-                   "(Spec Kap. 17) den Endgame-Fortschritt dominieren würde."),
-        missing=("Der Agent nutzt nur die konservative Shatter-Regel (kleine Batches, "
-                 "Heat-Spielraum, 5-TC-Reserve). Es fehlen: TC-Rückfluss-Bilanz "
-                 "(17.1), RR-Wert-Formel (17.2), Chrono-Furnace-Steuerung (17.3), "
-                 "Cycle-Positionierung und die Batchgrößen-Optimierung (17.5)."),
-        where=("Spielmechanik-Spec Kap. 17 komplett + Anhang D (RR-Wert). "
-               "Spielcode: gamefiles/js/time.js (shatter, heat, getCFU). "
-               "Aktueller Stand: player/brain/tactics.py → _time_candidates."),
-        prompt=("Erweitere den Kittens-Player um die volle Shatter-Engine (Spec Kap. "
-                "17): TC-Nettobilanz 17.1, RR-Kaufregel 17.2 (RRValue-Formel Anhang D), "
-                "Chrono-Furnace-Bewertung 17.3, Shatter-Batchgrößen-Optimierung unter "
-                "Heat-/Cycle-Constraints 17.5 inkl. Cycle-Positionierung für "
-                "Trade-Boni (game.calendar.cycle). Ersetze die konservative Regel in "
-                "player/brain/tactics.py _time_candidates, ergänze ein Shatter-"
-                "Engine-Panel im Systems-Tab (TC-Rückfluss pro Shatter, Konfidenz) "
-                "und Tests mit Snapshot-Fixtures."),
-    ),
-    Frontier(
-        id="pacts",
-        title="Black Pyramid erreicht — Pacts/Necrocorns nicht automatisiert",
-        trigger=lambda snap, run: (
-            _ziggurat_upgrade_val(snap, "blackPyramid") > 0
-            or A.res_value(snap, "necrocorn") > 0),
-        happening=("Eine Black Pyramid steht (oder Necrocorns existieren) — damit "
-                   "beginnt die Necrocorn-/Pact-Ökonomie des Endgames."),
-        missing=("Der Agent kauft keine Pacts und steuert kein Siphoning: die "
-                 "PactValue-Bilanz (Debt-Kosten, Upkeep, alternativer Necrocorn-Wert) "
-                 "aus Spec 15.5 ist nicht implementiert."),
-        where=("Spielmechanik-Spec Kap. 15.5 (PactValue-Formel) und 15.3/15.4 "
-               "(Alicorn-Kette). Spielcode: gamefiles/js/religion.js (pacts, "
-               "necrocornDeficit). Rezept: docs/brain.md."),
-        prompt=("Erweitere den Kittens-Player um Pacts & Necrocorn-Management (Spec "
-                "15.5): Snapshot-Sektion für game.religion.pacts + Necrocorn-Debt, "
-                "PactValue-Formel (ΔBlackPyramidUtility − DebtCost − UpkeepCost − "
-                "AlternativeNecrocornValue), BUY_PACT/SET_SIPHONING-Aktionen "
-                "(Anhang B), Alicorn→TC-Konvertierungsregel 15.4. Pact-Käufe sind "
-                "irreversibel → vollständige DecisionRecords. Cockpit: Pact-"
-                "Observatory-Panel (Cockpit-Spec 11.3)."),
-    ),
-    Frontier(
-        id="cs_loop",
-        title="Chronosphere-Bestand wächst — Seed-/Carryover-Strategie fehlt",
-        trigger=lambda snap, run: A.bld_val(snap, "chronosphere") >= 3,
-        happening=("Mehrere Chronospheres sind gebaut — Carryover über Resets wird "
-                   "strategisch relevant (Seed-Runs, positive Reset-Schleife)."),
-        missing=("Der Agent kauft Chronospheres nur opportunistisch. Es fehlen: "
-                 "CSValue-Formel (19.1), optimale Chronosphere-Zahl pro Run, "
-                 "Seed-Run-Typ und die positive Reset-Bedingung (19.2) inklusive "
-                 "Non-Carry-Restausgaben in der Pre-Reset-Transaktion (20.3 Schritt 8)."),
-        where=("Spielmechanik-Spec Kap. 19 komplett + 20.3. "
-               "Aktueller Stand: player/brain/reset.py (Pre-Reset-Transaktion) und "
-               "tactics.py (Chronosphere im Whitelist)."),
-        prompt=("Erweitere den Kittens-Player um Chronosphere-/Seed-Strategie (Spec "
-                "Kap. 19): CSValue-Formel 19.1 mit Suche über n−2…n+3, Run-Typen "
-                "SEED_RUN und POSITIVE_CS_RUN im Meta-Controller, positive "
-                "Reset-Bedingung 19.2 (Vektordominanz des Carryover), Pre-Reset-"
-                "Schritt 'nicht übertragbare Ressourcen mit Restwert ausgeben' "
-                "(20.3 Schritt 8) und Carryover-Abgleich nach dem Reset. Cockpit: "
-                "Continue-vs-Reset-Darstellung im Systems-Tab erweitern."),
-    ),
-]
+# Umgesetzte (entfernte) Frontiers: „policies“ (Spec 13.4/I-07 →
+# brain/policy.py + tactics._policy_candidates), „challenges“ (Spec 18 →
+# brain/challenge.py, CHALLENGE_RUN in meta.py, 18.4-Reset-Gate in reset.py),
+# „transcend“ (Spec 15.2 → brain/religion.py tap_plan/transcend_value +
+# reset.execute_reset Schritt 5), „pacts“ (Spec 15.4/15.5 →
+# brain/religion.py pact_value/alicorn_conversion_due +
+# tactics._religion_ev_candidates), „shatter_engine“ (Spec 17.1–17.5 →
+# brain/timecrystal.py + tactics._time_candidates, SHATTER_/LEVIATHAN_RUN
+# in meta.py) und „cs_loop“ (Spec 19.2/19.3 → chrono.positive_cs_check/
+# seed_run_admissible, SEED_/POSITIVE_CS_RUN in meta.py).
+FRONTIERS: list[Frontier] = []
 
 
 def check(snap: dict, run_type: str, already_fired: set[str]) -> list[dict[str, Any]]:
@@ -215,3 +74,29 @@ def to_dict(f: Frontier) -> dict[str, Any]:
 
 def by_id(fid: str) -> Frontier | None:
     return next((f for f in FRONTIERS if f.id == fid), None)
+
+
+def deadlock_notice(run_type: str, objective: str) -> dict[str, Any]:
+    """Dynamische Frontier-Meldung der Deadlock-Auflösung (Spec 22.3 Stufe c,
+    tactics.resolve_deadlock): kein zulässiger positiver Kandidat, WAIT ohne
+    endliche Weckbedingung, und weder Horizontverdopplung noch gelockerter
+    Suchraum haben einen Plan erzeugt. Nutzt denselben Meldungsmechanismus
+    wie die statischen Frontiers (to_dict → runtime.frontier_notify) —
+    einmalig pro Quittierung, Zustand überlebt Neustarts."""
+    return to_dict(Frontier(
+        id="deadlock",
+        title="Deadlock: kein zulässiger positiver Kandidat (22.3)",
+        trigger=lambda snap, rt: True,   # dynamisch — nie in FRONTIERS gepollt
+        happening=(f"Im Run-Typ {run_type} mit Ziel „{objective}“ existiert "
+                   f"kein Kandidat mit positivem Wert, und Warten hat keine "
+                   f"endliche Weckbedingung."),
+        missing=("Der Agent hat Horizontverdopplung und gelockerten Suchraum "
+                 "(ECONOMY_WHITELIST) erfolglos versucht; Sicherheits­"
+                 "invarianten wurden nicht gelockert (22.3). Vermutlich fehlt "
+                 "eine noch nicht implementierte Spielschicht."),
+        where="Spielmechanik-Spec 22.3 (Deadlock-Auflösung), docs/brain.md",
+        prompt=("Der Agent steckt in einem Deadlock (Spec 22.3): kein "
+                "zulässiger positiver Kandidat trotz erweitertem Horizont und "
+                "gelockertem Suchraum. Analysiere den aktuellen Snapshot und "
+                "ergänze die fehlende Entscheidungsschicht in player/brain/."),
+    ))

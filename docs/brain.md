@@ -74,11 +74,18 @@ Preise und damit keinen Engpass (im Live-Test gefundener Deadlock).
 
 ## Taktik (`brain/tactics.py`, Spec Kap. 10–12)
 
-### Engpass (Schattenpreis-light, Spec 10.1/10.2)
+### Engpass & Schattenpreise (`brain/shadow.py`, Spec 10.1–10.4)
 
-Statt exakter Schattenpreise: Der Engpass ist die Ressource mit der größten
-Zeit-bis-leistbar am aktiven Ziel (`eta = fehlend / netRate`; ∞ bei Rate ≤ 0
-oder wenn das **Cap** die Zielmenge blockiert → Storage-Gate).
+Der Engpass ist die Ressource mit der größten Zeit-bis-leistbar am aktiven
+Ziel (`eta = fehlend / netRate`; ∞ bei Rate ≤ 0 oder wenn das **Cap** die
+Zielmenge blockiert → Storage-Gate). Darauf aufbauend berechnet
+`shadow.shadow_prices` **echte Schattenpreise** λᵢ (Sekunden Zielzeit pro
+Einheit, numerische Ableitung über die Engpass-ETA; Nicht-Zielressourcen
+erben λ über die Craft-Kaskade). Daraus entstehen pro Kandidat
+`Cost_time`/`Benefit_time`/`NetValue` (10.2/10.3) und die **Payback-Regel
+(10.4)**: reine Produktionskäufe, deren Amortisation nach dem Run-Horizont
+läge, werden abgelehnt (Unlocks, Safety und Meilenstein-Dependencies sind
+ausgenommen). Ohne λ-Daten greift überall die bisherige Heuristik.
 
 ### Score-Komponenten (additiv, alle im Cockpit sichtbar)
 
@@ -86,16 +93,24 @@ oder wenn das **Cap** die Zielmenge blockiert → Storage-Gate).
 |---|---|---|
 | safety | 10.0 | Schutzaktion (Vorrang G-04) |
 | milestone | 3.0 | Ziel direkt kaufen/erforschen |
-| jobValue | 2.4–2.6 | freies Kitten → Engpass-Job (12.2 vereinfacht) |
+| jobValue | 2.4–2.6 | freies Kitten → Job mit höchstem JobScore (12.2) |
 | bottleneck | 1.8–2.0 | Engpass lösen (Refine, Engpass-Gebäude) |
 | unlock | 1.4–1.9 | Forschung/Upgrades (Unlock-first, 13.3) |
-| storage | 1.0–2.2 | Storage-Regel 11.3 A (nur bei Cap-Blockade!) |
+| storage | 1.0–2.2 | Storage-Regel 11.3 A–D (Cap-Blockade, Carryover, Pufferverlust, Challenge) |
 | housing | 1.6 | Hütte etc., nur bei sicherer Food-Lage (12.1) |
 | capLoss | 1.5–1.6 | Jagd/Craft nahe Cap (11.4) |
+| energyRelief | 1.0–1.5 | Verbraucher drosseln/reaktivieren nach Grenznutzen (16.4) |
 | happiness | 1.2–1.8 | Festival / Amphitheater (Happiness = globaler Produktionsmultiplikator) |
 | economy | 0.6 | generischer Ausbau |
 | opportunity | −0.7 | Kauf verbraucht die für den Engpass reservierte Ressource (10.2) |
 | WAIT | 0.01 | immer möglich, mit Grund + Weckbedingung (G-05) |
+
+Zusätzlich tragen Kandidaten **Sekundenwert-Komponenten** (reine Anzeige,
+nicht additiv): `costTime`/`benefitTime`/`netValue` (Schattenpreis-Rechnung;
+netValue fließt normiert in den Score ein: 60 s ≙ 1 Punkt, Clamp ±1,2),
+`jobScore`, `tradeValue`, `huntValue`, `praiseValue`, `csValue`,
+`storageB`/`storageC`, `leaderValue`. Der Decision Inspector zeigt damit
+die echten Zeit-Äquivalente jeder Entscheidung.
 
 **Kaufregel (10.3):** ausgeführt wird der beste machbare Kandidat mit
 Score > 0 — sonst WAIT. **Tie-Break (C.2):** bei Score-Gleichheit gewinnt
@@ -111,14 +126,19 @@ sind als Regressionstests festgehalten (`tests/test_tactics.py`).
 
 ## M2-Erweiterungen: Handel, Religion-Basis, Festivals
 
-- **Handel (14.1, TradeValue-light):** Eine Rasse wird nur bespielt, wenn sie
-  den aktuellen Engpass liefert; Batch = min(Gold/15, Catpower/50, Ware, 5).
-  Zusätzlich Gold-Cap-Schutz (Gold am Cap = verschenkter Handelsspielraum).
-  Volle EV-Rechnung mit Saison/Standing folgt bei Bedarf in P1+.
+- **Handel (14.1, TradeValue-EV):** `TradeValue(race) = Σ P(o)·λ-Wert(o) −
+  λ-Kosten` über die Ergebnisverteilung aus dem Snapshot (sells-Chancen,
+  Saison-Deltas, Standing, +1 %/Trade Ship); gehandelt wird nur bei positivem
+  EV. Batch = min(Gold/15, Catpower/50, Ware, 5) und Gold-Cap-Schutz bleiben;
+  ohne Race-/λ-Daten greift die alte Engpass-Regel.
 - **Kundschafter:** neuer Handelspartner = Optionswert (Unlock 1.6),
   sobald 1000 Catpower verfügbar sind.
-- **Praise (15.1):** Faith ≥ 95 % Cap → Praise (Cap-Verlust-Regel);
-  vor Solar Revolution gibt es keinen Grund, Faith zu horten.
+- **Jagd (14.2):** Jagd als Trade mit Referenz-Beuteverteilung (Furs/Ivory/
+  Unicorn je 100 Catpower): sofort bei Cap-Druck (60-s-Puffer) oder wenn der
+  λ-Sofortnutzen den Batch-Vorteil übersteigt; sonst sammeln. Fallback: 85 %.
+- **Praise (15.1, EV):** Praise, wenn der drohende Faith-Cap-Verlust
+  (× λ_faith) den Wert des Haltens übersteigt; die Sparregel für anstehende
+  Religion-Käufe bleibt vorrangig. Fallback: 95 %-Cap-Schwelle.
 - **Festival (12.x):** ab Drama & bezahlbar (1500 Catpower / 5000 Culture /
   2500 Parchment, im Spiel fix verdrahtet); +30 % Happiness auf alles.
 
@@ -142,35 +162,91 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
   craftet pro Zyklus die tiefste machbare Stufe.
 - **Energie (16.4 / I-04):** Bei Energie-Defizit bekommen Erzeuger
   (Steamworks, Magneto, Solar Farm, Hydro, Reactor) Vorrang-Score 2.0.
+  Zusätzlich **Verbraucher-Drosselung**: der aktive Verbraucher mit dem
+  kleinsten λ-Zielbeitrag je Energieeinheit wird deaktiviert
+  (`toggle_building`, lebenswichtige Gebäude nie); Reaktivierung in
+  Grenznutzen-Reihenfolge mit Hysterese gegen Flattern.
 - **Space:** Missionen sind Meilenstein-Ziele (Orbital Launch → Mond);
   Planeten-Gebäude generische Kandidaten mit Engpass-Kopplung
   (Lunar Outpost → Unobtainium usw.).
-- **Time (17.x, Basisausbaustufe):** Chronoforge-Ausbau (Resource Retrieval
-  priorisiert), Cryochambers; konservative Shatter-Regel: nur mit RR ≥ 1,
-  Heat-Spielraum und 5-TC-Reserve, Batch ≤ 5.
+- **Shatter-Engine (17.1–17.5, `brain/timecrystal.py`):** TC-Bilanz,
+  RRValue/FurnaceValue steuern den Chronoforge-Ausbau; Shatter nach den
+  Spec-Regeln A–D mit deterministischer Batch-Suche unter Heat-/Cap-
+  Constraints und Cycle-Referenztabelle. Ohne λ-/Time-Daten greift die
+  alte konservative Regel (RR ≥ 1, Heat-Spielraum, 5-TC-Reserve, Batch ≤ 5).
+- **Chronosphere-Zielzahl (19.1, `brain/chrono.py`):** CSValue-Suche über
+  n−2…n+3 (Carryover 1,5 %/CS, UO-Kosten über λ); gekauft wird nur bis zur
+  optimalen Zahl, nicht mehr opportunistisch.
 - **TC-Schutz-Gate (I-02 / 9.1):** Reset mit ≥ 3 Time Crystals wird ohne
   Anachronomancy blockiert.
-- **Run-Typen (8.2):** FIRST_RUN → PRICE_RATIO_RUN (Metaphysics-Kette
-  Engineering…Renaissance + Chronomancy/Astromancy/Anachronomancy) →
-  PARAGON_RUN.
+- **Run-Typ-Wahl (8.2/8.3, `meta.determine_run_plan`):** alle **13
+  Run-Typen** der Spec sind aktiv zulässig (Zulässigkeits-Gates bilden die
+  9.2-Engine-Kaskade ab); je Typ drei Varianten (Minimal-/ausgeglichener/
+  investitionsstarker Pfad) per EV-Projektion (`brain/simulate.py`);
+  Score vor der Progressionsfront = −Restzeit − Risikoterme (5.4-Proxys),
+  nach der Front = E[ΔlnC/Δt] über den Endgame-Index C(S)
+  (`brain/endgame.py`, Spec 6.3); Tie-Break lexikografisch (C.2).
+  Makrophasen P0–P8 aus operationalen Austrittskriterien
+  (`meta.determine_phase`).
+- **Reset-Wert (20.1):** ResetValue = V(post) − V(continue) über die
+  EV-Projektion am gleichen Realzeithorizont entscheidet den FIRST-Reset
+  (Schwelle 35 bleibt notwendige Vorbedingung); Perk-Finanzierung bleibt
+  harte Regel; beide V-Werte stehen im reason-Text.
+- **Leader (12.3):** Trait/Job-Paar per λ-Bewertung der Trait-Boni
+  (`set_leader` via Census); Wechsel nur über 120-s-Gewinnschwelle.
 - **Paragon-Speedrun (20.4):** Reset, wenn die marginale Paragonrate
   (5-min-Fenster) unter 50 % der Ø-Rate des Runs fällt; Mindestlaufzeit
   20 min, Mindestgewinn 10 Paragon.
-- **TAP-light (15.2):** Vor jedem Reset wird Adore ausgeführt, wenn
-  Apocrypha aktiv ist (Worship → permanente Epiphany). Transcend ist noch
-  nicht automatisiert (Epiphany-Verlustrechnung).
+- **TAP vollständig (15.2, `brain/religion.py`):** transcend_value rechnet
+  die Epiphany-/Worship-Bilanz (Formeln aus religion.js); `tap_plan` liefert
+  die geordneten Schritte Transcend→Adore→Praise, ausgeführt in der
+  Pre-Reset-Transaktion. Alicorn→TC- und Tears→BLS-Konvertierung nach
+  Grenzwertregel (15.4), Pacts über PactValue mit Upkeep/Debt/Siphoning
+  (15.5) — alles irreversible Aktionen mit Commit-Grenze.
+- **Pre-Reset-Transaktion (20.3):** `reset.execute_reset` folgt der vollen
+  12-Schritt-Sequenz (Save-Export, Challenge-Verifikation, permanente
+  Käufe, TAP, Konvertierungen, CS-/Cryo-Zielstand, Restwert-Crafts,
+  Post-Reset-Projektion, harte Assertions, applyPending + Reset,
+  Validierung); jeder Schritt einzeln als `reset.step`-Event geloggt.
+- **Policies (13.4, `brain/policy.py`):** Bewertung über λ/Horizont mit
+  I-07-Alternativenprüfung, 13.4-Startkandidaten als Suchraum-Prior;
+  Kauf über die PolicyBtnController-API als irreversible Transaktion.
+- **Challenges (18, `brain/challenge.py`):** Katalog aus challenges.js,
+  ChallengeValue-Auswahl (18.2), CHALLENGE_RUN; Reset nur, wenn das Spiel
+  die Challenge als erfüllt markiert (18.4).
 
-## Bewusste Vereinfachungen gegenüber der Spec (Stand M7)
+## Governance-Kern (Spec G-02/G-06/G-10, Kap. 21–23)
+
+- **AgentMode:** ACTIVE / MODEL_MISMATCH / SAFE_STOP. Versionsprüfung läuft
+  periodisch; bei Abweichung sind nur READ_ONLY-Aktionen und das Abschalten
+  von Verbrauchern zulässig (`loop.apply_mode_gate`), Reset ist gesperrt.
+  Freigabe über das Cockpit (`acknowledge_mismatch`).
+- **Prognose-Abgleich (G-10):** Aktionen tragen ein `predicted`-Dict;
+  nach Ausführung wird die beobachtete Änderung mit Toleranz verglichen
+  (`loop.check_prediction`), drei harte Abweichungen in Folge führen in
+  MODEL_MISMATCH.
+- **Ereignisgetriebenes Replanning (21):** `brain/scheduler.py` berechnet
+  die nächste Weckzeit (Saison, ½-Cap, 10 %-ETA, 30-s-Kontrollpunkt);
+  harte Trigger werden per Vorzyklus-Signatur klassifiziert; irreversible
+  Aktionen laufen durch die Commit-Grenze (`loop.commit_guard`: Re-Read +
+  Precondition unmittelbar vor Ausführung).
+- **Deadlock (22.3):** kein positiver Kandidat + keine endliche
+  Weckbedingung ⇒ Horizont ×2, dann Suchraum lockern, dann
+  Frontier-Meldung — Sicherheitsinvarianten werden nie gelockert.
+
+## Bewusste Näherungen gegenüber der Spec (Stand Spec-Vollausbau)
+
+Alle 33 Zeilen des Spec-Audits sind umgesetzt ([spec-gaps.md](spec-gaps.md)).
+Was bleibt, sind dokumentierte Näherungen — im Code jeweils als
+REFERENZSCHÄTZUNG gekennzeichnet:
 
 | Spec | Hier | Warum |
 |---|---|---|
-| Stochastische Vorwärtssimulation (Kap. 5) | Live-Raten + Formeln Anhang D | Spiel = Modell; transparent & robust |
-| Exakte Schattenpreise λᵢ (10.2) | Engpass-ETA + Komponenten-Gewichte | deterministisch, im Cockpit erklärbar |
-| MacroPlan ×3 Varianten (8.3) | ein Meilensteinpfad + Opportunismus | genügt bis P2; Erweiterungspunkt meta.py |
-| Model-Mismatch-Stop (22.2) | Warnung + DEGRADED | privater Betrieb gegen Online-Spiel |
-| Challenges (Kap. 18) | nicht automatisiert | irreversibel + regeländernd; Aktions-/Gate-Gerüst vorhanden |
-| Policies (13.4) | nicht automatisiert | exklusiv-irreversibel; Panel-Scoping im Actor bereit |
-| Pacts/Necrocorns (15.5), volle Shatter-Engine (17), Seed-/CS-Loops (19) | Grundbausteine (Leviathan-Handel, Shatter-Basis, Chronosphere-Kauf, Cryochambers) | exakte Endgame-Bilanzen wären eigene Modellierungsprojekte — Architektur (Ziel-Arten, Kandidaten, Gates) nimmt sie auf |
+| Stochastische Vorwärtssimulation (Kap. 5) | deterministische **EV-Projektion** (`brain/simulate.py`); Zufallsaktionen als Erwartungswerte | transparent, deterministisch, testbar |
+| Schattenpreise λᵢ (10.2) | numerische Ableitung über die Engpass-ETA + Craft-Kaskade (`brain/shadow.py`) | exakte ∂ETA/∂Rᵢ über den vollen Abhängigkeitsgraphen wäre Modellduplikat |
+| CVaR-Risikoterme (5.4) | deterministische Proxys: P(fatal) = Food-Invariante im Horizont, Verlustterm ETA-basiert | echtes CVaR bräuchte Ergebnisverteilungen |
+| Referenzkonstanten (Challenge-Zeiten, TC-/Necrocorn-Zeitwerte, Endgame-bᵢ, einzelne Policy-/Trait-Effekte) | dokumentierte Schätz-/Normierungswerte mit gamefiles-Fundstelle am Wert | beeinflussen Prioritäten, nicht die Korrektheit der Gates; bei Prognose-Abweichung im Betrieb durch gemessene Raten ersetzen |
+| Late-Game-Live-Nachweis (Pacts, Leviathans, Relic, Void, Challenges) | gegen gamefiles-Formeln + synthetische Fixtures getestet | Live-Validierung braucht fortgeschrittene Spielstände; der Governance-Kern (Prognose-Abgleich, MODEL_MISMATCH) fängt Abweichungen ab |
 
 **Erweitern:** Neue Spielschicht = (1) Snapshot-Sektion in `driver/snapshot.js`,
 (2) ggf. neue Ziel-Art in `tactics._target_prices/_target_obj/_milestone_candidate`,

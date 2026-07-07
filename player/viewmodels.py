@@ -12,12 +12,15 @@ from typing import Any
 SEASON_LABELS = {"spring": "Frühling", "summer": "Sommer", "autumn": "Herbst", "winter": "Winter"}
 
 
-def status_vm(snap: dict, agent_state: str, version_guard: dict | None, run_info: dict | None = None) -> dict:
+def status_vm(snap: dict, agent_state: str, version_guard: dict | None, run_info: dict | None = None,
+              agent_mode: dict | None = None) -> dict:
     cal = snap.get("calendar", {})
     village = snap.get("village", {})
     return {
         "agentState": agent_state,
         "versionGuard": version_guard or {},
+        # AgentMode-Badge (G-02/22.2): {"mode": ACTIVE|MODEL_MISMATCH|SAFE_STOP, "reason"}
+        "agentMode": agent_mode or {"mode": "ACTIVE", "reason": ""},
         "calendar": {
             "year": cal.get("year"),
             "season": SEASON_LABELS.get(cal.get("seasonName", ""), cal.get("seasonName", "?")),

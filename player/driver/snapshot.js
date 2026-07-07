@@ -80,6 +80,26 @@
                 job: v.leader.job || null,
             };
         }
+        // Census-Kurzliste für die Leader-Wahl (Spec 12.3): nur die vier
+        // relevanten Felder, defensiv und auf 60 Einträge begrenzt —
+        // village.sim.kittens kann sehr groß werden.
+        const CENSUS_LIMIT = 60;
+        let census = [];
+        let censusTruncated = false;
+        try {
+            const sim = (v.sim && v.sim.kittens) || [];
+            censusTruncated = sim.length > CENSUS_LIMIT;
+            for (let i = 0; i < sim.length && i < CENSUS_LIMIT; i++) {
+                const k = sim[i];
+                census.push({
+                    index: i,
+                    name: ((k.name || "") + " " + (k.surname || "")).trim(),
+                    trait: (k.trait && k.trait.name) || null,
+                    job: k.job || null,
+                    isLeader: !!k.isLeader,
+                });
+            }
+        } catch (e) { census = []; censusTruncated = false; }
         out.village = {
             kittens: v.getKittens(),
             maxKittens: v.maxKittens,
@@ -87,6 +107,8 @@
             happiness: v.happiness,          // 1.0 = 100 %
             jobs: jobs,
             leader: leader,
+            census: census,
+            censusTruncated: censusTruncated,
             // Catnip-Verbrauch der Population pro Sekunde (positiv = Verbrauch):
             catnipDemandPerSec: (() => {
                 const cons = v.getResConsumption();
@@ -103,6 +125,9 @@
             if (!meta.unlocked && !(bd.val > 0)) { continue; }
             let prices = [];
             try { prices = g.bld.getPrices(bd.name) || []; } catch (e) { /* stage-Sonderfälle */ }
+            // Energie-Effekte PRO EINHEIT (Spec 16.4), defensiv: die Effekte
+            // liegen je nach Gebäude in buildingsData bzw. den Stage-Metadaten.
+            const effects = meta.effects || bd.effects || {};
             out.buildings.push({
                 name: bd.name,
                 label: meta.label || bd.name,
@@ -110,6 +135,8 @@
                 on: bd.on,
                 unlocked: !!meta.unlocked,
                 prices: prices.map(p => ({ name: p.name, val: p.val })),
+                energyConsumption: +effects.energyConsumption || 0,
+                energyProduction: +effects.energyProduction || 0,
             });
         }
     });
@@ -193,28 +220,101 @@
                     val: p.val * Math.pow(u.priceRatio || 1, u.val || 0),
                 })),
             }));
+        // ACHTUNG Namenstrennung (religion.js): religion.faith ist der
+        // WORSHIP-Pool, religion.faithRatio die EPIPHANY; der Live-Faith-
+        // Pool ist die resPool-Ressource "faith" (religion.js:1569-1622).
+        const guard = (fn, fallback) => { try { return fn(); } catch (e) { return fallback; } };
         out.religion = {
             worship: worship,                    // "Total faith" = Worship-Pool
             epiphany: g.religion.faithRatio,     // permanenter Faith-Bonus
+            faith: guard(() => g.resPool.get("faith").value, 0),  // Live-Pool
             transcendenceTier: g.religion.transcendenceTier || 0,
+            // Apocrypha (sic — Spielname "apocripha", religion.js:1199) und
+            // sein Bonus über die offizielle API (religion.js:1523-1525):
+            apocrypha: {
+                on: guard(() => !!g.religion.getRU("apocripha").on, false),
+                bonus: guard(() => g.religion.getApocryphaBonus(), 0),
+            },
+            transcendenceOn: guard(() => !!g.religion.getRU("transcendence").on, false),
+            // Epiphany-Preis des nächsten Tiers (religion.js:1659-1661):
+            transcendenceNextPrice: guard(() => g.religion._getTranscendNextPrice(), null),
+            // TC je 25 geopferten Alicorns = 1 + tcRefineRatio (religion.js:3040):
+            tcRefineRatio: guard(() => g.getEffect("tcRefineRatio") || 0, 0),
             upgrades: mapUpgrades(g.religion.religionUpgrades, true),
             ziggurat: mapUpgrades(g.religion.zigguratUpgrades, false),
         };
     });
 
+    section("pacts", () => {
+        // Pacts & Necrocorn-Ökonomie (Spec 15.5): religion.pactsManager
+        // (religion.js pactsManager). Die Sektion existiert NUR, wenn die
+        // Pact-Schicht erreichbar ist (ein Pact unlocked/gekauft oder
+        // Schuld vorhanden) — vorher fehlt der Key komplett.
+        const rel = g.religion;
+        const pm = rel && rel.pactsManager;
+        if (!pm || !pm.pacts) { return; }
+        const anyRelevant = pm.pacts.some(p => p.unlocked || (p.val > 0))
+            || (pm.necrocornDeficit || 0) > 0;
+        if (!anyRelevant) { return; }
+        const getEff = (n) => { try { return g.getEffect(n) || 0; } catch (e) { return 0; } };
+        const tryBool = (fn) => { try { return !!fn(); } catch (e) { return false; } };
+        out.pacts = {
+            list: pm.pacts.map(p => ({
+                name: p.name, label: p.label,
+                val: p.val || 0, on: p.on || 0,
+                unlocked: !!p.unlocked,
+                special: !!p.special,               // payDebt/fractured
+                // priceRatio ist bei Pacts fest 1 (pactsManager.constructor):
+                prices: (p.prices || []).map(x => ({ name: x.name, val: x.val })),
+            })),
+            necrocorns: (g.resPool.get("necrocorn") || {}).value || 0,
+            necrocornDeficit: pm.necrocornDeficit || 0,
+            pactsAvailable: getEff("pactsAvailable"),
+            // Gesamtverbrauch/Tag (negativ, religion.js effectsBase 1459):
+            necrocornPerDay: getEff("necrocornPerDay"),
+            necrocornUpfrontCost: getEff("pactNecrocornUpfrontCost"),
+            // Siphoning-Policy aktiv? (religion.js:374-392, Policy science.js):
+            siphoning: tryBool(() => g.science.getPolicy("siphoning").researched),
+            fractured: tryBool(() => rel.getPact("fractured").on > 0),
+            // Debt-Penalty-Faktor 1…0 (religion.js getDebtPenaltyRatio):
+            deficitPenaltyRatio: (() => {
+                try { return pm.getDebtPenaltyRatio(); } catch (e) { return 1; }
+            })(),
+        };
+    });
+
     section("diplomacy", () => {
-        out.diplomacy = { races: [], undiscovered: false };
+        out.diplomacy = { races: [], undiscovered: false, standingRatio: 0, tradeRatio: 0 };
         if (g.diplomacy && g.diplomacy.races) {
+            // Globale Handelsboni (diplomacy.js tradeImpl, 1.5.0.2):
+            // standingRatio verbessert Standing-Würfe (Tradeposts/Perks),
+            // tradeRatio erhöht die Erfolgsmenge (+1 % pro Trade Ship).
+            try { out.diplomacy.standingRatio = g.getEffect("standingRatio") || 0; } catch (e) { /* optional */ }
+            try { out.diplomacy.tradeRatio = g.getEffect("tradeRatio") || 0; } catch (e) { /* optional */ }
             for (const r of g.diplomacy.races) {
                 if (!r.unlocked) { out.diplomacy.undiscovered = true; continue; }
                 out.diplomacy.races.push({
                     name: r.name,
                     title: r.title,
+                    unlocked: !!r.unlocked,
+                    // Standing-Daten für die EV-Rechnung (Spec 14.1):
+                    // attitude "friendly"|"neutral"|"hostile", standing = Wurf-Basis.
+                    attitude: r.attitude || null,
+                    standing: (typeof r.standing === "number") ? r.standing : 0,
+                    embassyLevel: r.embassyLevel || 0,
                     // Was die Rasse pro Trade verlangt (zusätzlich zu 15 Gold + 50 Catpower):
                     buys: (r.buys || []).map(p => ({ name: p.name, val: p.val })),
-                    // Was sie liefert (value = Menge pro Trade, chance in %):
+                    // Was sie liefert (value = Menge pro Trade, chance in %,
+                    // seasons = additive Saison-Modifikatoren, delta = Streuung):
                     sells: (r.sells || []).map(s => ({
                         name: s.name, value: s.value, chance: s.chance,
+                        delta: (typeof s.delta === "number") ? s.delta : null,
+                        seasons: (s.seasons && typeof s.seasons === "object") ? {
+                            spring: +s.seasons.spring || 0,
+                            summer: +s.seasons.summer || 0,
+                            autumn: +s.seasons.autumn || 0,
+                            winter: +s.seasons.winter || 0,
+                        } : null,
                     })),
                 });
             }
@@ -238,15 +338,22 @@
                     name: planet.name, label: planet.label,
                     buildings: (planet.buildings || [])
                         .filter(b => b.unlocked || b.val > 0)
-                        .map(b => ({
-                            name: b.name, label: b.label, val: b.val || 0,
-                            unlocked: !!b.unlocked,
-                            // Effektivpreise inkl. Price Ratio:
-                            prices: (b.prices || []).map(x => ({
-                                name: x.name,
-                                val: x.val * Math.pow(b.priceRatio || 1, b.val || 0),
-                            })),
-                        })),
+                        .map(b => {
+                            // Energie-Effekte PRO EINHEIT (Spec 16.2/16.3),
+                            // defensiv wie in der buildings-Sektion:
+                            const eff = b.effects || {};
+                            return {
+                                name: b.name, label: b.label, val: b.val || 0,
+                                unlocked: !!b.unlocked,
+                                energyConsumption: +eff.energyConsumption || 0,
+                                energyProduction: +eff.energyProduction || 0,
+                                // Effektivpreise inkl. Price Ratio:
+                                prices: (b.prices || []).map(x => ({
+                                    name: x.name,
+                                    val: x.val * Math.pow(b.priceRatio || 1, b.val || 0),
+                                })),
+                            };
+                        }),
                 });
             }
         }
@@ -263,12 +370,87 @@
                     val: p.val * Math.pow(u.priceRatio || 1, u.val || 0),
                 })),
             }));
+        // Tempus-Fugit-Zustand (Anhang B): isAccelerated ist der Toggle
+        // (time.js:1086-1097), temporalFlux die verbrauchte Ressource
+        // (−1 je Tick, time.js:153-155) — defensiv, falls noch gesperrt.
+        let temporalFlux = null;
+        try {
+            const tf = g.resPool.get("temporalFlux");
+            if (tf) { temporalFlux = { value: tf.value, maxValue: tf.maxValue || 0 }; }
+        } catch (e) { /* optional */ }
         out.time = {
             heat: (g.time && g.time.heat) || 0,
             heatMax: g.getEffect("heatMax") || 0,
             flux: (g.time && g.time.flux) || 0,
+            isAccelerated: !!(g.time && g.time.isAccelerated),
+            temporalFlux: temporalFlux,
             chronoforge: g.time ? mapTU(g.time.chronoforgeUpgrades) : [],
             voidspace: g.time ? mapTU(g.time.voidspaceUpgrades) : [],
+        };
+    });
+
+    section("policies", () => {
+        // Policies (Spec 13.4 / I-07): game.science.policies (science.js:850 ff).
+        // blocked = eine exklusive Alternative wurde zuerst erforscht — bleibt
+        // bis zum Reset gesperrt (science.js:847-849). Effektivpreise wie
+        // PolicyBtnController.getPrices: ×1.25^policyFakeBought (Pacifism).
+        if (!g.science || !g.science.policies) { return; }
+        let fake = 0;
+        try { fake = g.getEffect("policyFakeBought") || 0; } catch (e) { /* optional */ }
+        out.policies = [];
+        for (const p of g.science.policies) {
+            if (!p.unlocked && !p.researched && !p.blocked) { continue; }
+            out.policies.push({
+                name: p.name,
+                label: p.label,
+                researched: !!p.researched,
+                blocked: !!p.blocked,
+                unlocked: !!p.unlocked,
+                // Exklusive Alternativen (I-07-Bewertung):
+                blocks: (p.blocks || []).slice(),
+                prices: (p.prices || []).map(x => ({
+                    name: x.name,
+                    val: x.val * Math.pow(1.25, fake),
+                })),
+            });
+        }
+    });
+
+    section("challenges", () => {
+        // Challenges (Spec Kap. 18): game.challenges.challenges (challenges.js:42 ff).
+        // researched = Erstabschluss, on = Anzahl Abschlüsse, active = läuft
+        // gerade, pending = beim nächsten Reset aktivieren (challenges.js:508-514).
+        if (!g.challenges || !g.challenges.challenges) { return; }
+        const list = [];
+        for (const c of g.challenges.challenges) {
+            if (!c.unlocked && !c.researched && !(c.on > 0) && !c.active) { continue; }
+            list.push({
+                name: c.name,
+                label: c.label,
+                researched: !!c.researched,
+                on: c.on || 0,
+                unlocked: !!c.unlocked,
+                active: !!c.active,
+                pending: !!c.pending,
+            });
+        }
+        let anyActive = list.some(c => c.active);
+        try {
+            if (typeof g.challenges.anyChallengeActive === "function") {
+                anyActive = !!g.challenges.anyChallengeActive();
+            }
+        } catch (e) { /* optional */ }
+        let reservesExist = false;
+        try {
+            reservesExist = !!(g.challenges.reserves
+                && g.challenges.reserves.reservesExist
+                && g.challenges.reserves.reservesExist());
+        } catch (e) { /* optional */ }
+        out.challenges = {
+            list: list,
+            anyActive: anyActive,
+            countPending: list.filter(c => c.pending).length,
+            reservesExist: reservesExist,
         };
     });
 

@@ -4,7 +4,8 @@ Routen:
     GET  /                     Cockpit (statisches Frontend aus ./cockpit)
     GET  /game/...             lokal serviertes Spiel (nur im Dev-Modus LOCAL_GAME=1)
     WS   /ws                   Event-Stream: hello + alle Bus-Events als JSON
-    POST /api/control/{cmd}    start | stop | pause | resume | step_action | step_decision
+    POST /api/control/{cmd}    start | stop | pause | resume | step_action
+                               | step_decision | acknowledge_mismatch | force_reset
     GET  /api/status           aktueller Status (View-Models)
     GET  /api/timeline         Event-Historie der laufenden Session (JSONL)
 """
@@ -53,6 +54,10 @@ def create_app() -> FastAPI:
             runtime.step_action()
         elif cmd == "step_decision":
             runtime.step_decision()
+        elif cmd == "acknowledge_mismatch":
+            # Manuelle Freigabe nach MODEL_MISMATCH (G-02): zurück auf ACTIVE,
+            # die quittierte Version retriggert nicht erneut.
+            runtime.acknowledge_mismatch()
         elif cmd == "force_reset":
             # Debug/Test: Reset-Transaktion beim nächsten Zyklus erzwingen.
             if runtime.brain is not None:

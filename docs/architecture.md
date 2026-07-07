@@ -1,6 +1,6 @@
 # Architektur
 
-Bezugsdokumente: *„Autonome Optimimale Spiel-Mechanik"* (Spielmechanik-Spec)
+Bezugsdokumente: *[„Autonome Optimimale Spiel-Mechanik"](spielmechanik-spec.md)* (Spielmechanik-Spec)
 und *„Cockpit Konzept"* (Cockpit-Spec). Dieses Projekt ist die bewusst
 vereinfachte, private Umsetzung beider Spezifikationen — ohne Enterprise-Features,
 aber funktional vollständig in Richtung „das komplette Spiel spielen".

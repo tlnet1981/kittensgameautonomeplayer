@@ -72,14 +72,21 @@ window.KGP = (() => {
         fmtNum(s.paragon, 0) + (s.resetParagon ? " (+" + s.resetParagon + ")" : "");
 
       const vg = s.versionGuard || {};
+      const am = s.agentMode || { mode: "ACTIVE", reason: "" };
       const badge = document.getElementById("gb-version");
-      if (vg.gameVersion) {
+      if (am.mode && am.mode !== "ACTIVE") {
+        // AgentMode-Badge (G-02/22.2): harter Stop überdeckt die Versionsanzeige.
+        badge.textContent = am.mode;
+        badge.className = "version-badge mismatch";
+        badge.title = (am.reason || am.mode) +
+          " — nur lesende/sichernde Aktionen (Freigabe: acknowledge_mismatch).";
+      } else if (vg.gameVersion) {
         badge.textContent = "v" + vg.gameVersion + " r" + vg.buildRevision;
         badge.className = "version-badge " + (vg.match ? "ok" : "mismatch");
         badge.title = vg.match
           ? "Spielversion entspricht der Referenzversion der Spezifikation."
           : "Abweichung von Referenz v" + vg.referenceVersion + " r" + vg.referenceBuild
-            + " — Agent läuft im toleranten Modus.";
+            + " — Agent gestoppt (G-02).";
       }
     }
 
