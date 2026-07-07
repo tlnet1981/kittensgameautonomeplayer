@@ -1,0 +1,90 @@
+{
+ "buildings": [
+  {
+   "label": "Field",
+   "name": "field",
+   "on": 0,
+   "prices": [
+    {
+     "name": "catnip",
+     "val": 10
+    }
+   ],
+   "unlocked": true,
+   "val": 0
+  }
+ ],
+ "calendar": {
+  "currentCatnipModifier": 1.5,
+  "cycle": 0,
+  "cycleYear": 0,
+  "day": 10,
+  "daysPerSeason": 100,
+  "festivalDays": 0,
+  "season": 0,
+  "seasonCatnipModifiers": [
+   1.5,
+   1.0,
+   1.0,
+   0.25
+  ],
+  "seasonName": "spring",
+  "weather": "normal",
+  "winterCatnipModifier": 0.25,
+  "year": 1
+ },
+ "effects": {
+  "catnipPerTickBase": 0.0
+ },
+ "energy": {
+  "cons": 0,
+  "prod": 0
+ },
+ "errors": [],
+ "meta": {
+  "buildRevision": 3,
+  "paused": false,
+  "ticksPerSecond": 5,
+  "version": "1502"
+ },
+ "prestige": {
+  "burnedParagon": 0,
+  "karma": 0,
+  "paragon": 0
+ },
+ "ready": true,
+ "religion": {
+  "faith": 0,
+  "faithRatio": 0,
+  "worship": 0
+ },
+ "resources": [
+  {
+   "craftable": false,
+   "maxValue": 5000.0,
+   "name": "catnip",
+   "perSec": 0.0,
+   "title": "catnip",
+   "unlocked": true,
+   "value": 0.0
+  }
+ ],
+ "science": {
+  "techs": []
+ },
+ "tabs": [],
+ "village": {
+  "catnipDemandPerSec": 0.0,
+  "freeKittens": 0,
+  "happiness": 1.0,
+  "jobs": [],
+  "kittens": 0,
+  "leader": null,
+  "maxKittens": 0
+ },
+ "workshop": {
+  "craftRatio": 0,
+  "crafts": [],
+  "upgrades": []
+ }
+}

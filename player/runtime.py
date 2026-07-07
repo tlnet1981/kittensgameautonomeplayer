@@ -44,6 +44,13 @@ class PlayerRuntime:
         self.last_snapshot: dict | None = None
         self.last_snapshot_ts: float | None = None
         self.version_guard: dict = {}
+        # AgentMode (Spec Anhang A.2 / G-02): ACTIVE | MODEL_MISMATCH | SAFE_STOP.
+        # MODEL_MISMATCH sperrt alle nicht-lesenden Aktionen außer dem
+        # Abschalten von Verbrauchern (loop.apply_mode_gate); SAFE_STOP sperrt
+        # alles. Manuelle Freigabe: acknowledge_mismatch() (Cockpit-Control).
+        self.agent_mode = "ACTIVE"
+        self.agent_mode_reason = ""
+        self._ack_version_key: str | None = None   # quittierte Abweichung
         # Von den Cockpit-Controls gesetzte Flags (Brain wertet sie aus, M1):
         self.pause_requested = False
         self.step_actions_remaining = 0
@@ -121,7 +128,9 @@ class PlayerRuntime:
             if self.brain.last_record is not None:
                 current_action = self.brain.last_record.to_dict()
         return {
-            "status": viewmodels.status_vm(snap, self._state, self.version_guard, run_info),
+            "status": viewmodels.status_vm(snap, self._state, self.version_guard, run_info,
+                                           agent_mode={"mode": self.agent_mode,
+                                                       "reason": self.agent_mode_reason}),
             "economy": viewmodels.economy_vm(snap) if snap else None,
             "population": viewmodels.population_vm(snap) if snap else None,
             "health": viewmodels.health_vm(self._state, age, self._errors),
@@ -188,6 +197,31 @@ class PlayerRuntime:
     def step_decision(self) -> None:
         self.step_until_decision = True
 
+    # ------------------------------------------------------------------ AgentMode
+
+    def enter_model_mismatch(self, reason: str, source: str = "model") -> None:
+        """Harter Stop (G-02/G-10): nur noch lesende/sichernde Aktionen.
+        Idempotent — im Mismatch bleibt der erste Grund stehen."""
+        if self.agent_mode == "MODEL_MISMATCH":
+            return
+        self.agent_mode = "MODEL_MISMATCH"
+        self.agent_mode_reason = reason
+        self.bus.publish("model.mismatch", {"reason": reason, "source": source})
+
+    def acknowledge_mismatch(self) -> None:
+        """Manuelle Freigabe (Cockpit-Control): zurück auf ACTIVE. Die aktuell
+        beobachtete Versionsabweichung wird quittiert und retriggert nicht
+        erneut; der Prediction-Streak des Brains wird genullt."""
+        vg = self.version_guard
+        if vg and not vg.get("match", True):
+            self._ack_version_key = f"{vg.get('gameVersion')}|{vg.get('buildRevision')}"
+        self.agent_mode = "ACTIVE"
+        self.agent_mode_reason = ""
+        if self.brain is not None:
+            self.brain.mismatch_streak = 0
+        self.bus.publish("model.mismatch_acknowledged",
+                         {"acknowledgedVersion": self._ack_version_key})
+
     # ------------------------------------------------------------------ Schleifen
 
     async def _telemetry_loop(self) -> None:
@@ -198,6 +232,9 @@ class PlayerRuntime:
                 derive(snap)
                 self.last_snapshot = snap
                 self.last_snapshot_ts = time.time()
+                # Version Guard periodisch (G-02): billig auf dem frischen
+                # Snapshot statt eines Extra-Reads.
+                self.apply_version_guard(snap)
                 if snap.get("errors"):
                     for e in snap["errors"]:
                         if e not in self._errors:
@@ -228,9 +265,14 @@ class PlayerRuntime:
     # ------------------------------------------------------------------ Intern
 
     async def _check_version(self) -> None:
-        """Version Guard (weich): warnt bei Abweichung von der Referenzversion."""
+        """Version Guard beim Start: liest einen Snapshot und prüft ihn."""
         assert self.browser is not None
-        snap = await read_snapshot(self.browser)
+        self.apply_version_guard(await read_snapshot(self.browser))
+
+    def apply_version_guard(self, snap: dict) -> None:
+        """Version Guard (G-02, hart): bei Abweichung von der Referenzversion
+        → AgentMode MODEL_MISMATCH (nur lesende/sichernde Aktionen). Eine per
+        acknowledge_mismatch quittierte Version retriggert nicht erneut."""
         meta = snap.get("meta", {})
         version = meta.get("version")
         build = meta.get("buildRevision")
@@ -238,6 +280,10 @@ class PlayerRuntime:
         norm = lambda v: str(v or "").replace(".", "")
         matches = (norm(version) == norm(self.config.reference_version)
                    and build == self.config.reference_build_revision)
+        first_check = not self.version_guard
+        changed = (self.version_guard.get("gameVersion") != version
+                   or self.version_guard.get("buildRevision") != build
+                   or self.version_guard.get("match") != matches)
         self.version_guard = {
             "gameVersion": version,
             "buildRevision": build,
@@ -245,8 +291,16 @@ class PlayerRuntime:
             "referenceBuild": self.config.reference_build_revision,
             "match": matches,
         }
-        if not matches:
+        if matches:
+            return
+        # Warn-Event nur bei Änderung/Erstprüfung (kein Sekundentakt-Spam):
+        if first_check or changed:
             self.bus.publish("model.version_mismatch", self.version_guard)
+        if f"{version}|{build}" != self._ack_version_key:
+            self.enter_model_mismatch(
+                f"Versionsabweichung: v{version} r{build} ≠ Referenz "
+                f"v{self.config.reference_version} r{self.config.reference_build_revision}",
+                source="version")
 
     async def _teardown(self) -> None:
         for task in (self._telemetry_task, self._brain_task, self._save_task):

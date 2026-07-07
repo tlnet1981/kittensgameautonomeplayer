@@ -271,7 +271,8 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
         return
 
     if target["kind"] == "build":
-        act = actions.buy_building(target["name"], obj["label"], obj["val"])
+        act = actions.buy_building(target["name"], obj["label"], obj["val"],
+                                   prices=prices)
         if target["name"] in HOUSING_BUILDINGS and "housing" in blocked:
             cands.append(Candidate(act, 0.0, {"milestone": 0.0}, feasible=False,
                                    reject_reason="Food-Sicherheit blockiert Housing (I-01)"))
@@ -282,13 +283,16 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
                                    0.0, {"milestone": 0.0}, feasible=False,
                                    reject_reason="Perk noch nicht freigeschaltet (Metaphysics/Vorgänger fehlt)"))
             return
-        act = actions.buy_perk(target["name"], obj.get("label") or target["name"])
+        act = actions.buy_perk(target["name"], obj.get("label") or target["name"],
+                               prices=prices)
     elif target["kind"] == "space_program":
-        act = actions.space_program(target["name"], obj.get("label") or target["name"])
+        act = actions.space_program(target["name"], obj.get("label") or target["name"],
+                                    prices=prices)
     elif target["kind"] == "religion_upgrade":
-        act = actions.buy_religion_upgrade(target["name"], obj.get("label") or target["name"])
+        act = actions.buy_religion_upgrade(target["name"], obj.get("label") or target["name"],
+                                           prices=prices)
     else:
-        act = actions.research(target["name"], obj["label"])
+        act = actions.research(target["name"], obj["label"], prices=prices)
 
     if A.affordable(snap, prices):
         comp = {"milestone": 3.0}
@@ -436,7 +440,8 @@ def _research_candidates(snap, target, cands, lam=None) -> None:
         ct = shadow.cost_time(t["prices"], lam) if lam else 0.0
         if ct > 1e-9:
             comp["costTime"] = ct
-        cands.append(Candidate(actions.research(t["name"], t["label"]), 1.9, comp))
+        cands.append(Candidate(actions.research(t["name"], t["label"], prices=t["prices"]),
+                               1.9, comp))
 
 
 # ---------------------------------------------------------------- Gebäude
@@ -487,14 +492,14 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
                                          lam, horizon)
             if reject:
                 cands.append(Candidate(
-                    actions.buy_building(name, b["label"], b["val"]), 0.0,
+                    actions.buy_building(name, b["label"], b["val"], prices=b["prices"]), 0.0,
                     dict(comp), feasible=False, reject_reason=reject))
                 continue
         elif name in HOUSING_BUILDINGS:
             comp, reject = _housing_eval(snap, name, b, blocked)
             if reject:
                 cands.append(Candidate(
-                    actions.buy_building(name, b["label"], b["val"]), 0.0,
+                    actions.buy_building(name, b["label"], b["val"], prices=b["prices"]), 0.0,
                     dict(comp), feasible=False, reject_reason=reject))
                 continue
             if banking:
@@ -511,7 +516,7 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
                 comp["bottleneck"] = 1.8
             else:
                 cands.append(Candidate(
-                    actions.buy_building(name, b["label"], b["val"]), 0.0,
+                    actions.buy_building(name, b["label"], b["val"], prices=b["prices"]), 0.0,
                     {"bottleneck": 0.0}, feasible=False,
                     reject_reason="Feldkauf würde die Catnip-Bank fürs Housing schwächen"))
                 continue
@@ -529,7 +534,7 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
                 comp["economy"] = 1.2  # Fallback: keine CS-Daten → Altverhalten
             elif b["val"] >= n_target:
                 cands.append(Candidate(
-                    actions.buy_building(name, b["label"], b["val"]), 0.0,
+                    actions.buy_building(name, b["label"], b["val"], prices=b["prices"]), 0.0,
                     {"economy": 0.0}, feasible=False,
                     reject_reason=(f"Chronosphere-Zielzahl {n_target} erreicht "
                                    f"(CS-Suche 19.1, Bestand {b['val']})")))
@@ -560,7 +565,7 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
                     pb = shadow.payback(cost_t, ben_t / horizon)
                     if pb > horizon:
                         cands.append(Candidate(
-                            actions.buy_building(name, b["label"], b["val"]),
+                            actions.buy_building(name, b["label"], b["val"], prices=b["prices"]),
                             0.0, dict(comp), feasible=False,
                             reject_reason=(f"Payback {fmt_duration(pb)} > "
                                            f"Run-Horizont {fmt_duration(horizon)} "
@@ -581,7 +586,7 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         _apply_food_risk(snap, comp, b["prices"])
 
         score = _score(comp)
-        cands.append(Candidate(actions.buy_building(name, b["label"], b["val"]), score, comp))
+        cands.append(Candidate(actions.buy_building(name, b["label"], b["val"], prices=b["prices"]), score, comp))
 
 
 def _building_rate_delta(snap, name: str, produces: str) -> dict[str, float]:
@@ -987,7 +992,8 @@ def _upgrade_candidates(snap, cands, lam=None) -> None:
         ct = shadow.cost_time(u["prices"], lam) if lam else 0.0
         if ct > 1e-9:
             comp["costTime"] = ct
-        cands.append(Candidate(actions.buy_upgrade(u["name"], u["label"]), 1.4, comp))
+        cands.append(Candidate(actions.buy_upgrade(u["name"], u["label"], prices=u["prices"]),
+                               1.4, comp))
 
 
 # ---------------------------------------------------------------- Jagd
@@ -1011,6 +1017,18 @@ HUNT_CAP_BUFFER_S = 60.0
 HUNT_VALUE_MIN_S = NET_VALUE_SCALE
 # Fallback-Schwelle ohne λ-Daten (Bestandsverhalten): jagen ab 85 % Füllstand.
 HUNT_FILL_FALLBACK = 0.85
+
+
+def _hunt_action(squads: int) -> "actions.Action":
+    """Jagd-Aktion mit stochastischer EV-Prognose (G-10: nur Vorzeichen-/
+    Größenordnungscheck; Unicorns bewusst nicht prognostiziert, P=0,5 %)."""
+    act = actions.hunt()
+    if squads >= 1:
+        act.predicted = {"deltas": {
+            "manpower": -float(squads * HUNT_MANPOWER_COST),
+            "furs": squads * HUNT_FURS_EV,
+        }, "stochastic": True}
+    return act
 
 
 def _hunt_expected_yield(squads: int, lam: dict[str, float]) -> float:
@@ -1046,12 +1064,12 @@ def _hunt_candidate(snap, cands, lam=None) -> None:
                 comp["huntValue"] = hunt_value   # Sekundenwert, nur Anzeige
             if A.res_value(snap, "furs") <= 0:
                 comp["economy"] = 0.3   # erster Pelz = Happiness-Schub
-            cands.append(Candidate(actions.hunt(), _score(comp), comp))
+            cands.append(Candidate(_hunt_action(squads), _score(comp), comp))
         elif hunt_value > HUNT_VALUE_MIN_S:
             # Beute ist dem Ziel JETZT mehr wert als der Batch-Vorteil des
             # Wartens (EV(sofort) > EV(warten), Spec 14.2).
             comp = {"economy": 1.3, "huntValue": hunt_value}
-            cands.append(Candidate(actions.hunt(), _score(comp), comp))
+            cands.append(Candidate(_hunt_action(squads), _score(comp), comp))
         return
 
     # Fallback ohne λ-Daten (Bestandsverhalten): 85-%-Schwelle.
@@ -1059,10 +1077,16 @@ def _hunt_candidate(snap, cands, lam=None) -> None:
         comp = {"capLoss": 1.5}
         if A.res_value(snap, "furs") <= 0:
             comp["economy"] = 0.3   # erster Pelz = Happiness-Schub
-        cands.append(Candidate(actions.hunt(), sum(comp.values()), comp))
+        cands.append(Candidate(_hunt_action(int(mp["value"] // HUNT_MANPOWER_COST)),
+                               sum(comp.values()), comp))
 
 
 # ---------------------------------------------------------------- Crafts
+
+def _craft_ratio(snap) -> float:
+    """Craft-Ausbeute-Bonus aus dem Snapshot (Fallback 0 = Basisausbeute)."""
+    return float(snap.get("workshop", {}).get("craftRatio", 0.0) or 0.0)
+
 
 def _craft_candidates(snap, target, bn, cands, lam=None) -> None:
     prices_target = _target_prices(snap, target) or []
@@ -1093,8 +1117,10 @@ def _craft_candidates(snap, target, bn, cands, lam=None) -> None:
         if r["value"] / r["maxValue"] > 0.92 and r["value"] >= price \
                 and craft_name not in seen:
             batch = max(1, min(10, int((r["value"] * 0.3) // price)))
-            cands.append(Candidate(actions.craft(craft_name, recipe["label"], batch),
-                                   1.6, {"capLoss": 1.6}))
+            cands.append(Candidate(
+                actions.craft(craft_name, recipe["label"], batch,
+                              prices=recipe["prices"], craft_ratio=_craft_ratio(snap)),
+                1.6, {"capLoss": 1.6}))
 
 
 def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
@@ -1126,8 +1152,10 @@ def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
                 comp["costTime"] = cost_t
                 comp["benefitTime"] = ben_t
                 comp["netValue"] = shadow.net_value(ben_t, cost_t)
-        cands.append(Candidate(actions.craft(craft_name, recipe["label"], batch),
-                               score, comp))
+        cands.append(Candidate(
+            actions.craft(craft_name, recipe["label"], batch,
+                          prices=recipe["prices"], craft_ratio=_craft_ratio(snap)),
+            score, comp))
         return
     # Inputs fehlen → craftbare Inputs eine Ebene tiefer anstoßen
     for m in missing:
@@ -1164,7 +1192,7 @@ def _religion_candidates(snap, target, cands) -> None:
         else:
             comp = {"economy": 0.9}
         cands.append(Candidate(
-            actions.buy_religion_upgrade(u["name"], u["label"]),
+            actions.buy_religion_upgrade(u["name"], u["label"], prices=u["prices"]),
             sum(comp.values()), comp))
 
     # Ziggurat-/Unicorn-Kette (Spec 15.3, vereinfacht bewertet):
@@ -1172,7 +1200,8 @@ def _religion_candidates(snap, target, cands) -> None:
         if not z["unlocked"] or not A.affordable(snap, z["prices"]):
             continue
         cands.append(Candidate(
-            actions.buy_religion_upgrade(z["name"], z["label"], ziggurat=True),
+            actions.buy_religion_upgrade(z["name"], z["label"], ziggurat=True,
+                                         prices=z["prices"]),
             1.0, {"economy": 1.0}))
 
     # Unicorns opfern, sobald ein Batch voll ist und ein Ziggurat steht:
@@ -1205,12 +1234,14 @@ def _space_building_candidates(snap, bn, cands) -> None:
                 comp["bottleneck"] = 1.8
             else:
                 comp["economy"] = 0.8   # Space-Ausbau ist fast immer Fortschritt
+            deltas = actions.price_deltas(b["prices"])
             act = actions.Action(
                 id=f"space_bld:{b['name']}", type="BUY_BUILDING",
                 label=f"Baue {b['label']} ({planet['label']}, Nr. {b['val'] + 1})",
                 exec_spec={"kind": "click_button", "tab": "Space",
                            "panel": planet["label"], "title": b["label"], "batch": 1},
                 expected=f"{b['label']} auf {b['val'] + 1}",
+                predicted={"deltas": deltas, "stochastic": False} if deltas else None,
             )
             cands.append(Candidate(act, sum(comp.values()), comp))
 
@@ -1275,6 +1306,22 @@ def _trade_value(snap, race: dict, diplo: dict, lam: dict[str, float]) -> float:
     return gain - shadow.cost_time(costs, lam)
 
 
+def _trade_action(snap, race: dict, diplo: dict, batch: int) -> "actions.Action":
+    """Trade-Aktion mit stochastischer EV-Prognose (14.1): Fixkosten + Ware
+    sicher, Erträge als Erwartungswerte (großzügige Toleranz, G-10)."""
+    act = actions.trade(race["name"], race["title"], batch)
+    deltas: dict[str, float] = {
+        "gold": -float(TRADE_GOLD_COST * batch),
+        "manpower": -float(TRADE_MANPOWER_COST * batch),
+    }
+    for p in race.get("buys", []):
+        deltas[p["name"]] = deltas.get(p["name"], 0.0) - float(p["val"]) * batch
+    for res, amt in _trade_expected_yield(snap, race, diplo).items():
+        deltas[res] = deltas.get(res, 0.0) + amt * batch
+    act.predicted = {"deltas": deltas, "stochastic": True}
+    return act
+
+
 def _trade_candidates(snap, bn, cands, lam=None) -> None:
     diplo = snap.get("diplomacy", {})
     races = A.races(snap)
@@ -1300,7 +1347,7 @@ def _trade_candidates(snap, bn, cands, lam=None) -> None:
                 batch = int(min(batch, have // p["val"])) if p["val"] else batch
             if batch >= 1:
                 cands.append(Candidate(
-                    actions.trade("leviathans", race["title"], batch), 1.7,
+                    _trade_action(snap, race, diplo, batch), 1.7,
                     {"economy": 1.7}))
             continue
         sells_bottleneck = bn and bn.get("resource") and any(
@@ -1326,7 +1373,7 @@ def _trade_candidates(snap, bn, cands, lam=None) -> None:
                 comp["tradeValue"] = trade_val * batch   # Sekundenwert, Anzeige
             _apply_food_risk(snap, comp, race.get("buys", []))
             cands.append(Candidate(
-                actions.trade(race["name"], race["title"], batch),
+                _trade_action(snap, race, diplo, batch),
                 _score(comp), comp,
             ))
 
@@ -1342,7 +1389,7 @@ def _trade_candidates(snap, bn, cands, lam=None) -> None:
             batch = int(min(batch, have // p["val"])) if p["val"] else batch
         if batch >= 1 and not any(c.action.id == f"trade:{race['name']}" for c in cands):
             cands.append(Candidate(
-                actions.trade(race["name"], race["title"], batch), 1.1,
+                _trade_action(snap, race, diplo, batch), 1.1,
                 {"capLoss": 1.1},
             ))
 
@@ -1436,11 +1483,13 @@ def _time_candidates(snap, cands) -> None:
             continue
         # RR ist der Kern der Shatter-Engine (Spec 17.2) — höher gewichten:
         comp = {"economy": 1.3} if u["name"] == "ressourceRetrieval" else {"economy": 0.8}
+        deltas = actions.price_deltas(u["prices"])
         cands.append(Candidate(actions.Action(
             id=f"chronoforge:{u['name']}", type="BUY_UPGRADE",
             label=f"Chronoforge: {u['label']}",
             exec_spec={"kind": "click_button", "tab": "Time", "title": u["label"], "batch": 1},
             expected=f"{u['label']} auf {u['val'] + 1}",
+            predicted={"deltas": deltas, "stochastic": False} if deltas else None,
         ), sum(comp.values()), comp))
 
     # Cryochambers (Kitten-Carryover über Resets, Spec 19):
@@ -1448,11 +1497,13 @@ def _time_candidates(snap, cands) -> None:
         if u["name"] != "cryochambers" or not u["unlocked"] \
                 or not A.affordable(snap, u["prices"]):
             continue
+        deltas = actions.price_deltas(u["prices"])
         cands.append(Candidate(actions.Action(
             id="voidspace:cryochambers", type="BUY_UPGRADE",
             label="Cryochamber bauen (Kitten-Carryover)",
             exec_spec={"kind": "click_button", "tab": "Time", "title": u["label"], "batch": 1},
             expected="Ein Kitten überlebt den nächsten Reset",
+            predicted={"deltas": deltas, "stochastic": False} if deltas else None,
         ), 1.4, {"economy": 1.4}))
 
     # Konservative Shatter-Regel (Spec 17.5, Basisausbaustufe): nur mit

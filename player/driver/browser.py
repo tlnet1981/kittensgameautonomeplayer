@@ -24,7 +24,13 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+# Import weich: Unit-Tests importieren den Brain-Loop (→ Actor → Browser)
+# auch ohne installiertes Playwright; gestartet wird der Browser dort nie.
+# Die Typnamen sind dank `from __future__ import annotations` nur Strings.
+try:
+    from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+except ImportError:                     # pragma: no cover - Testumgebung
+    async_playwright = None
 
 # CSS für das Klick-Highlight (Glow), wird einmalig ins Spiel injiziert.
 GLOW_CSS = """
@@ -59,6 +65,8 @@ class GameBrowser:
         self.page: Page | None = None
 
     async def start(self, game_url: str) -> None:
+        if async_playwright is None:
+            raise RuntimeError("Playwright ist nicht installiert (pip install playwright)")
         self._pw = await async_playwright().start()
         w, h = self.window_size
         args = [f"--window-size={w},{h}"]

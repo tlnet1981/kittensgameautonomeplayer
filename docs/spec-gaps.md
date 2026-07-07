@@ -49,13 +49,13 @@ Legende: ✅ behoben/spec-nah · 🟠 lohnendste offene Lücken · 🟡 offen, g
 
 | # | Spec | Mechanik | Ist-Zustand | Status |
 |---|---|---|---|---|
-| 26 | G-02 / 22.2 | **Harter MODEL_MISMATCH-Stop** (nur lesende/sichernde Aktionen bei Versions-/Modellabweichung) | weiche Warnung + Cockpit-Badge (`runtime._check_version`), keine Aktionssperre — bewusste Designentscheidung (architecture.md #4), bleibt aber eine Safety-Lücke gegenüber der Spec | 🟠 |
-| 27 | G-10 / 22.2 | **Prognose-vs-Beobachtung-Distanzprüfung** mit Toleranz und Stop | Beobachtung nur deskriptiv (`loop._cycle` → `record.observed`), kein Vergleich gegen eine Prognose | 🟡 |
-| 28 | 21.1–21.3 / 5.3 | **Ereignisgetriebenes Replanning** (harte/weiche Trigger, Ereigniswarteschlange, Commit-Grenze) | fester 1,5-s-Tick (`loop.run`); Safety-Vorrang existiert, aber keine Trigger-Klassifikation und keine Planbindung | 🟡 |
+| 26 | G-02 / 22.2 | **Harter MODEL_MISMATCH-Stop** (nur lesende/sichernde Aktionen bei Versions-/Modellabweichung) | AgentMode ACTIVE/MODEL_MISMATCH/SAFE_STOP (`runtime.apply_version_guard`, periodisch im Telemetrie-Loop); Gate im Loop (`loop.apply_mode_gate`, nur READ_ONLY + Verbraucher-Abschalten), Reset gesperrt; manuelle Freigabe `acknowledge_mismatch` (Cockpit-Control, quittierte Version retriggert nicht) | ✅ |
+| 27 | G-10 / 22.2 | **Prognose-vs-Beobachtung-Distanzprüfung** mit Toleranz und Stop | `predicted`-Dict an Aktionen (Käufe/Craft/Refine/Gather exakt, Trade/Jagd als EV); `loop.check_prediction` (15 % + Puffer + Produktionsdrift; stochastisch nur Vorzeichen/Größenordnung); erst 3 harte Abweichungen in Folge → MODEL_MISMATCH (`mismatch_streak`) | ✅ |
+| 28 | 21.1–21.3 / 5.3 | **Ereignisgetriebenes Replanning** (harte/weiche Trigger, Ereigniswarteschlange, Commit-Grenze) | `brain/scheduler.py`: `next_wakeup` (Saison/½-Cap/10 %-ETA/30-s-Kontrollpunkt, Klemme [decision_interval, 30 s]) steuert den Loop-Schlaf; harte Trigger per Vorzyklus-Signatur (`classify_hard_trigger`); Commit-Grenze für IRREVERSIBLE (`loop.commit_guard`: Re-Read + Precondition, Abbruch ohne Retry) | ✅ |
 | 29 | 5.4 / 6.2 | **Risikoterme** (CVaR, κ·P(fatal), μ·irreversible Verluste) | nicht modelliert; Vorsicht steckt nur in deterministischen Gates (Food, TC-Schutz) | 🟡 |
 | 30 | 11.2 / 11.4 | **Effektive Craft-Kosten inkl. Opportunitätskosten; Cap-Ausgabe als NetValue-Reihenfolge** | Craft-Kaskade rekursiv, aber Score tiefenbasiert; Cap-Schutz verteilt auf feste Schwellen (0,92 Craft / 0,95 Gold; Jagd/Praise inzwischen EV-basiert) | 🟡 |
-| 31 | 23 | **DecisionTrace-Vollständigkeit** (state_hash, predicted vs. observed, replan_reason) | DecisionRecord mit Kandidaten/Komponenten/Beobachtung, aber ohne state_hash, Prognosefeld und strukturierten replan_reason (`records.py`) | 🟡 |
-| 32 | 24.1 | **Golden-State-Fixtures + Replay-Test** | nur programmatische `make_snap`-Fixtures; kein `tests/fixtures/`, kein Replay aus dem JSONL-Log | 🟡 |
+| 31 | 23 | **DecisionTrace-Vollständigkeit** (state_hash, predicted vs. observed, replan_reason) | `records.state_hash` (sha256-Kurzhash, Rundung 2/3 Nachkommastellen) + `replan_reason`/`predicted`/`observed_delta`/`prediction_ok` im DecisionRecord und `to_dict` (camelCase, Cockpit erbt ohne Whitelist) | ✅ |
+| 32 | 24.1 | **Golden-State-Fixtures + Replay-Test** | `tests/fixtures/{early,mid,late}.json` (eingefroren, deterministisch, ohne Zeitstempel) + Loader `tests/helpers.load_fixture`; `tests/test_replay.py`: Determinismus, Golden-Gewinner je Fixture, state_hash-Stabilität | ✅ |
 | 33 | 8.4 / 22.3 | **Optionswert von Unlocks; generische Deadlock-Auflösung** | Unlocks mit festen Score-Gewichten; Deadlocks punktuell gelöst (`wood_first`, Konversions-Reservierung) | 🟡 |
 
 ## Empfohlenes nächstes Paket (größter Verhaltensgewinn)

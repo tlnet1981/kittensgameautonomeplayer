@@ -18,6 +18,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# ActionAtomicity (Spec Anhang A.2): Grundlage des AgentMode-Gates (G-02) —
+# im MODEL_MISMATCH sind nur READ_ONLY-Aktionen (plus "Verbraucher
+# abschalten") zulässig, IRREVERSIBLE folgt der Spec-7.4-Liste.
+READ_ONLY = "READ_ONLY"
+REVERSIBLE = "REVERSIBLE"
+BATCH_REVERSIBLE = "BATCH_REVERSIBLE"
+IRREVERSIBLE = "IRREVERSIBLE"
+
+
+def price_deltas(prices: list[dict] | None) -> dict[str, float] | None:
+    """Preisvektor → Sofort-Effekt-Prognose {res: −preis} (G-10)."""
+    if not prices:
+        return None
+    out: dict[str, float] = {}
+    for p in prices:
+        out[p["name"]] = out.get(p["name"], 0.0) - float(p["val"])
+    return out
+
 
 @dataclass
 class Action:
@@ -29,12 +47,18 @@ class Action:
     expected: str = ""           # erwarteter Effekt (ein Satz)
     batch: int = 1               # Chargengröße (Spec 10.5)
     irreversible: bool = False   # Reset/Policies etc. (ab M3 relevant)
+    atomicity: str = REVERSIBLE  # ActionAtomicity (Anhang A.2)
+    # Prognostizierter Sofort-Effekt für die Distanzprüfung (G-10):
+    # {"deltas": {res: ±menge}, "stochastic": bool} | None = kein Modell.
+    predicted: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "type": self.type, "label": self.label,
             "expected": self.expected, "batch": self.batch,
             "irreversible": self.irreversible,
+            "atomicity": self.atomicity,
+            "predicted": self.predicted,
         }
 
 
@@ -46,6 +70,8 @@ def gather_catnip(batch: int = 10) -> Action:
         label=f"Sammle Catnip ({batch}× klicken)",
         exec_spec={"kind": "click_button", "tab": "Bonfire", "title": "Gather catnip", "batch": batch},
         expected=f"+{batch} Catnip", batch=batch,
+        atomicity=BATCH_REVERSIBLE if batch > 1 else REVERSIBLE,
+        predicted={"deltas": {"catnip": float(batch)}, "stochastic": False},
     )
 
 
@@ -55,33 +81,43 @@ def refine_catnip(batch: int = 1) -> Action:
         label=f"Veredle Catnip zu Holz ({batch}×)",
         exec_spec={"kind": "click_button", "tab": "Bonfire", "title": "Refine catnip", "batch": batch},
         expected=f"-{batch * 100} Catnip → +{batch} Wood (Basis)", batch=batch,
+        atomicity=BATCH_REVERSIBLE if batch > 1 else REVERSIBLE,
+        predicted={"deltas": {"catnip": -100.0 * batch, "wood": float(batch)},
+                   "stochastic": False},
     )
 
 
-def buy_building(name: str, label: str, count: int) -> Action:
+def buy_building(name: str, label: str, count: int,
+                 prices: list[dict] | None = None) -> Action:
+    deltas = price_deltas(prices)
     return Action(
         id=f"build:{name}", type="BUY_BUILDING",
         label=f"Baue {label} (Nr. {count + 1})",
         exec_spec={"kind": "click_button", "tab": "Bonfire", "title": label, "batch": 1},
         expected=f"{label} auf {count + 1}",
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
     )
 
 
-def research(name: str, label: str) -> Action:
+def research(name: str, label: str, prices: list[dict] | None = None) -> Action:
+    deltas = price_deltas(prices)
     return Action(
         id=f"research:{name}", type="RESEARCH",
         label=f"Erforsche {label}",
         exec_spec={"kind": "click_button", "tab": "Science", "title": label, "batch": 1},
         expected=f"Technologie {label} freigeschaltet",
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
     )
 
 
-def buy_upgrade(name: str, label: str) -> Action:
+def buy_upgrade(name: str, label: str, prices: list[dict] | None = None) -> Action:
+    deltas = price_deltas(prices)
     return Action(
         id=f"upgrade:{name}", type="BUY_UPGRADE",
         label=f"Kaufe Upgrade {label}",
         exec_spec={"kind": "click_button", "tab": "Workshop", "title": label, "batch": 1},
         expected=f"Workshop-Upgrade {label} aktiv",
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
     )
 
 
@@ -135,35 +171,46 @@ def hunt() -> Action:
     )
 
 
-def craft(name: str, label: str, times: int) -> Action:
+def craft(name: str, label: str, times: int, prices: list[dict] | None = None,
+          craft_ratio: float = 0.0) -> Action:
+    deltas = None
+    if prices:
+        deltas = {p["name"]: -float(p["val"]) * times for p in prices}
+        deltas[name] = deltas.get(name, 0.0) + times * (1.0 + craft_ratio)
     return Action(
         id=f"craft:{name}", type="CRAFT",
         label=f"Crafte {times}× {label}",
         exec_spec={"kind": "craft", "name": name, "times": times},
         expected=f"+{times} {label} (× Craft Ratio)", batch=times,
+        atomicity=BATCH_REVERSIBLE if times > 1 else REVERSIBLE,
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
     )
 
 
-def space_program(name: str, label: str) -> Action:
+def space_program(name: str, label: str, prices: list[dict] | None = None) -> Action:
     """Space-Mission starten (einmalig, z. B. Orbital Launch)."""
+    deltas = price_deltas(prices)
     return Action(
         id=f"space:{name}", type="BUY_BUILDING",
         label=f"Space: {label}",
         exec_spec={"kind": "click_button", "tab": "Space", "title": label, "batch": 1},
         expected=f"Mission {label} abgeschlossen",
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
     )
 
 
-def buy_perk(name: str, label: str) -> Action:
+def buy_perk(name: str, label: str, prices: list[dict] | None = None) -> Action:
     """Metaphysics-Perk kaufen — irreversibel (Paragon wird ausgegeben).
     Panel-Scoping verhindert die Kollision mit gleichnamigen Policies!"""
+    deltas = price_deltas(prices)
     return Action(
         id=f"perk:{name}", type="BUY_UPGRADE",
         label=f"Kaufe Metaphysics: {label}",
         exec_spec={"kind": "click_button", "tab": "Science",
                    "panel": "Metaphysics", "title": label, "batch": 1},
         expected=f"Permanenter Bonus: {label}",
-        irreversible=True,
+        irreversible=True, atomicity=IRREVERSIBLE,
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
     )
 
 
@@ -173,7 +220,7 @@ def reset_run() -> Action:
         label="RESET — neuen Run mit Paragon starten",
         exec_spec={"kind": "reset"},
         expected="Paragon-Gewinn, Neustart der Zivilisation",
-        irreversible=True,
+        irreversible=True, atomicity=IRREVERSIBLE,
     )
 
 
@@ -183,6 +230,7 @@ def trade(race: str, race_title: str, times: int) -> Action:
         label=f"Handle {times}× mit {race_title}",
         exec_spec={"kind": "trade", "race": race, "times": times},
         expected="Ressourcen gemäß Trade-Tabelle", batch=times,
+        atomicity=BATCH_REVERSIBLE if times > 1 else REVERSIBLE,
     )
 
 
@@ -204,12 +252,15 @@ def praise() -> Action:
     )
 
 
-def buy_religion_upgrade(name: str, label: str, ziggurat: bool = False) -> Action:
+def buy_religion_upgrade(name: str, label: str, ziggurat: bool = False,
+                         prices: list[dict] | None = None) -> Action:
+    deltas = price_deltas(prices)
     return Action(
         id=f"religion:{name}", type="BUY_UPGRADE",
         label=f"Religion: {label}",
         exec_spec={"kind": "click_button", "tab": "Religion", "title": label, "batch": 1},
         expected=f"{label} aktiv" + (" (Ziggurat-Ausbau)" if ziggurat else ""),
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
     )
 
 
@@ -220,7 +271,8 @@ def sacrifice_unicorns() -> Action:
         exec_spec={"kind": "click_button", "tab": "Religion",
                    "title": "Sacrifice unicorns", "batch": 1},
         expected="2500 Unicorns → Tears (× Ziggurat-Stufe)",
-        irreversible=True,
+        irreversible=True, atomicity=IRREVERSIBLE,
+        predicted={"deltas": {"unicorns": -2500.0}, "stochastic": False},
     )
 
 
@@ -231,7 +283,7 @@ def adore() -> Action:
         label="Adore the Galaxy (Worship → Epiphany)",
         exec_spec={"kind": "adore"},
         expected="Worship wird zu permanenter Epiphany",
-        irreversible=True,
+        irreversible=True, atomicity=IRREVERSIBLE,
     )
 
 
@@ -245,13 +297,16 @@ def festival() -> Action:
 
 
 def shatter(batch: int) -> Action:
-    """Time Crystals shattern (+1 Jahr je TC; Ertrag über Resource Retrieval)."""
+    """Time Crystals shattern (+1 Jahr je TC; Ertrag über Resource Retrieval).
+    Große Batches (> 2) gelten als irreversibel (Spec 7.4)."""
     return Action(
         id="time:shatter", type="SHATTER",
         label=f"Shatter {batch}× Time Crystal (+{batch} Jahre)",
         exec_spec={"kind": "shatter", "batch": batch},
         expected=f"+{batch} Jahre, Ressourcen via Resource Retrieval, +Heat",
         irreversible=True, batch=batch,
+        atomicity=IRREVERSIBLE if batch > 2 else BATCH_REVERSIBLE,
+        predicted={"deltas": {"timeCrystal": -float(batch)}, "stochastic": False},
     )
 
 
@@ -261,4 +316,5 @@ def wait(reason: str, wake: str) -> Action:
         label="Warten (bewusste Entscheidung)",
         exec_spec={"kind": "wait", "reason": reason, "wake": wake},
         expected=wake,
+        atomicity=READ_ONLY,
     )

@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from player.state.derived import derive
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def load_fixture(name: str) -> dict[str, Any]:
+    """Golden-Fixture laden (Spec 24.1): eingefrorener Snapshot als JSON,
+    deterministisch und ohne Zeitstempel. `derived` wird beim Laden frisch
+    berechnet (nicht in der Datei — eine Ableitungsänderung soll die
+    Fixtures nicht invalidieren, nur die Golden-Assertions)."""
+    snap = json.loads((FIXTURE_DIR / f"{name}.json").read_text(encoding="utf-8"))
+    snap.pop("derived", None)
+    return derive(snap)
 
 
 def make_snap(

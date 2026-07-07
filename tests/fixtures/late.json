@@ -1,0 +1,285 @@
+{
+ "buildings": [
+  {
+   "label": "Field",
+   "name": "field",
+   "on": 40,
+   "prices": [
+    {
+     "name": "catnip",
+     "val": 5000
+    }
+   ],
+   "unlocked": true,
+   "val": 40
+  },
+  {
+   "label": "Hut",
+   "name": "hut",
+   "on": 40,
+   "prices": [
+    {
+     "name": "wood",
+     "val": 8000
+    }
+   ],
+   "unlocked": true,
+   "val": 40
+  },
+  {
+   "label": "Library",
+   "name": "library",
+   "on": 15,
+   "prices": [
+    {
+     "name": "wood",
+     "val": 400
+    }
+   ],
+   "unlocked": true,
+   "val": 15
+  },
+  {
+   "label": "Mine",
+   "name": "mine",
+   "on": 10,
+   "prices": [
+    {
+     "name": "wood",
+     "val": 600
+    }
+   ],
+   "unlocked": true,
+   "val": 10
+  },
+  {
+   "label": "Smelter",
+   "name": "smelter",
+   "on": 5,
+   "prices": [
+    {
+     "name": "minerals",
+     "val": 800
+    }
+   ],
+   "unlocked": true,
+   "val": 5
+  },
+  {
+   "label": "Barn",
+   "name": "barn",
+   "on": 10,
+   "prices": [
+    {
+     "name": "wood",
+     "val": 300
+    }
+   ],
+   "unlocked": true,
+   "val": 10
+  }
+ ],
+ "calendar": {
+  "currentCatnipModifier": 1.0,
+  "cycle": 0,
+  "cycleYear": 0,
+  "day": 10,
+  "daysPerSeason": 100,
+  "festivalDays": 0,
+  "season": 1,
+  "seasonCatnipModifiers": [
+   1.5,
+   1.0,
+   1.0,
+   0.25
+  ],
+  "seasonName": "summer",
+  "weather": "normal",
+  "winterCatnipModifier": 0.25,
+  "year": 1
+ },
+ "effects": {
+  "catnipPerTickBase": 20.0
+ },
+ "energy": {
+  "cons": 0,
+  "prod": 0
+ },
+ "errors": [],
+ "meta": {
+  "buildRevision": 3,
+  "paused": false,
+  "ticksPerSecond": 5,
+  "version": "1502"
+ },
+ "prestige": {
+  "burnedParagon": 0,
+  "karma": 0,
+  "paragon": 0
+ },
+ "ready": true,
+ "religion": {
+  "faith": 0,
+  "faithRatio": 0,
+  "worship": 0
+ },
+ "resources": [
+  {
+   "craftable": false,
+   "maxValue": 50000.0,
+   "name": "catnip",
+   "perSec": 80.0,
+   "title": "catnip",
+   "unlocked": true,
+   "value": 40000.0
+  },
+  {
+   "craftable": false,
+   "maxValue": 10000.0,
+   "name": "wood",
+   "perSec": 12.0,
+   "title": "wood",
+   "unlocked": true,
+   "value": 8000.0
+  },
+  {
+   "craftable": false,
+   "maxValue": 8000.0,
+   "name": "minerals",
+   "perSec": 8.0,
+   "title": "minerals",
+   "unlocked": true,
+   "value": 4000.0
+  },
+  {
+   "craftable": false,
+   "maxValue": 4000.0,
+   "name": "science",
+   "perSec": 6.0,
+   "title": "science",
+   "unlocked": true,
+   "value": 3000.0
+  },
+  {
+   "craftable": false,
+   "maxValue": 1000.0,
+   "name": "iron",
+   "perSec": 1.0,
+   "title": "iron",
+   "unlocked": true,
+   "value": 500.0
+  }
+ ],
+ "science": {
+  "techs": [
+   {
+    "label": "Calendar",
+    "name": "calendar",
+    "prices": [
+     {
+      "name": "science",
+      "val": 30
+     }
+    ],
+    "researched": true,
+    "unlocked": true
+   },
+   {
+    "label": "Agriculture",
+    "name": "agriculture",
+    "prices": [
+     {
+      "name": "science",
+      "val": 100
+     }
+    ],
+    "researched": true,
+    "unlocked": true
+   },
+   {
+    "label": "Mining",
+    "name": "mining",
+    "prices": [
+     {
+      "name": "science",
+      "val": 500
+     }
+    ],
+    "researched": true,
+    "unlocked": true
+   },
+   {
+    "label": "Metal",
+    "name": "metal",
+    "prices": [
+     {
+      "name": "science",
+      "val": 900
+     }
+    ],
+    "researched": true,
+    "unlocked": true
+   },
+   {
+    "label": "Animal",
+    "name": "animal",
+    "prices": [
+     {
+      "name": "science",
+      "val": 500
+     }
+    ],
+    "researched": true,
+    "unlocked": true
+   },
+   {
+    "label": "Math",
+    "name": "math",
+    "prices": [
+     {
+      "name": "science",
+      "val": 1000
+     }
+    ],
+    "researched": false,
+    "unlocked": true
+   }
+  ]
+ },
+ "tabs": [],
+ "village": {
+  "catnipDemandPerSec": 90.1,
+  "freeKittens": 0,
+  "happiness": 1.0,
+  "jobs": [
+   {
+    "name": "farmer",
+    "title": "Farmer",
+    "value": 30
+   },
+   {
+    "name": "woodcutter",
+    "title": "Woodcutter",
+    "value": 30
+   },
+   {
+    "name": "miner",
+    "title": "Miner",
+    "value": 20
+   },
+   {
+    "name": "scholar",
+    "title": "Scholar",
+    "value": 26
+   }
+  ],
+  "kittens": 106,
+  "leader": null,
+  "maxKittens": 106
+ },
+ "workshop": {
+  "craftRatio": 0,
+  "crafts": [],
+  "upgrades": []
+ }
+}

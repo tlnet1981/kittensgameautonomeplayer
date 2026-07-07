@@ -90,11 +90,13 @@ def _protective_candidates(snap: dict, food: dict) -> list[Candidate]:
                                field_rate_delta=CATNIP_PER_FIELD_PER_SEC)
         if after["projectedMin"] > food.get("projectedMin", 0):
             out.append(Candidate(
-                actions.buy_building("field", field_b["label"], field_b["val"]),
+                actions.buy_building("field", field_b["label"], field_b["val"],
+                                     prices=field_b["prices"]),
                 4.0, {"safety": 4.0}))
         else:
             out.append(Candidate(
-                actions.buy_building("field", field_b["label"], field_b["val"]),
+                actions.buy_building("field", field_b["label"], field_b["val"],
+                                     prices=field_b["prices"]),
                 0.0, {"safety": 0.0}, feasible=False,
                 reject_reason=(f"Feldkauf würde die Winter-Projektion verschlechtern "
                                f"({after['projectedMin']:.0f} < {food.get('projectedMin', 0):.0f})")))
