@@ -445,3 +445,42 @@ def test_no_shift_reversal_across_cycles():
             sa = a.split(":", 1)[1].split(">")
             sb = b.split(":", 1)[1].split(">")
             assert sa != sb[::-1], f"Ping-Pong erkannt: {a} → {b}"
+
+
+def test_allocation_keeps_scholars_when_goal_is_wood_building():
+    """Nutzer-Fund: Nach dem Winter alle 6 Kitten als Woodcutter, obwohl
+    Forschung ansteht — das Holz-Sofortziel gab Science den Wert 0. Die
+    Soll-Allokation bepreist jetzt auch das NÄCHSTE offene Forschungsziel
+    (MetaView.next_research) und hält Scholars im Einsatz."""
+    from player.brain import meta, safety, shadow
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal", "metal"]}
+    techs["construction"] = {"researched": False, "prices": {"science": 1300}}
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 8.0},
+                   "wood": {"value": 5, "max": 400, "rate": 0.27},
+                   "minerals": {"value": 10, "max": 400, "rate": 0.0},
+                   "science": {"value": 40, "max": 500, "rate": 0.0}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 800}, "unlocked": True},
+                   "hut": {"val": 3, "prices": {"wood": 78}, "unlocked": True},
+                   "mine": {"val": 1, "prices": {"wood": 115}, "unlocked": True},
+                   "smelter": {"val": 0, "prices": {"minerals": 200}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 6, "farmer": 0, "scholar": 0, "miner": 0},
+        kittens=6, max_kittens=6,
+        season="spring", catnip_field_base=20 * 0.125,
+    )
+    mv = meta.evaluate(snap)
+    assert mv.active is not None and mv.active.target["kind"] == "build"
+    assert mv.next_research is not None            # Forschung ist im Pfad
+    prices = tactics._allocation_prices(snap, [{"name": "minerals", "val": 200}],
+                                        mv.next_research)
+    alloc = shadow.target_allocation(snap, prices,
+                                     tactics._min_farmers(snap, snap["village"]))
+    assert alloc.get("scholar", 0) >= 1, f"Scholar fehlt in {alloc}"
+    assert alloc.get("woodcutter", 0) < 6
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    shift = next((c for c in cands if c.action.id.startswith("shift:")), None)
+    assert shift is not None
+    assert shift.action.exec_spec["to"] in ("miner", "scholar")

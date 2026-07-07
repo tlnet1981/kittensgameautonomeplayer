@@ -144,6 +144,10 @@ def bottleneck_info(snap: dict, target: dict | None) -> dict | None:
 # z. B. erst ab 15 % ihres Holzpreises). Ohne Fallback wäre der Engpass
 # null, sobald das Ziel unsichtbar ist — Jobs/Refine/Wait fielen aus
 # (Live-Fund: Ziel „Erste Mine" bei 0 Holz).
+# Referenz-Science-Preis für noch unsichtbare Forschungsziele in der
+# Soll-Allokation (Größenordnung P0/P1-Techs; nur Gewichtung, kein Kauf):
+REFERENCE_RESEARCH_SCIENCE = 500.0
+
 REFERENCE_BUILD_PRICES: dict[str, list[dict]] = {
     "mine": [{"name": "wood", "val": 100}],
     "workshop": [{"name": "wood", "val": 100}, {"name": "minerals", "val": 400}],
@@ -250,7 +254,8 @@ def generate(snap: dict, meta_view, safety_result, *,
     horizon = shadow.run_horizon(snap) * max(1.0, horizon_scale)
 
     _milestone_candidate(snap, target, bn, cands, blocked)
-    _job_candidates(snap, bn, cands, lam_rate, goal_prices)
+    _job_candidates(snap, bn, cands, lam_rate, goal_prices,
+                    getattr(meta_view, 'next_research', None))
     _gather_candidates(snap, target, bn, cands)
     _research_candidates(snap, target, cands, lam, lam_rate)
     _building_candidates(snap, target, bn, cands, blocked, reserved, banking,
@@ -442,12 +447,12 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
 
 # ---------------------------------------------------------------- Jobs
 
-def _allocation_prices(snap, goal_prices) -> list[dict] | None:
+def _allocation_prices(snap, goal_prices, next_research=None) -> list[dict] | None:
     """Preisvektor für die Soll-Allokation (12.2): Meilensteinziel PLUS die
-    nächste Housing-Stufe, sobald die Kapazität voll ist — sonst wäre eine
-    Ressource wie Holz „wertlos", nur weil das aktuelle Ziel sie nicht
-    braucht, obwohl die nächste Hütte sie braucht (Nutzer-Fund:
-    null Woodcutter im ganzen Run)."""
+    nächste Housing-Stufe PLUS das nächste offene Forschungsziel — sonst
+    wäre eine Pfad-Ressource „wertlos", nur weil das Sofortziel sie nicht
+    braucht (Nutzer-Funde: null Woodcutter im ganzen Run; danach alle 6
+    Kitten als Woodcutter, weil das Holz-Ziel Science den Wert 0 gab)."""
     prices = list(goal_prices or [])
     village = snap.get("village", {})
     if village.get("maxKittens", 0) <= village.get("kittens", 0):
@@ -456,6 +461,16 @@ def _allocation_prices(snap, goal_prices) -> list[dict] | None:
             if b and b.get("unlocked") and b.get("prices"):
                 prices.extend(b["prices"])
                 break
+    if next_research:
+        t = A.tech(snap, next_research.get("name"))
+        if t and not t.get("researched") and t.get("prices"):
+            prices.extend(t["prices"])
+        elif not t:
+            # Forschungsziel noch unsichtbar (gleiche Falle wie bei der
+            # Mine/unlockRatio): Referenzpreis, damit Science in der
+            # Allokation nie den Wert 0 hat, solange Forschung ansteht.
+            prices.append({"name": "science",
+                           "val": REFERENCE_RESEARCH_SCIENCE})
     return prices or None
 
 
@@ -477,7 +492,8 @@ def _min_farmers(snap, village) -> int:
     return farmers_now
 
 
-def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None) -> None:
+def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None,
+                    next_research=None) -> None:
     village = snap.get("village", {})
     free = village.get("freeKittens", 0)
     food = snap.get("derived", {}).get("food", {})
@@ -489,7 +505,7 @@ def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None) -> None:
     # ein Kitten vom größten Überschuss zum größten Defizit umgeschult.
     alloc = {}
     if not food_tight:
-        alloc_prices = _allocation_prices(snap, goal_prices)
+        alloc_prices = _allocation_prices(snap, goal_prices, next_research)
         if alloc_prices:
             alloc = shadow.target_allocation(snap, alloc_prices,
                                              _min_farmers(snap, village))
