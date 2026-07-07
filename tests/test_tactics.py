@@ -484,3 +484,29 @@ def test_allocation_keeps_scholars_when_goal_is_wood_building():
     shift = next((c for c in cands if c.action.id.startswith("shift:")), None)
     assert shift is not None
     assert shift.action.exec_spec["to"] in ("miner", "scholar")
+
+
+def test_saving_target_recognized_at_five_minutes():
+    """Nutzer-Fund „er spart nie": Mit dem alten 180-s-Fenster war eine
+    Hütte, die ~5 min entfernt ist (typisches Frühspiel-Tempo), NIE ein
+    Sparziel. Jetzt gilt das 10-min-Fenster — die Library wird gebremst."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 26, "max": 200, "rate": 0.26},
+                   "science": {"value": 120, "max": 675, "rate": 0.35}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 900}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 78}, "unlocked": True},
+                   "library": {"val": 2, "prices": {"wood": 25}, "unlocked": True}},
+        techs={"calendar": {"researched": True}, "agriculture": {"researched": True},
+               "archery": {"researched": False, "prices": {"science": 300}}},
+        jobs={"woodcutter": 2, "farmer": 1, "scholar": 1},
+        kittens=4, max_kittens=4,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    hut = next((c for c in cands if c.action.id == "build:hut"), None)
+    assert hut is not None and hut.components.get("potential", 0) > 0
+    assert hut.eta_seconds is not None and 180 < hut.eta_seconds < 600
+    lib = next(c for c in cands if c.action.id == "build:library")
+    assert lib.components.get("delayPenalty", 0) < 0

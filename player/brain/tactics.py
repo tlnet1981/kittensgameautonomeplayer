@@ -286,8 +286,14 @@ def generate(snap: dict, meta_view, safety_result, *,
     return cands, bn
 
 
-# Sparziele weiter als 3 min entfernt frieren die Ökonomie nicht ein:
-SAVING_HORIZON_S = 180.0
+# Sparfenster (Nutzer-Fund „er spart nie auf die Hütte"): Die Spec kennt
+# für die DelayPenalty (10.3) gar kein Fenster — dieses ist nur ein
+# Anti-Einfrier-Schutz. 180 s waren viel zu eng: Früh liefert ein einzelner
+# Woodcutter ~0,27 Holz/s, Hütte #3 (78 Holz) liegt damit bei ~290 s und
+# wurde nie zum Sparziel — der Agent kaufte stattdessen Libraries vom
+# Sparholz. 10 min decken alle Frühspiel-Sparziele; Käufe OHNE
+# Ressourcenkonflikt (z. B. Felder für Catnip) laufen währenddessen weiter.
+SAVING_HORIZON_S = 600.0
 
 
 def _apply_saving_rule(snap: dict, cands: list[Candidate]) -> None:
