@@ -528,11 +528,54 @@ def _job_rebalance_candidate(snap, bn, cands, village, food_tight,
     # beide Kitten Scholars bei Science am Cap, niemand fällt Holz. Läuft
     # auch ohne Engpass-Daten (bn null, wenn das Zielgebäude per
     # unlockRatio noch unsichtbar ist). Ein Tausch pro Zyklus.
-    _cap_rebalance_candidate(snap, cands, village, food_tight, lam_rate)
+    if _cap_rebalance_candidate(snap, cands, village, food_tight, lam_rate):
+        return
+
+    # Farmer-Freigabe (Nutzer-Fund: Winter-Notfarmer blieben nach der
+    # Gefahr sitzen — die Zuweisung wurde nie reevaluiert). Zurückschulen,
+    # wenn die Saisonprojektion auch mit einem Farmer WENIGER deutlich
+    # über der Warnschwelle bliebe (Marge 1.5 gegen Saisonwechsel-Flattern).
+    _farmer_release_candidate(snap, cands, village, food_tight, lam_rate)
+
+
+FARMER_RELEASE_MARGIN = 1.5
+
+
+def _farmer_release_candidate(snap, cands, village, food_tight,
+                              lam_rate=None) -> None:
+    if food_tight or A.job_count(snap, "farmer") <= 0:
+        return
+    happiness = village.get("happiness", 1.0) or 1.0
+    farmer_rate = shadow.JOB_BASE_RATES["farmer"]["catnip"] * happiness
+    # Was-wäre-wenn: ein Farmer weniger = weniger Catnip-Produktion
+    # (als Mehrverbrauch modelliert, gleiche Projektionsmechanik wie I-01):
+    after = project_catnip(snap, demand_delta=farmer_rate)
+    food = snap.get("derived", {}).get("food", {})
+    demand = food.get("demandPerSec", 0.0)
+    warn_floor = max(150.0, 120.0 * demand)
+    if after["projectedMin"] < warn_floor * FARMER_RELEASE_MARGIN:
+        return
+    targets = [t for t in JOB_ORDER if t != "farmer" and A.job_unlocked(snap, t)]
+    if not targets:
+        return
+    if lam_rate:
+        scored = sorted(((shadow.job_score(snap, t, lam_rate), t) for t in targets),
+                        key=lambda x: (-x[0], x[1]))
+        if scored[0][0] <= 1e-9:
+            return   # kein Job mit positivem Grenzwert — Farmer schadet nicht
+        target_job = scored[0][1]
+    else:
+        target_job = min(targets, key=lambda t: (A.job_count(snap, t),
+                                                 JOB_ORDER.index(t)))
+    label = next((j["title"] for j in village.get("jobs", [])
+                  if j["name"] == target_job), target_job)
+    cands.append(Candidate(
+        actions.shift_job("farmer", target_job, label, 1), 2.0,
+        {"jobValue": 1.2, "foodSafe": 0.8}))
 
 
 def _cap_rebalance_candidate(snap, cands, village, food_tight,
-                             lam_rate=None) -> None:
+                             lam_rate=None) -> bool:
     """Kitten aus einem Job abziehen, dessen Ertragsressource(n) voll sind
     (Produktion läuft ins Cap = wertlos), hin zum besten nicht-vollen Job."""
     def _capped(res: str) -> bool:
@@ -550,7 +593,7 @@ def _cap_rebalance_candidate(snap, cands, village, food_tight,
         if all(_capped(res) for res in outputs):
             donors.append(j)
     if not donors:
-        return
+        return False
     donor = max(donors, key=lambda j: (j["value"], j["name"]))
     # Bester Zieljob: JobScore, sonst dünnster freigeschalteter Basisjob —
     # in beiden Fällen keiner, dessen Ertrag selbst schon voll ist.
@@ -558,7 +601,7 @@ def _cap_rebalance_candidate(snap, cands, village, food_tight,
                if t != donor["name"] and A.job_unlocked(snap, t)
                and not all(_capped(r) for r in shadow.JOB_BASE_RATES.get(t, {}))]
     if not targets:
-        return
+        return False
     if lam_rate:
         scored = sorted(((shadow.job_score(snap, t, lam_rate), t) for t in targets),
                         key=lambda x: (-x[0], x[1]))
@@ -571,6 +614,7 @@ def _cap_rebalance_candidate(snap, cands, village, food_tight,
     cands.append(Candidate(
         actions.shift_job(donor["name"], target_job, label, 1), 2.2,
         {"jobValue": 1.2, "capLoss": 1.0}))
+    return True
 
 
 # ---------------------------------------------------------------- Sammeln/Veredeln
@@ -2247,6 +2291,7 @@ REASON_TEMPLATES = {
     "storageB": "{label}: zusätzlicher Carryover-Wert übersteigt die Baukosten (11.3 B).",
     "storageC": "{label}: verhindert bewerteten Cap-Verlust im Puffer (11.3 C).",
     "capLoss": "{label} verhindert Produktionsverlust am Ressourcen-Cap.",
+    "foodSafe": "{label}: Food-Projektion bleibt auch ohne diesen Farmer sicher (Winter vorbei).",
     "economy": "{label} ist eine günstige Ökonomie-Investition.",
     "happiness": "{label}: Happiness wirkt als Multiplikator auf die gesamte Produktion.",
     "energy": "{label}: das Energie-Defizit drosselt die Produktion (Invariante I-04).",

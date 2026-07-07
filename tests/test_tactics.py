@@ -304,3 +304,40 @@ def test_saving_rule_ignores_far_away_targets():
     cands = tactics.generate(snap, mv, safety.check(snap))[0]
     lib = next((c for c in cands if c.action.id == "build:library"), None)
     assert lib is None or "delayPenalty" not in lib.components
+
+
+def test_farmer_released_after_winter_danger_passes():
+    """Nutzer-Fund: Winter-Notfarmer blieben nach der Gefahr sitzen. Ist die
+    Projektion auch ohne einen Farmer deutlich sicher (Marge 1.5), wird er
+    zum besten anderen Job zurückgeschult."""
+    snap = make_snap(
+        resources={"catnip": {"value": 4000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 5, "max": 200, "rate": 0.0},
+                   "science": {"value": 10, "max": 500, "rate": 0.0}},
+        buildings={"field": {"val": 30, "prices": {"catnip": 900}, "unlocked": True}},
+        jobs={"woodcutter": 0, "farmer": 3, "scholar": 0},
+        kittens=3, max_kittens=4,
+        season="spring", catnip_field_base=30 * 0.125,
+    )
+    cands = []
+    village = snap.get("village", {})
+    tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
+    shift = [c for c in cands if c.action.id.startswith("shift:farmer>")]
+    assert shift, "Farmer muss nach der Gefahr freigegeben werden"
+    assert "foodSafe" in shift[0].components
+
+
+def test_farmer_kept_when_projection_tight():
+    """Gegenprobe: Bleibt die Projektion ohne den Farmer unter der
+    1.5-fachen Warnschwelle, wird NICHT umgeschult (Anti-Flattern)."""
+    snap = make_snap(
+        resources={"catnip": {"value": 200, "max": 5000, "rate": 0.3}},
+        buildings={"field": {"val": 3, "prices": {"catnip": 90}, "unlocked": True}},
+        jobs={"woodcutter": 0, "farmer": 2},
+        kittens=2, max_kittens=2,
+        season="autumn", catnip_field_base=3 * 0.125,
+    )
+    cands = []
+    village = snap.get("village", {})
+    tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
+    assert not any(c.action.id.startswith("shift:farmer>") for c in cands)
