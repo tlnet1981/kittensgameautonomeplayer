@@ -103,6 +103,63 @@ SET_LEADER_JS = """
 }
 """
 
+# Policy kaufen (Spec 13.4/I-07) über den ECHTEN Spiel-Controller: die
+# PolicyBtnController-Kette (science.js:2426 ff) prüft blocked/requiredLeaderJob,
+# zahlt den Preis inkl. policyFakeBought und propagiert die blocks-Sperre
+# (onPurchase, science.js:2587-2597). event.boughtByQueue überspringt den
+# Confirm-Dialog (shouldBeBought, science.js:2513). Verifikation: researched.
+BUY_POLICY_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const policy = g && g.science ? g.science.getPolicy(args.name) : null;
+    if (!policy) return { error: "not_found" };
+    if (policy.researched) return { error: "already_researched" };
+    if (policy.blocked) return { error: "blocked" };
+    if (!policy.unlocked) return { error: "locked" };
+    try {
+        const ctrl = new classes.ui.PolicyBtnController(g);
+        const model = ctrl.fetchModel({ id: args.name });
+        const result = ctrl.buyItem(model, { boughtByQueue: true });
+        return {
+            bought: !!(result && result.itemBought),
+            reason: (result && result.reason) || null,
+            researched: !!g.science.getPolicy(args.name).researched,
+        };
+    } catch (e) {
+        return { error: "controller: " + (e && e.message) };
+    }
+}
+"""
+
+# Nur das researched-Flag lesen (Verifikation nach DOM-Fallback):
+POLICY_RESEARCHED_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const policy = g && g.science ? g.science.getPolicy(args.name) : null;
+    return policy ? !!policy.researched : false;
+}
+"""
+
+# Challenge als pending markieren (Spec 18): idempotent statt DOM-Klick —
+# der Challenge-Button TOGGELT pending (ChallengeBtnController.togglePending,
+# challenges.js:885-891), ein Doppelklick würde die Vormerkung aufheben.
+# Iron Will ist ausgenommen: dort resettet togglePending SOFORT
+# (applyPending(true), challenges.js:886-889). Der Reset wandelt pending →
+# active (game.js:5136-5141). Verifikation: before/after des pending-Flags.
+SET_CHALLENGE_PENDING_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const ch = g && g.challenges ? g.challenges.getChallenge(args.name) : null;
+    if (!ch) return { error: "not_found" };
+    if (args.name === "ironWill") return { error: "iron_will_manual" };
+    if (!ch.unlocked) return { error: "locked" };
+    if (ch.active) return { error: "already_active" };
+    const before = !!ch.pending;
+    ch.pending = true;
+    return { before: before, pending: !!ch.pending };
+}
+"""
+
 SHIFT_JOB_JS = """
 (args) => {
     const v = game.village;
@@ -150,6 +207,10 @@ class Actor:
                 return await self._toggle_building(exec_spec)
             if kind == "set_leader":
                 return await self._set_leader(exec_spec)
+            if kind == "select_policy":
+                return await self._select_policy(exec_spec)
+            if kind == "activate_challenge":
+                return await self._activate_challenge(exec_spec)
             return {"ok": False, "method": "none", "detail": f"Unbekannter kind: {kind}"}
         except Exception as exc:
             return {"ok": False, "method": "error", "detail": str(exc)}
@@ -307,6 +368,57 @@ class Actor:
                     "detail": f"set_leader: {res['error']}"}
         return {"ok": bool(res.get("ok")), "method": "js",
                 "detail": f"Leader: {res.get('before')} → {res.get('after')}"}
+
+    async def _select_policy(self, spec: dict) -> dict:
+        """Policy wählen (Spec 13.4/I-07): Science-Tab sichtbar machen, den
+        Button im Policies-PANEL glowen (Panel-Scoping — Namenskollision mit
+        Metaphysics-Perks wie „Diplomacy"!), dann Kauf über die JS-Controller-
+        API (BUY_POLICY_JS, respektiert blocks/Preise/Confirm-Skip). DOM-Klick
+        nur als Fallback; Verifikation immer über das researched-Flag."""
+        await self._ensure_tab("Science")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": spec.get("label") or spec["name"], "panel": "Policies",
+            "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(BUY_POLICY_JS, {"name": spec["name"]})
+        if not res.get("error"):
+            ok = bool(res.get("researched"))
+            return {"ok": ok, "method": "js",
+                    "detail": (f"Policy {spec['name']}: "
+                               f"{'researched' if ok else res.get('reason') or 'nicht erforscht'}")}
+        if str(res["error"]).startswith("controller"):
+            # DOM-Fallback (nur wenn die Controller-API bricht); danach
+            # zwingend das researched-Flag verifizieren:
+            dom = await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+                "title": spec.get("label") or spec["name"], "panel": "Policies",
+                "glowMs": self.glow_ms, "click": True,
+            })
+            await asyncio.sleep(0.3)
+            researched = await self.browser.evaluate(
+                POLICY_RESEARCHED_JS, {"name": spec["name"]})
+            return {"ok": bool(researched) and not dom.get("error"),
+                    "method": "js-fallback",
+                    "detail": f"Policy {spec['name']} via DOM: researched={bool(researched)}"}
+        return {"ok": False, "method": "js",
+                "detail": f"Policy {spec['name']}: {res['error']}"}
+
+    async def _activate_challenge(self, spec: dict) -> dict:
+        """Challenge pending setzen (Spec 18): Challenges-Tab sichtbar machen
+        (falls freigeschaltet), Button glowen, dann idempotent über die JS-API
+        (SET_CHALLENGE_PENDING_JS statt togglendem DOM-Klick)."""
+        await self._ensure_tab("Challenges")   # Tab evtl. unsichtbar → egal
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": spec.get("label") or spec["name"],
+            "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(SET_CHALLENGE_PENDING_JS,
+                                          {"name": spec["name"]})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"Challenge {spec['name']}: {res['error']}"}
+        return {"ok": bool(res.get("pending")), "method": "js",
+                "detail": (f"Challenge {spec['name']} pending: "
+                           f"{res.get('before')} → {res.get('pending')}")}
 
     async def _craft(self, spec: dict) -> dict:
         # Workshop-Tab zeigen (falls sichtbar), Craft über die exakte API —

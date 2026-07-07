@@ -13,15 +13,16 @@ def test_fresh_game_triggers_nothing():
     assert _ids(snap) == set()
 
 
-def test_policies_trigger_on_civil_service():
+def test_implemented_frontiers_removed():
+    # „policies" (Spec 13.4 → brain/policy.py) und „challenges" (Spec 18 →
+    # brain/challenge.py) sind umgesetzt — die Frontiers existieren nicht mehr
+    # und feuern auch bei ihren früheren Triggern nicht.
+    ids = {f.id for f in frontier.FRONTIERS}
+    assert "policies" not in ids
+    assert "challenges" not in ids
     snap = make_snap(techs={"civil": {"researched": True, "prices": {"science": 1500}}})
-    assert "policies" in _ids(snap)
-
-
-def test_challenges_trigger_on_paragon_run():
-    snap = make_snap()
-    assert "challenges" in _ids(snap, run="PARAGON_RUN")
-    assert "challenges" not in _ids(snap, run="PRICE_RATIO_RUN")
+    assert "policies" not in _ids(snap)
+    assert "challenges" not in _ids(snap, run="PARAGON_RUN")
 
 
 def test_transcend_trigger_on_high_worship():
@@ -51,8 +52,10 @@ def test_cs_loop_trigger_on_chronospheres():
 
 
 def test_already_fired_not_repeated():
-    snap = make_snap(techs={"civil": {"researched": True, "prices": {"science": 1500}}})
-    assert "policies" not in _ids(snap, fired={"policies"})
+    snap = make_snap()
+    snap["religion"] = {"worship": 60000, "epiphany": 0, "transcendenceTier": 0,
+                        "upgrades": [], "ziggurat": []}
+    assert "transcend" not in _ids(snap, fired={"transcend"})
 
 
 def test_every_frontier_has_complete_guidance():

@@ -24,7 +24,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from . import simulate
+from player.driver.actor import SET_CHALLENGE_PENDING_JS
+
+from . import challenge, simulate
 
 FIRST_RESET_MIN_PARAGON = 35
 # Mindestprojektion für Folge-Resets — verhindert Mini-Runs:
@@ -40,6 +42,32 @@ RESET_VALUE_T_MAX = 2 * 3600.0
 PARAGON_RUN_MIN_SECONDS = 20 * 60
 PARAGON_MARGINAL_WINDOW = 5 * 60      # Fenster für die marginale Rate
 PARAGON_MARGINAL_FACTOR = 0.5         # Reset, wenn marginal < 50 % der Ø-Rate
+
+
+# Kernschritte von challenges.applyPending OHNE UI-Confirm (gamefiles/js/
+# challenges.js:687-702): Abschluss-Check der On-Reset-Challenges, Reserven
+# berechnen, Chronospheres nullen (Challenge-Einstieg erlaubt keinen
+# CS-Carryover), Cryochamber-/Anarchy-Sonderfälle wie im Original. Läuft nur,
+# wenn tatsächlich eine Challenge pending ist. Die pending → active-
+# Umwandlung selbst macht _resetInternal (gamefiles/game.js:5136-5141).
+APPLY_PENDING_CORE_JS = """
+() => {
+    const g = window.gamePage || window.game;
+    if (!g || !g.challenges || !g.challenges.getCountPending()) { return false; }
+    g.challenges.onRunReset();
+    g.challenges.reserves.calculateReserves(false);
+    g.bld.get("chronosphere").val = 0;
+    g.bld.get("chronosphere").on = 0;
+    if (!g.challenges.getChallenge("postApocalypse").pending) {
+        g.time.getVSU("cryochambers").val = 0;
+        g.time.getVSU("cryochambers").on = 0;
+    } else if (g.challenges.getChallenge("anarchy").pending && g.village.leader) {
+        g.village.leader.isLeader = false;
+        g.village.leader = null;
+    }
+    return true;
+}
+"""
 
 
 def evaluate(snap: dict, run_type: str, next_perk: dict | None,
@@ -71,6 +99,13 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
         # Durchschnittsrate des Runs fällt (Proxy für den Neustart-Ø).
         # Diese Speedrun-Regel bleibt unangetastet (kein ResetValue-Gate).
         recommended, reason = _paragon_speedrun_rule(projection, paragon_samples)
+    elif run_type == "CHALLENGE_RUN":
+        # Spec 18.4: Reset NUR, wenn das SPIEL die Challenge als erfüllt
+        # markiert (researched-Flag aus dem Snapshot; researchChallenge in
+        # gamefiles/js/challenges.js:648-665 setzt es, sobald die
+        # Zielbedingung wirklich erfüllt ist). Eine bloß prognostizierte
+        # Erfüllung reicht nicht — kein ResetValue-Ersatzweg.
+        recommended, reason = challenge.reset_gate(snap)
     elif next_perk is not None:
         price = next((p["val"] for p in next_perk.get("prices", []) if p["name"] == "paragon"), 0)
         funds_after_reset = paragon_now + projection
@@ -105,6 +140,20 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
                     "UNGESCHÜTZT — Reset blockiert" if tc >= 3 else "— unkritisch"))},
         {"name": "Save-Export", "pass": True, "detail": "wird in der Transaktion ausgeführt"},
     ]
+    # Pending-Challenge für den NÄCHSTEN Run (Spec 18 / Pre-Reset-Schritt):
+    # nur wenn der Makroplan den Challenge-Run vorsieht (run_type ==
+    # CHALLENGE_RUN aus meta.determine_run_plan), noch keine Challenge läuft
+    # und eine unerledigte Challenge positiven Wert hat (18.2). execute_reset
+    # aktiviert sie unmittelbar vor dem Reset (pending → active beim Reset,
+    # gamefiles/game.js:5136-5141).
+    pending_challenge = None
+    if run_type == "CHALLENGE_RUN" and challenge.active_challenge(snap) is None:
+        best = challenge.best_challenge(snap)
+        if best is not None:
+            pending_challenge = {"name": best[0],
+                                 "label": challenge.label_of(snap, best[0]),
+                                 "value": round(best[1], 4)}
+
     return {
         "recommended": recommended,
         "projection": projection,
@@ -113,6 +162,7 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
         "gates": gates,
         "nextPerk": next_perk["label"] if next_perk else None,
         "resetValue": reset_value,
+        "pendingChallenge": pending_challenge,
     }
 
 
@@ -205,6 +255,30 @@ async def execute_reset(runtime, reset_eval: dict) -> None:
             })
     except Exception:
         pass
+
+    # 1c. Pending-Challenge für den NÄCHSTEN Run aktivieren (Spec 18,
+    #     Schritt der Pre-Reset-Transaktion; die restlichen 20.3-Schritte
+    #     baut Phase I). Verifikation über das pending-Flag; danach die
+    #     applyPending-Kernschritte (Reserven, CS-Nullung) wie im Spiel.
+    pending = reset_eval.get("pendingChallenge")
+    if pending:
+        try:
+            res = await browser.evaluate(SET_CHALLENGE_PENDING_JS,
+                                         {"name": pending["name"]})
+            if res.get("pending"):
+                await browser.evaluate(APPLY_PENDING_CORE_JS)
+                bus.publish("narrative.milestone", {
+                    "priority": "P2",
+                    "title": f"Challenge vorgemerkt: {pending['label']}",
+                    "body": ("Der nächste Run läuft als Challenge-Run — "
+                             "pending wird beim Reset aktiv (Spec 18)."),
+                })
+            else:
+                bus.publish("model.warning", {
+                    "error": (f"Challenge {pending['name']} nicht aktivierbar: "
+                              f"{res.get('error', 'pending-Flag nicht gesetzt')}")})
+        except Exception:
+            pass
 
     # 2./3. Kapitelkarte — der Reset ist ein Kapitelwechsel (Cockpit-Spec 14.5)
     bus.publish("narrative.chapter", {

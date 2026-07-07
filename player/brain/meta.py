@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from player.state import access as A
 
-from . import shadow, simulate
+from . import challenge, shadow, simulate
 from .reset import FIRST_RESET_MIN_PARAGON, MIN_PARAGON_GAIN
 
 
@@ -244,7 +244,8 @@ RUN_TYPES = frozenset({
     "SHATTER_RUN", "PARAGON_RUN", "SEED_RUN", "POSITIVE_CS_RUN",
     "MATURE_ENDGAME_RUN",
 })
-ACTIVE_RUN_TYPES = frozenset({"FIRST_RUN", "PRICE_RATIO_RUN", "PARAGON_RUN"})
+ACTIVE_RUN_TYPES = frozenset({"FIRST_RUN", "PRICE_RATIO_RUN", "PARAGON_RUN",
+                              "CHALLENGE_RUN"})
 
 # Taktische Varianten je Makroplan (Spec 8.3 Schritt 3): invest-Anteil der
 # Projektions-Politik. Namen sind zugleich der deterministische Tie-Break
@@ -259,16 +260,32 @@ RUN_VARIANTS: tuple[tuple[str, float], ...] = (
 def _admissible_run_types(snap: dict) -> list[str]:
     """Zulässigkeitsregeln wie die bisherige feste Ableitung (M3-Umfang):
     FIRST_RUN nur ohne persistenten Fortschritt; PRICE_RATIO_RUN solange
-    die Metaphysics-Kette offen ist; PARAGON_RUN sonst."""
+    die Metaphysics-Kette offen ist; PARAGON_RUN sonst.
+
+    CHALLENGE_RUN (Spec 18): Läuft bereits eine Challenge, ist der Run
+    gebunden — die Spielregeln sind für den ganzen Run geändert, das
+    18.4-Reset-Gate übernimmt (nur CHALLENGE_RUN zulässig). Sonst ist
+    CHALLENGE_RUN ZUSÄTZLICH zulässig, wenn eine unerledigte Challenge mit
+    positivem ChallengeValue existiert (challenge.best_challenge) UND
+    Challenges für den Spieler erreichbar sind (Adjustment-Bureau-Perk /
+    Challenges-Tab, gamefiles/game.js:2680) — dann wäre sie nach dem
+    nächsten Reset aktivierbar (pending → active, game.js:5136-5141)."""
+    if challenge.active_challenge(snap) is not None:
+        return ["CHALLENGE_RUN"]
     prestige = snap.get("prestige", {})
     persistent = (prestige.get("paragon", 0) + prestige.get("burnedParagon", 0)
                   + prestige.get("karma", 0))
     any_perk = any(p["researched"] for p in prestige.get("perks", []))
     if persistent <= 0 and not any_perk:
-        return ["FIRST_RUN"]
-    if next_metaphysics_target(snap) is not None:
-        return ["PRICE_RATIO_RUN"]
-    return ["PARAGON_RUN"]
+        base = ["FIRST_RUN"]
+    elif next_metaphysics_target(snap) is not None:
+        base = ["PRICE_RATIO_RUN"]
+    else:
+        base = ["PARAGON_RUN"]
+    if challenge.challenges_available(snap) \
+            and challenge.best_challenge(snap) is not None:
+        base.append("CHALLENGE_RUN")
+    return base
 
 
 def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
@@ -280,9 +297,21 @@ def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
                      + Projektion ≥ Preis) UND Metaphysics erforschbar war.
     PARAGON_RUN:     Paragonrate pro Realzeit, als Restzeit normiert über
                      die Zeit für MIN_PARAGON_GAIN Paragon (vergleichbar).
+    CHALLENGE_RUN:   geschätzte Completion-Zeit der (aktiven bzw. besten)
+                     Challenge — Referenzkonstante aus challenge.py, bewusst
+                     KONSERVATIV (Stunden), damit CHALLENGE_RUN nur gewinnt,
+                     wenn PRICE_RATIO/PARAGON schlechter scoren (Spec 18.2).
     """
     if run_type == "FIRST_RUN":
         return proj.paragon_eta(FIRST_RESET_MIN_PARAGON)
+    if run_type == "CHALLENGE_RUN":
+        act = challenge.active_challenge(snap)
+        if act is not None:
+            return challenge.est_completion_s(act["name"])
+        best = challenge.best_challenge(snap)
+        if best is None:
+            return math.inf
+        return challenge.est_completion_s(best[0])
     if run_type == "PRICE_RATIO_RUN":
         perk = next_metaphysics_target(snap)
         if perk is None:
@@ -333,7 +362,11 @@ def determine_run_plan(snap: dict) -> tuple[str, str | None, dict]:
     # Horizont unerreichbar ist (Spec 8.2 „sonst/zusätzlich") — aber nur,
     # wenn er selbst eine endliche Restzeit hat (sonst bleibt das alte
     # Verhalten: Price-Ratio-Kette hat Vorrang, solange sie offen ist).
-    if admissible == ["PRICE_RATIO_RUN"] and math.isinf(best["restzeit"]):
+    # Auch mit zusätzlich zulässigem CHALLENGE_RUN bleibt der Fallback:
+    # PARAGON konkurriert dann regulär gegen die Challenge-Restzeit.
+    if "PRICE_RATIO_RUN" in admissible and "PARAGON_RUN" not in admissible \
+            and all(math.isinf(r["restzeit"]) for r in rows
+                    if r["runType"] == "PRICE_RATIO_RUN"):
         extra = _score_plans(snap, ["PARAGON_RUN"], horizon)
         if any(math.isfinite(r["restzeit"]) for r in extra):
             rows += extra

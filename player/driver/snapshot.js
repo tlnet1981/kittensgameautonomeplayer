@@ -318,6 +318,71 @@
         };
     });
 
+    section("policies", () => {
+        // Policies (Spec 13.4 / I-07): game.science.policies (science.js:850 ff).
+        // blocked = eine exklusive Alternative wurde zuerst erforscht — bleibt
+        // bis zum Reset gesperrt (science.js:847-849). Effektivpreise wie
+        // PolicyBtnController.getPrices: ×1.25^policyFakeBought (Pacifism).
+        if (!g.science || !g.science.policies) { return; }
+        let fake = 0;
+        try { fake = g.getEffect("policyFakeBought") || 0; } catch (e) { /* optional */ }
+        out.policies = [];
+        for (const p of g.science.policies) {
+            if (!p.unlocked && !p.researched && !p.blocked) { continue; }
+            out.policies.push({
+                name: p.name,
+                label: p.label,
+                researched: !!p.researched,
+                blocked: !!p.blocked,
+                unlocked: !!p.unlocked,
+                // Exklusive Alternativen (I-07-Bewertung):
+                blocks: (p.blocks || []).slice(),
+                prices: (p.prices || []).map(x => ({
+                    name: x.name,
+                    val: x.val * Math.pow(1.25, fake),
+                })),
+            });
+        }
+    });
+
+    section("challenges", () => {
+        // Challenges (Spec Kap. 18): game.challenges.challenges (challenges.js:42 ff).
+        // researched = Erstabschluss, on = Anzahl Abschlüsse, active = läuft
+        // gerade, pending = beim nächsten Reset aktivieren (challenges.js:508-514).
+        if (!g.challenges || !g.challenges.challenges) { return; }
+        const list = [];
+        for (const c of g.challenges.challenges) {
+            if (!c.unlocked && !c.researched && !(c.on > 0) && !c.active) { continue; }
+            list.push({
+                name: c.name,
+                label: c.label,
+                researched: !!c.researched,
+                on: c.on || 0,
+                unlocked: !!c.unlocked,
+                active: !!c.active,
+                pending: !!c.pending,
+            });
+        }
+        let anyActive = list.some(c => c.active);
+        try {
+            if (typeof g.challenges.anyChallengeActive === "function") {
+                anyActive = !!g.challenges.anyChallengeActive();
+            }
+        } catch (e) { /* optional */ }
+        let reservesExist = false;
+        try {
+            reservesExist = !!(g.challenges.reserves
+                && g.challenges.reserves.reservesExist
+                && g.challenges.reserves.reservesExist());
+        } catch (e) { /* optional */ }
+        out.challenges = {
+            list: list,
+            anyActive: anyActive,
+            countPending: list.filter(c => c.pending).length,
+            reservesExist: reservesExist,
+        };
+    });
+
     section("effects", () => {
         // Basis-Catnip-Produktion der Felder (pro Tick, vor Saison-Modifier).
         // Grundlage der Worst-Winter-Reserverechnung (Spec 7.2).

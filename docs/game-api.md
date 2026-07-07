@@ -54,6 +54,20 @@ zuerst hier prüfen, welche Zugriffe sich geändert haben. Alle Zugriffe laufen
 | `game.workshop.upgrades` | Array wie techs |
 | `game.workshop.crafts` | Craft-Rezepte `{name, label, prices, unlocked}` |
 
+## Policies / Challenges
+
+| Zugriff | Bedeutung |
+|---|---|
+| `game.science.policies` | Array `{name, label, researched, blocked, unlocked, blocks, prices}` (science.js:850) — `blocked` = exklusive Alternative zuerst erforscht, bis zum Reset gesperrt |
+| `game.getEffect("policyFakeBought")` | Pacifism-Preisaufschlag: Effektivpreis = `val × 1.25^n` (PolicyBtnController.getPrices) |
+| `game.science.getPolicy(name)` | einzelne Policy (science.js:2251) |
+| `new classes.ui.PolicyBtnController(game)` + `fetchModel({id})` + `buyItem(model, {boughtByQueue: true})` | Policy-Kauf über die echte Spiel-Logik inkl. blocks-Propagation; `boughtByQueue` überspringt den Confirm-Dialog (science.js:2513) |
+| `game.challenges.challenges` | Array `{name, label, researched, on, unlocked, active, pending}` (challenges.js:42) — `researched` = Erstabschluss, `on` = Abschlusszahl |
+| `game.challenges.getChallenge(name)` / `anyChallengeActive()` / `getCountPending()` | Einzelzugriff/Statusabfragen (challenges.js:599-626) |
+| `challenge.pending = true` | Vormerkung; `_resetInternal` wandelt pending → active (game.js:5136-5141). Achtung: der Challenge-BUTTON toggelt (challenges.js:885-891), Iron Will resettet sofort |
+| `game.challenges.reserves.reservesExist()` | Reserven aus Challenge-Resets vorhanden? |
+| Challenges-Tab | sichtbar erst mit Adjustment-Bureau-Perk (game.js:2680) |
+
 ## Sonstiges
 
 | Zugriff | Bedeutung |
@@ -66,7 +80,7 @@ zuerst hier prüfen, welche Zugriffe sich geändert haben. Alle Zugriffe laufen
 
 | Selektor | Bedeutung |
 |---|---|
-| `a.tab.<TabId>` | Spiel-Tabs (`Bonfire`, `Village`, `Science`, `Workshop`, `Trade`, `Religion`, `Space`, `Time`); aktiver Tab trägt zusätzlich `activeTab`; unsichtbare Tabs fehlen im DOM |
+| `a.tab.<TabId>` | Spiel-Tabs (`Bonfire`, `Village`, `Science`, `Workshop`, `Trade`, `Religion`, `Space`, `Time`, `Challenges`); aktiver Tab trägt zusätzlich `activeTab`; unsichtbare Tabs fehlen im DOM |
 | `div.btn` | alle Aktions-Buttons; deaktivierte tragen `disabled` |
 | `div.btn .btnTitle` | Button-Beschriftung (z. B. „Catnip field") — Matching per `startsWith` |
 

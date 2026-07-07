@@ -35,6 +35,8 @@ def make_snap(
     races: list[dict] | None = None,
     trade_ratio: float = 0.0,
     standing_ratio: float = 0.0,
+    policies: list[dict] | None = None,
+    challenges: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Erzeugt einen Snapshot im Format von driver/snapshot.js (inkl. derived)."""
     res_list = []
@@ -96,5 +98,35 @@ def make_snap(
         snap["diplomacy"] = {
             "undiscovered": False, "races": races,
             "standingRatio": standing_ratio, "tradeRatio": trade_ratio,
+        }
+    # Optionale Policy-Daten (Format wie snapshot.js `policies`): nur setzen,
+    # wenn der Test sie übergibt — Alt-Tests bleiben unverändert (kein Key).
+    if policies is not None:
+        snap["policies"] = [{
+            "name": p["name"],
+            "label": p.get("label", p["name"].capitalize()),
+            "researched": p.get("researched", False),
+            "blocked": p.get("blocked", False),
+            "unlocked": p.get("unlocked", True),
+            "blocks": p.get("blocks", []),
+            "prices": [{"name": k, "val": v}
+                       for k, v in p.get("prices", {}).items()],
+        } for p in policies]
+    # Optionale Challenge-Daten (Format wie snapshot.js `challenges`):
+    if challenges is not None:
+        lst = [{
+            "name": c["name"],
+            "label": c.get("label", c["name"].capitalize()),
+            "researched": c.get("researched", False),
+            "on": c.get("on", 0),
+            "unlocked": c.get("unlocked", True),
+            "active": c.get("active", False),
+            "pending": c.get("pending", False),
+        } for c in challenges]
+        snap["challenges"] = {
+            "list": lst,
+            "anyActive": any(c["active"] for c in lst),
+            "countPending": sum(1 for c in lst if c["pending"]),
+            "reservesExist": False,
         }
     return derive(snap)

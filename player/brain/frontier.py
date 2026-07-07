@@ -36,12 +36,6 @@ class Frontier:
     prompt: str         # Fertiger Prompt für die nächste Claude-Code-Session
 
 
-def _perks_done(snap: dict) -> bool:
-    from .meta import METAPHYSICS_ORDER
-    perks = {p["name"]: p for p in snap.get("prestige", {}).get("perks", [])}
-    return all(perks.get(n, {}).get("researched") for n in METAPHYSICS_ORDER)
-
-
 def _ziggurat_upgrade_val(snap: dict, name: str) -> int:
     for z in snap.get("religion", {}).get("ziggurat", []):
         if z["name"] == name:
@@ -49,52 +43,10 @@ def _ziggurat_upgrade_val(snap: dict, name: str) -> int:
     return 0
 
 
+# Umgesetzte (entfernte) Frontiers: „policies“ (Spec 13.4/I-07 →
+# brain/policy.py + tactics._policy_candidates) und „challenges“ (Spec 18 →
+# brain/challenge.py, CHALLENGE_RUN in meta.py, 18.4-Reset-Gate in reset.py).
 FRONTIERS: list[Frontier] = [
-    Frontier(
-        id="policies",
-        title="Policies verfügbar — Agent wählt keine",
-        trigger=lambda snap, run: A.tech_researched(snap, "civil"),
-        happening=("Civil Service ist erforscht — im Science-Tab gibt es jetzt das "
-                   "Policies-Panel mit exklusiven Regierungs-Entscheidungen."),
-        missing=("Der Agent wählt bewusst keine Policies: sie sind exklusiv und "
-                 "irreversibel (z. B. Monarchy vs. Republic). Die Boni bleiben "
-                 "ungenutzt — das kostet auf Dauer Produktionsgeschwindigkeit."),
-        where=("Spielmechanik-Spec Kap. 13.4 (Kontext-Tabelle mit Startkandidaten je "
-               "Run-Typ) und Invariante I-07. Umsetzungsrezept: docs/brain.md → "
-               "„Erweitern\". Actor kann Panels bereits gezielt ansteuern "
-               "(player/driver/actor.py, Panel-Scoping)."),
-        prompt=("Erweitere den Kittens-Player um automatische Policy-Wahl (Spec 13.4): "
-                "Snapshot-Sektion für game.science.policies (oder passenden Ort in "
-                "v1.5.0.2 verifizieren), Ziel-Art 'policy' in player/brain/tactics.py, "
-                "Kontext-Tabelle aus Spec 13.4 als Auswahlregel je Run-Typ, Kandidaten "
-                "mit irreversible=True und Panel-Scoping im Actor. Invariante I-07 "
-                "beachten: exklusive Alternativen im DecisionRecord dokumentieren. "
-                "Tests auf Snapshot-Fixtures ergänzen."),
-    ),
-    Frontier(
-        id="challenges",
-        title="Challenge-Runs würden jetzt Wert bringen",
-        trigger=lambda snap, run: run == "PARAGON_RUN",
-        happening=("Die Metaphysics-Grundkette ist komplett — der Agent fährt jetzt "
-                   "Paragon-Speedruns. Ab hier bringen Challenge-Erstabschlüsse "
-                   "(Winter Challenge, Anarchy, …) permanente Belohnungen, die "
-                   "Paragon-Runs überlegen sind."),
-        missing=("Der Agent aktiviert keine Challenges: sie ändern die Spielregeln "
-                 "des ganzen Runs (z. B. permanenter Winter) und brauchen eigene "
-                 "Safety-/Taktik-Anpassungen."),
-        where=("Spielmechanik-Spec Kap. 18 (Challenge-Profile, Auswahlregel 18.2, "
-               "Kombinationen, Challenge-Reset 18.4) und Kap. 8.2 CHALLENGE_RUN. "
-               "Spielcode: gamefiles/js/challenges.js. Rezept: docs/brain.md."),
-        prompt=("Erweitere den Kittens-Player um Challenge-Runs (Spec Kap. 18): "
-                "Snapshot-Sektion für game.challenges (Katalog, aktiv, pending, "
-                "Erstabschluss-Flags), Challenge-Aktivierung als irreversible Aktion "
-                "vor dem Reset (ACTIVATE_CHALLENGE, Anhang B), Run-Typ CHALLENGE_RUN "
-                "im Meta-Controller mit Auswahlregel 18.2 (größte Reduktion der "
-                "Restzeit zuerst, einfache Erstabschlüsse wie Winter zuerst), "
-                "challenge-spezifische Safety-Anpassungen (z. B. Winter: "
-                "Worst-Case-Catnip dauerhaft), Reset-Gate 'Challenge-Ziel erfüllt' "
-                "(18.4). Cockpit: Challenge-Briefing-Panel (Cockpit-Spec Kap. 15)."),
-    ),
     Frontier(
         id="transcend",
         title="Transcendence lohnt sich — TAP ist unvollständig",

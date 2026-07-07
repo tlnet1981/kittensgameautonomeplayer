@@ -20,7 +20,7 @@ from typing import Any
 
 from player.state import access as A
 from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
-from . import actions, chrono, shadow
+from . import actions, chrono, policy, shadow
 from .records import Candidate
 
 # Verbrauch eines Kittens (0,85 Catnip/Tick × 5 Ticks/s), Fallback für die
@@ -81,7 +81,7 @@ WAIT_SCORE = 0.01
 # sie fließen NICHT additiv in den Score ein; netValue geht normiert ein.
 SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue",
                     "tradeValue", "huntValue", "praiseValue",
-                    "storageB", "storageC", "leaderValue")
+                    "storageB", "storageC", "leaderValue", "policyValue")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -210,6 +210,7 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     _energy_candidates(snap, cands, lam, horizon)
     _leader_candidate(snap, cands, lam, goal_prices, horizon)
     _upgrade_candidates(snap, cands, lam)
+    _policy_candidates(snap, meta_view.run_type, cands, lam, horizon)
     _hunt_candidate(snap, cands, lam)
     _craft_candidates(snap, target, bn, cands, lam)
     _trade_candidates(snap, bn, cands, lam)
@@ -996,6 +997,30 @@ def _upgrade_candidates(snap, cands, lam=None) -> None:
                                1.4, comp))
 
 
+# ---------------------------------------------------------------- Policies (13.4)
+
+def _policy_candidates(snap, run_type, cands, lam, horizon) -> None:
+    """Policy-Kandidat (Spec 13.4 + I-07): höchstens EINE Policy pro Zyklus
+    (Chargenregel 10.5 — Policies sind irreversibel, keine Batches).
+
+    Kandidat wird nur die aktuell beste unblockierte, bezahlbare Policy mit
+    positivem PolicyValue, die die I-07-Prüfung besteht (PolicyValue ≥ Wert
+    jeder ausgeschlossenen Alternative über den Restplan-Horizont — die
+    Auswahl inkl. 13.4-Prior liegt in brain/policy.py). Ohne policies-Daten
+    im Snapshot oder ohne λ-Daten entsteht kein Kandidat (Fallback)."""
+    best = policy.best_policy(snap, run_type, lam, horizon)
+    if best is None:
+        return
+    pol, value, alt_values = best
+    alt_txt = ", ".join(f"{n}: {v:.0f}s" for n, v in sorted(alt_values.items()))
+    act = actions.select_policy(pol["name"], pol.get("label") or pol["name"],
+                                prices=pol.get("prices"))
+    if alt_txt:
+        act.expected += f" — Alternativen bewertet: {alt_txt}"
+    comp = {"policy": 1.5, "policyValue": value}   # policyValue: s-Wert, Anzeige
+    cands.append(Candidate(act, _score(comp), comp))
+
+
 # ---------------------------------------------------------------- Jagd
 
 # Jagd-Ergebnisverteilung (Spec 14.2) — Referenzwerte Kittens Game 1.5.0.2,
@@ -1558,6 +1583,8 @@ REASON_TEMPLATES = {
     "costTime": "{label} kostet Ziel-Sekunden (Schattenpreis-Bewertung).",
     "jobScore": "{label} maximiert den Zielzeitgewinn pro Kitten (JobScore 12.2).",
     "csValue": "{label}: Carryover-Sekundenwert der nächsten Chronosphere (CS-Suche 19.1).",
+    "policy": "{label}: beste Policy des Kontexts, I-07 gegen alle Alternativen geprüft (13.4).",
+    "policyValue": "{label}: λ-bewerteter Modifikator-Gewinn über den Restplan-Horizont (13.4).",
     "tradeValue": "{label}: positiver Handels-Erwartungswert über die Ergebnisverteilung (TradeValue 14.1).",
     "huntValue": "{label}: erwartete Beute ist jetzt mehr wert als das Warten auf einen größeren Batch (14.2).",
     "praiseValue": "{label}: drohender Faith-Cap-Verlust wiegt schwerer als das Halten (15.1).",

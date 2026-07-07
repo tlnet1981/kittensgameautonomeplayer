@@ -214,6 +214,36 @@ def buy_perk(name: str, label: str, prices: list[dict] | None = None) -> Action:
     )
 
 
+def select_policy(name: str, label: str, prices: list[dict] | None = None) -> Action:
+    """Exklusive Policy wählen — irreversibel (Spec 7.4/13.4/I-07): die
+    `blocks`-Alternativen sind danach bis zum Reset gesperrt
+    (gamefiles/js/science.js:847-849). Panel-Scoping im Actor beachten
+    (Policy „Diplomacy" vs. Metaphysics-Perk „Diplomacy", actor.py)."""
+    deltas = price_deltas(prices)
+    return Action(
+        id=f"policy:{name}", type="SELECT_POLICY",
+        label=f"Policy wählen: {label}",
+        exec_spec={"kind": "select_policy", "name": name, "label": label},
+        expected=f"Policy {label} aktiv — exklusive Alternativen blockiert (I-07 geprüft)",
+        irreversible=True, atomicity=IRREVERSIBLE,
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
+    )
+
+
+def activate_challenge(name: str, label: str) -> Action:
+    """Challenge als pending vormerken — irreversibel behandelt (Spec 7.4):
+    der Reset wandelt pending → active (gamefiles/game.js:5136-5141), danach
+    gelten die Challenge-Regeln für den ganzen Folgerun. Kostenlos
+    (ChallengeBtnController.buyItem: „item-is-free", challenges.js:877-883)."""
+    return Action(
+        id=f"challenge:{name}", type="ACTIVATE_CHALLENGE",
+        label=f"Challenge vormerken: {label} (pending für den nächsten Run)",
+        exec_spec={"kind": "activate_challenge", "name": name, "label": label},
+        expected=f"Challenge {label} ist pending und wird beim Reset aktiv",
+        irreversible=True, atomicity=IRREVERSIBLE,
+    )
+
+
 def reset_run() -> Action:
     return Action(
         id="reset:run", type="RESET",
