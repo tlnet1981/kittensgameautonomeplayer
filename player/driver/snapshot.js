@@ -220,12 +220,66 @@
                     val: p.val * Math.pow(u.priceRatio || 1, u.val || 0),
                 })),
             }));
+        // ACHTUNG Namenstrennung (religion.js): religion.faith ist der
+        // WORSHIP-Pool, religion.faithRatio die EPIPHANY; der Live-Faith-
+        // Pool ist die resPool-Ressource "faith" (religion.js:1569-1622).
+        const guard = (fn, fallback) => { try { return fn(); } catch (e) { return fallback; } };
         out.religion = {
             worship: worship,                    // "Total faith" = Worship-Pool
             epiphany: g.religion.faithRatio,     // permanenter Faith-Bonus
+            faith: guard(() => g.resPool.get("faith").value, 0),  // Live-Pool
             transcendenceTier: g.religion.transcendenceTier || 0,
+            // Apocrypha (sic — Spielname "apocripha", religion.js:1199) und
+            // sein Bonus über die offizielle API (religion.js:1523-1525):
+            apocrypha: {
+                on: guard(() => !!g.religion.getRU("apocripha").on, false),
+                bonus: guard(() => g.religion.getApocryphaBonus(), 0),
+            },
+            transcendenceOn: guard(() => !!g.religion.getRU("transcendence").on, false),
+            // Epiphany-Preis des nächsten Tiers (religion.js:1659-1661):
+            transcendenceNextPrice: guard(() => g.religion._getTranscendNextPrice(), null),
+            // TC je 25 geopferten Alicorns = 1 + tcRefineRatio (religion.js:3040):
+            tcRefineRatio: guard(() => g.getEffect("tcRefineRatio") || 0, 0),
             upgrades: mapUpgrades(g.religion.religionUpgrades, true),
             ziggurat: mapUpgrades(g.religion.zigguratUpgrades, false),
+        };
+    });
+
+    section("pacts", () => {
+        // Pacts & Necrocorn-Ökonomie (Spec 15.5): religion.pactsManager
+        // (religion.js pactsManager). Die Sektion existiert NUR, wenn die
+        // Pact-Schicht erreichbar ist (ein Pact unlocked/gekauft oder
+        // Schuld vorhanden) — vorher fehlt der Key komplett.
+        const rel = g.religion;
+        const pm = rel && rel.pactsManager;
+        if (!pm || !pm.pacts) { return; }
+        const anyRelevant = pm.pacts.some(p => p.unlocked || (p.val > 0))
+            || (pm.necrocornDeficit || 0) > 0;
+        if (!anyRelevant) { return; }
+        const getEff = (n) => { try { return g.getEffect(n) || 0; } catch (e) { return 0; } };
+        const tryBool = (fn) => { try { return !!fn(); } catch (e) { return false; } };
+        out.pacts = {
+            list: pm.pacts.map(p => ({
+                name: p.name, label: p.label,
+                val: p.val || 0, on: p.on || 0,
+                unlocked: !!p.unlocked,
+                special: !!p.special,               // payDebt/fractured
+                // priceRatio ist bei Pacts fest 1 (pactsManager.constructor):
+                prices: (p.prices || []).map(x => ({ name: x.name, val: x.val })),
+            })),
+            necrocorns: (g.resPool.get("necrocorn") || {}).value || 0,
+            necrocornDeficit: pm.necrocornDeficit || 0,
+            pactsAvailable: getEff("pactsAvailable"),
+            // Gesamtverbrauch/Tag (negativ, religion.js effectsBase 1459):
+            necrocornPerDay: getEff("necrocornPerDay"),
+            necrocornUpfrontCost: getEff("pactNecrocornUpfrontCost"),
+            // Siphoning-Policy aktiv? (religion.js:374-392, Policy science.js):
+            siphoning: tryBool(() => g.science.getPolicy("siphoning").researched),
+            fractured: tryBool(() => rel.getPact("fractured").on > 0),
+            // Debt-Penalty-Faktor 1…0 (religion.js getDebtPenaltyRatio):
+            deficitPenaltyRatio: (() => {
+                try { return pm.getDebtPenaltyRatio(); } catch (e) { return 1; }
+            })(),
         };
     });
 

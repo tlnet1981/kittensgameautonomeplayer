@@ -317,6 +317,61 @@ def adore() -> Action:
     )
 
 
+def transcend() -> Action:
+    """Transcend: Epiphany → Transcendence Tier (Spec 15.2, irreversibel per
+    7.4). Kostet _getTranscendNextPrice() Epiphany (religion.js:1624-1653);
+    läuft NUR in der Pre-Reset-Transaktion, nie im normalen Zyklus."""
+    return Action(
+        id="religion:transcend", type="TRANSCEND",
+        label="Transcend (Epiphany → Transcendence Tier)",
+        exec_spec={"kind": "transcend"},
+        expected="Transcendence Tier +1, Epiphany sinkt um den Tier-Preis",
+        irreversible=True, atomicity=IRREVERSIBLE,
+    )
+
+
+def convert_alicorns(batches: int = 1) -> Action:
+    """Alicorns → Time Crystals (Spec 15.4, irreversibel per 7.4):
+    25 Alicorns je Batch → (1 + tcRefineRatio) TC (religion.js:3028-3049).
+    Der TC-Gewinn hängt am Live-Effekt und fehlt deshalb in der Prognose."""
+    return Action(
+        id="religion:convertAlicorns", type="CONVERT_ALICORNS",
+        label=f"Konvertiere Alicorns → Time Crystals ({batches}× 25)",
+        exec_spec={"kind": "convert_alicorns", "batches": batches},
+        expected=f"-{batches * 25} Alicorns → +{batches}× (1+tcRefineRatio) TC",
+        batch=batches, irreversible=True, atomicity=IRREVERSIBLE,
+        predicted={"deltas": {"alicorn": -25.0 * batches}, "stochastic": False},
+    )
+
+
+def refine_tears(batches: int = 1) -> Action:
+    """Tears → Black Liquid Sorrow (Spec 15.3, irreversibel per 7.4):
+    10 000 Tears je Batch → 1 BLS, Sorrow-Cap-gated (religion.js:2262-2311)."""
+    return Action(
+        id="religion:refineTears", type="REFINE_TEARS",
+        label=f"Refine Tears → Black Liquid Sorrow ({batches}×)",
+        exec_spec={"kind": "refine_tears", "batches": batches},
+        expected=f"-{batches * 10000} Tears → +{batches} BLS",
+        batch=batches, irreversible=True, atomicity=IRREVERSIBLE,
+        predicted={"deltas": {"tears": -10000.0 * batches,
+                              "sorrow": float(batches)}, "stochastic": False},
+    )
+
+
+def buy_pact(name: str, label: str, prices: list[dict] | None = None) -> Action:
+    """Pact kaufen (Spec 15.5, irreversibel per 7.4): 100 Relic, danach
+    dauerhafter Necrocorn-Upkeep (religion.js pactsManager)."""
+    deltas = price_deltas(prices)
+    return Action(
+        id=f"pact:{name}", type="BUY_PACT",
+        label=f"Pact schließen: {label}",
+        exec_spec={"kind": "buy_pact", "name": name, "label": label},
+        expected=f"{label} aktiv — dauerhafter Necrocorn-Upkeep beginnt",
+        irreversible=True, atomicity=IRREVERSIBLE,
+        predicted={"deltas": deltas, "stochastic": False} if deltas else None,
+    )
+
+
 def festival() -> Action:
     return Action(
         id="festival:hold", type="FESTIVAL",

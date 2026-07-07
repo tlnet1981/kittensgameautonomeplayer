@@ -20,7 +20,7 @@ from typing import Any
 
 from player.state import access as A
 from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
-from . import actions, chrono, policy, shadow
+from . import actions, chrono, policy, religion, shadow
 from .records import Candidate
 
 # Verbrauch eines Kittens (0,85 Catnip/Tick × 5 Ticks/s), Fallback für die
@@ -81,7 +81,8 @@ WAIT_SCORE = 0.01
 # sie fließen NICHT additiv in den Score ein; netValue geht normiert ein.
 SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue",
                     "tradeValue", "huntValue", "praiseValue",
-                    "storageB", "storageC", "leaderValue", "policyValue")
+                    "storageB", "storageC", "leaderValue", "policyValue",
+                    "tapValue", "pactValue")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -217,6 +218,7 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     _praise_candidate(snap, cands, lam, horizon)
     _festival_candidate(snap, cands)
     _religion_candidates(snap, target, cands)
+    _religion_ev_candidates(snap, cands, lam, horizon)
     _space_building_candidates(snap, bn, cands)
     _time_candidates(snap, cands)
     _wait_candidate(snap, bn, cands, meta_view)
@@ -1235,6 +1237,71 @@ def _religion_candidates(snap, target, cands) -> None:
         cands.append(Candidate(actions.sacrifice_unicorns(), 1.5, {"economy": 1.5}))
 
 
+def _religion_ev_candidates(snap, cands, lam, horizon) -> None:
+    """EV-Kandidaten der Religion-Endgame-Ökonomie (Spec 15.4/15.5).
+
+    Transcend läuft bewusst NICHT hier: die TAP-Transaktion gehört
+    ausschließlich in die Pre-Reset-Transaktion (Spec 15.2,
+    reset.execute_reset Schritt 5). Hier laufen nur die Grenzwert-
+    Konvertierungen (Alicorn→TC, Tears→BLS) und die Pact-Ökonomie —
+    jeweils mit Sekundenwert-Komponente (tapValue/pactValue) als
+    Anzeige, netValue-frei (Score über die economy-Komponente)."""
+    lam = lam or {}
+
+    # Alicorns → Time Crystals (15.4, λ-Grenzwertregel + Anachronomancy):
+    due, det = religion.alicorn_conversion_due(snap, lam)
+    if due and det["batches"] >= 1:
+        comp = {"economy": 1.2, "tapValue": det["gainS"] - det["keepS"]}
+        cands.append(Candidate(actions.convert_alicorns(det["batches"]),
+                               _score(comp), comp))
+
+    # Tears → Black Liquid Sorrow (15.3, Grenzwertregel analog):
+    due, det = religion.tears_refine_due(snap, lam)
+    if due and det["batches"] >= 1:
+        comp = {"economy": 1.0, "tapValue": det["gainS"] - det["keepS"]}
+        cands.append(Candidate(actions.refine_tears(det["batches"]),
+                               _score(comp), comp))
+
+    # Pacts (15.5): Kauf nur bei positivem PactValue UND vorhandenen
+    # Snapshot-Daten (pact_value liefert sonst None — Schicht inaktiv).
+    pacts = snap.get("pacts")
+    if isinstance(pacts, dict) and (pacts.get("pactsAvailable") or 0) > 0:
+        for p in pacts.get("list", []):
+            if not p.get("unlocked") or p.get("special"):
+                continue
+            if p.get("name") not in religion.PACT_UTILITY_RATIO:
+                continue
+            if not A.affordable(snap, p.get("prices") or []):
+                continue
+            pv = religion.pact_value(snap, p["name"], lam, horizon)
+            if not pv or not pv.get("positive"):
+                continue
+            comp = {"economy": 1.0, "pactValue": pv["pactValueS"]}
+            cands.append(Candidate(
+                actions.buy_pact(p["name"], p.get("label") or p["name"],
+                                 p.get("prices")),
+                _score(comp), comp))
+
+    # Siphoning (15.5): Policy nur, wenn die Schuldkosten-Reduktion den
+    # unmittelbaren Necrocorn-Nutzen übersteigt (religion.siphoning_due,
+    # sonst dokumentiert konservativ AUS). Kauf über den Policy-Weg
+    # (I-07-Prüfung im echten Controller, BUY_POLICY_JS).
+    due, det = religion.siphoning_due(snap, lam)
+    if due:
+        pol = next((q for q in snap.get("policies") or []
+                    if q.get("name") == "siphoning"), None)
+        if pol and pol.get("unlocked") and not pol.get("researched") \
+                and not pol.get("blocked") \
+                and A.affordable(snap, pol.get("prices") or []):
+            comp = {"policy": 1.0,
+                    "pactValue": det["reductionS"] - det["foregoneS"]}
+            cands.append(Candidate(
+                actions.select_policy("siphoning",
+                                      pol.get("label") or "Siphoning",
+                                      pol.get("prices")),
+                _score(comp), comp))
+
+
 # ---------------------------------------------------------------- Space
 
 # Welche Planeten-Gebäude produzieren was (für Engpass-Kopplung):
@@ -1588,6 +1655,8 @@ REASON_TEMPLATES = {
     "tradeValue": "{label}: positiver Handels-Erwartungswert über die Ergebnisverteilung (TradeValue 14.1).",
     "huntValue": "{label}: erwartete Beute ist jetzt mehr wert als das Warten auf einen größeren Batch (14.2).",
     "praiseValue": "{label}: drohender Faith-Cap-Verlust wiegt schwerer als das Halten (15.1).",
+    "tapValue": "{label}: λ-Grenzwert der Konvertierung übersteigt den Haltewert (15.3/15.4).",
+    "pactValue": "{label}: PactValue = ΔBPU − Debt − Upkeep − Necrocorn-Alternativwert > 0 (15.5).",
     "base": "{label}",
 }
 

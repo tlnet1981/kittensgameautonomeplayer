@@ -160,6 +160,108 @@ SET_CHALLENGE_PENDING_JS = """
 }
 """
 
+# Transcend (Spec 15.2) OHNE UI-Confirm: religion.transcend()
+# (gamefiles/js/religion.js:1624-1653) läuft komplett in game.ui.confirm —
+# hier laufen exakt die Kernschritte des Confirm-Callbacks: Preisprüfung
+# (faithRatio > _getTranscendNextPrice, strikt), Epiphany abziehen,
+# tcratio/transcendenceTier erhöhen, Effekte neu rechnen, Mausoleum-
+# Sonderfall (MAUSOLEUM_PACTS-Flag). Verifikation: before/after Tier.
+TRANSCEND_JS = """
+() => {
+    const g = window.gamePage || window.game;
+    const religion = g ? g.religion : null;
+    if (!religion) return { error: "no_religion" };
+    if (!religion.getRU("transcendence").on) return { error: "transcendence_missing" };
+    const before = religion.transcendenceTier;
+    const need = religion._getTranscendNextPrice();
+    if (!(religion.faithRatio > need)) {
+        return { error: "epiphany_insufficient", need: need, have: religion.faithRatio };
+    }
+    religion.faithRatio -= need;
+    religion.tcratio += need;
+    religion.transcendenceTier += 1;
+    g.calculateAllEffects();
+    if (g.getFeatureFlag && g.getFeatureFlag("MAUSOLEUM_PACTS")
+            && religion.getTU("mausoleum").val) {
+        religion.getZU("blackPyramid").cashPreDeficitEffects(g);
+    }
+    return { before: before, after: religion.transcendenceTier, paid: need };
+}
+"""
+
+# Alicorn-Opfer (Spec 15.4): der Button-Controller wird im Tab-Render
+# inline erzeugt (religion.js:3028-3049) und ist per API nicht erreichbar —
+# hier laufen die Kernschritte von TransformBtnController.transform
+# (religion.js:2131-2205): 25 Alicorns je Batch zahlen, (1 + tcRefineRatio)
+# TC je Batch gutschreiben, danach applyAtGain-Upgrade der Ziggurat-Kette.
+# Verifikation: before/after Time-Crystal-Bestand.
+CONVERT_ALICORNS_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    if (!g || !g.resPool) return { error: "no_game" };
+    const alicorn = g.resPool.get("alicorn");
+    const batches = Math.min(args.batches, Math.floor(alicorn.value / 25));
+    if (batches < 1) return { error: "not_enough_alicorns" };
+    const gainPer = 1 + g.getEffect("tcRefineRatio");
+    const before = g.resPool.get("timeCrystal").value;
+    g.resPool.addResEvent("alicorn", -25 * batches);
+    g.resPool.addResEvent("timeCrystal", gainPer * batches);
+    g.upgrade({ zigguratUpgrades: ["skyPalace", "unicornUtopia", "sunspire"] });
+    return { batches: batches, before: before,
+             after: g.resPool.get("timeCrystal").value };
+}
+"""
+
+# Tear-Refinement (Spec 15.3): Kernschritte von RefineTearsBtnController.
+# buyItem/refine (religion.js:2262-2311): je Batch 10 000 Tears zahlen,
+# sorrow.value++ — nur unterhalb des Sorrow-Caps. Verifikation: before/after.
+REFINE_TEARS_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    if (!g || !g.resPool) return { error: "no_game" };
+    const sorrow = g.resPool.get("sorrow");
+    const tears = g.resPool.get("tears");
+    const before = sorrow.value;
+    let done = 0;
+    for (let i = 0; i < args.batches; i++) {
+        if (tears.value < 10000) break;
+        if (sorrow.maxValue && sorrow.value >= sorrow.maxValue) break;
+        g.resPool.addResEvent("tears", -10000);
+        sorrow.value++;
+        done++;
+    }
+    if (!done) return { error: "nothing_refined" };
+    return { batches: done, before: before, after: sorrow.value };
+}
+"""
+
+# Pact-Kauf (Spec 15.5) über den ECHTEN Spiel-Controller (PactsBtnController,
+# religion.js:2404-2470): der prüft pactsAvailable, limitBuild und den
+# Upfront-Necrocorn-Preis (getPrices). Kein Confirm-Dialog in der Kette.
+# Verifikation: before/after pact.val.
+BUY_PACT_JS = """
+(args) => {
+    const g = window.gamePage || window.game;
+    const pact = g && g.religion ? g.religion.getPact(args.name) : null;
+    if (!pact) return { error: "not_found" };
+    if (!pact.unlocked) return { error: "locked" };
+    const before = pact.val;
+    try {
+        const ctrl = new com.nuclearunicorn.game.ui.PactsBtnController(g);
+        const model = ctrl.fetchModel({ id: args.name });
+        const result = ctrl.buyItem(model, {});
+        return {
+            bought: !!(result && result.itemBought),
+            reason: (result && result.reason) || null,
+            before: before,
+            after: g.religion.getPact(args.name).val,
+        };
+    } catch (e) {
+        return { error: "controller: " + (e && e.message) };
+    }
+}
+"""
+
 SHIFT_JOB_JS = """
 (args) => {
     const v = game.village;
@@ -201,6 +303,14 @@ class Actor:
                 return await self._praise()
             if kind == "adore":
                 return await self._adore()
+            if kind == "transcend":
+                return await self._transcend()
+            if kind == "convert_alicorns":
+                return await self._convert_alicorns(exec_spec)
+            if kind == "refine_tears":
+                return await self._refine_tears(exec_spec)
+            if kind == "buy_pact":
+                return await self._buy_pact(exec_spec)
             if kind == "shatter":
                 return await self._shatter(exec_spec)
             if kind == "toggle_building":
@@ -328,6 +438,76 @@ class Actor:
             "() => { if (!game.religion.getRU('apocripha').on) return false;"
             " game.religion.resetFaith(1.01, false); return true; }")
         return {"ok": bool(ok), "method": "js-fallback", "detail": "resetFaith(1.01)"}
+
+    async def _transcend(self) -> dict:
+        """Transcend (Spec 15.2): Religion-Tab sichtbar machen, Button glowen
+        (ohne Klick — der DOM-Weg hängt am Confirm-Dialog), dann die
+        Kernschritte über TRANSCEND_JS (religion.js:1624-1653). Verifikation:
+        before/after transcendenceTier."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": "Transcend", "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(TRANSCEND_JS)
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"transcend: {res['error']}"}
+        ok = res.get("after", 0) == res.get("before", 0) + 1
+        return {"ok": ok, "method": "js",
+                "detail": (f"Transcendence Tier {res.get('before')} → "
+                           f"{res.get('after')} (−{res.get('paid', 0):.4f} Epiphany)")}
+
+    async def _convert_alicorns(self, spec: dict) -> dict:
+        """Alicorns → TC (Spec 15.4) über CONVERT_ALICORNS_JS
+        (Kernschritte religion.js:2131-2205/3028-3049)."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": "Sacrifice alicorns", "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(CONVERT_ALICORNS_JS,
+                                          {"batches": int(spec.get("batches", 1))})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"convert_alicorns: {res['error']}"}
+        ok = res.get("after", 0) > res.get("before", 0)
+        return {"ok": ok, "method": "js",
+                "detail": (f"{res.get('batches')}× 25 Alicorns → TC "
+                           f"{res.get('before'):.1f} → {res.get('after'):.1f}")}
+
+    async def _refine_tears(self, spec: dict) -> dict:
+        """Tears → BLS (Spec 15.3) über REFINE_TEARS_JS
+        (Kernschritte religion.js:2262-2311, Sorrow-Cap-gated)."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": "Refine tears", "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(REFINE_TEARS_JS,
+                                          {"batches": int(spec.get("batches", 1))})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"refine_tears: {res['error']}"}
+        ok = res.get("after", 0) > res.get("before", 0)
+        return {"ok": ok, "method": "js",
+                "detail": (f"{res.get('batches')}× 10000 Tears → BLS "
+                           f"{res.get('before')} → {res.get('after')}")}
+
+    async def _buy_pact(self, spec: dict) -> dict:
+        """Pact kaufen (Spec 15.5): Religion-Tab, Glow, dann der echte
+        PactsBtnController (BUY_PACT_JS, religion.js:2404-2470).
+        Verifikation: before/after pact.val."""
+        await self._ensure_tab("Religion")
+        await self.browser.evaluate(FIND_AND_CLICK_BUTTON_JS, {
+            "title": spec.get("label") or spec["name"],
+            "glowMs": self.glow_ms, "click": False,
+        })
+        res = await self.browser.evaluate(BUY_PACT_JS, {"name": spec["name"]})
+        if res.get("error"):
+            return {"ok": False, "method": "js",
+                    "detail": f"buy_pact {spec['name']}: {res['error']}"}
+        ok = res.get("after", 0) > res.get("before", 0)
+        return {"ok": ok, "method": "js",
+                "detail": (f"Pact {spec['name']}: val {res.get('before')} → "
+                           f"{res.get('after')} ({res.get('reason') or 'ok'})")}
 
     async def _shatter(self, spec: dict) -> dict:
         """TC-Shatter über die exakte API (Batchgröße ist sicherheitsgeprüft)."""

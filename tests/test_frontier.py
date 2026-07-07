@@ -14,36 +14,32 @@ def test_fresh_game_triggers_nothing():
 
 
 def test_implemented_frontiers_removed():
-    # „policies" (Spec 13.4 → brain/policy.py) und „challenges" (Spec 18 →
-    # brain/challenge.py) sind umgesetzt — die Frontiers existieren nicht mehr
-    # und feuern auch bei ihren früheren Triggern nicht.
+    # „policies" (Spec 13.4 → brain/policy.py), „challenges" (Spec 18 →
+    # brain/challenge.py), „transcend" (Spec 15.2 → brain/religion.py +
+    # reset.execute_reset Schritt 5) und „pacts" (Spec 15.4/15.5 →
+    # brain/religion.py + tactics._religion_ev_candidates) sind umgesetzt —
+    # die Frontiers existieren nicht mehr und feuern auch bei ihren
+    # früheren Triggern nicht.
     ids = {f.id for f in frontier.FRONTIERS}
     assert "policies" not in ids
     assert "challenges" not in ids
+    assert "transcend" not in ids
+    assert "pacts" not in ids
     snap = make_snap(techs={"civil": {"researched": True, "prices": {"science": 1500}}})
     assert "policies" not in _ids(snap)
     assert "challenges" not in _ids(snap, run="PARAGON_RUN")
-
-
-def test_transcend_trigger_on_high_worship():
-    snap = make_snap()
-    snap["religion"] = {"worship": 60000, "epiphany": 0, "transcendenceTier": 0,
-                        "upgrades": [], "ziggurat": []}
-    assert "transcend" in _ids(snap)
+    # Frühere Transcend-/Pacts-Trigger (hoher Worship, Black Pyramid):
+    snap = make_snap(religion={
+        "worship": 60000,
+        "ziggurat": [{"name": "blackPyramid", "label": "Black Pyramid",
+                      "val": 1, "unlocked": True, "prices": []}]})
+    assert "transcend" not in _ids(snap)
+    assert "pacts" not in _ids(snap)
 
 
 def test_shatter_engine_trigger_on_tc_stock():
     snap = make_snap(resources={"timeCrystal": {"value": 60, "max": 0, "rate": 0}})
     assert "shatter_engine" in _ids(snap)
-
-
-def test_pacts_trigger_on_black_pyramid():
-    snap = make_snap()
-    snap["religion"] = {"worship": 0, "epiphany": 0, "transcendenceTier": 0,
-                        "upgrades": [],
-                        "ziggurat": [{"name": "blackPyramid", "label": "Black Pyramid",
-                                      "val": 1, "unlocked": True, "prices": []}]}
-    assert "pacts" in _ids(snap)
 
 
 def test_cs_loop_trigger_on_chronospheres():
@@ -52,10 +48,9 @@ def test_cs_loop_trigger_on_chronospheres():
 
 
 def test_already_fired_not_repeated():
-    snap = make_snap()
-    snap["religion"] = {"worship": 60000, "epiphany": 0, "transcendenceTier": 0,
-                        "upgrades": [], "ziggurat": []}
-    assert "transcend" not in _ids(snap, fired={"transcend"})
+    snap = make_snap(resources={"timeCrystal": {"value": 60, "max": 0, "rate": 0}})
+    assert "shatter_engine" in _ids(snap)
+    assert "shatter_engine" not in _ids(snap, fired={"shatter_engine"})
 
 
 def test_every_frontier_has_complete_guidance():

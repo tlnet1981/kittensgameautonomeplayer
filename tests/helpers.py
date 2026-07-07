@@ -37,6 +37,8 @@ def make_snap(
     standing_ratio: float = 0.0,
     policies: list[dict] | None = None,
     challenges: list[dict] | None = None,
+    religion: dict | None = None,
+    pacts: dict | None = None,
 ) -> dict[str, Any]:
     """Erzeugt einen Snapshot im Format von driver/snapshot.js (inkl. derived)."""
     res_list = []
@@ -112,6 +114,37 @@ def make_snap(
             "prices": [{"name": k, "val": v}
                        for k, v in p.get("prices", {}).items()],
         } for p in policies]
+    # Optionale Religion-Daten (Format wie snapshot.js `religion`): der Test
+    # übergibt nur die Keys, die er braucht — sie werden über die Minimal-
+    # Religion gelegt. Alt-Tests bleiben unverändert (kein Parameter).
+    if religion is not None:
+        rel = {"worship": 0, "epiphany": 0.0, "faith": 0.0,
+               "transcendenceTier": 0, "upgrades": [], "ziggurat": []}
+        rel.update(religion)
+        snap["religion"] = rel
+    # Optionale Pact-Daten (Format wie snapshot.js `pacts`): Default = Key
+    # fehlt komplett (Pact-Schicht nicht erreicht, Spec 15.5 inaktiv).
+    if pacts is not None:
+        lst = [{
+            "name": p["name"],
+            "label": p.get("label", p["name"]),
+            "val": p.get("val", 0), "on": p.get("on", p.get("val", 0)),
+            "unlocked": p.get("unlocked", True),
+            "special": p.get("special", False),
+            "prices": [{"name": k, "val": v}
+                       for k, v in p.get("prices", {"relic": 100}).items()],
+        } for p in pacts.get("list", [])]
+        snap["pacts"] = {
+            "list": lst,
+            "necrocorns": pacts.get("necrocorns", 0.0),
+            "necrocornDeficit": pacts.get("necrocornDeficit", 0.0),
+            "pactsAvailable": pacts.get("pactsAvailable", 0),
+            "necrocornPerDay": pacts.get("necrocornPerDay", 0.0),
+            "necrocornUpfrontCost": pacts.get("necrocornUpfrontCost", 0.0),
+            "siphoning": pacts.get("siphoning", False),
+            "fractured": pacts.get("fractured", False),
+            "deficitPenaltyRatio": pacts.get("deficitPenaltyRatio", 1.0),
+        }
     # Optionale Challenge-Daten (Format wie snapshot.js `challenges`):
     if challenges is not None:
         lst = [{

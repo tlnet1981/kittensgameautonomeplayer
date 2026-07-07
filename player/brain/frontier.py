@@ -36,38 +36,14 @@ class Frontier:
     prompt: str         # Fertiger Prompt für die nächste Claude-Code-Session
 
 
-def _ziggurat_upgrade_val(snap: dict, name: str) -> int:
-    for z in snap.get("religion", {}).get("ziggurat", []):
-        if z["name"] == name:
-            return int(z.get("val", 0))
-    return 0
-
-
 # Umgesetzte (entfernte) Frontiers: „policies“ (Spec 13.4/I-07 →
-# brain/policy.py + tactics._policy_candidates) und „challenges“ (Spec 18 →
-# brain/challenge.py, CHALLENGE_RUN in meta.py, 18.4-Reset-Gate in reset.py).
+# brain/policy.py + tactics._policy_candidates), „challenges“ (Spec 18 →
+# brain/challenge.py, CHALLENGE_RUN in meta.py, 18.4-Reset-Gate in reset.py),
+# „transcend“ (Spec 15.2 → brain/religion.py tap_plan/transcend_value +
+# reset.execute_reset Schritt 5) und „pacts“ (Spec 15.4/15.5 →
+# brain/religion.py pact_value/alicorn_conversion_due +
+# tactics._religion_ev_candidates).
 FRONTIERS: list[Frontier] = [
-    Frontier(
-        id="transcend",
-        title="Transcendence lohnt sich — TAP ist unvollständig",
-        trigger=lambda snap, run: snap.get("religion", {}).get("worship", 0) > 50_000,
-        happening=("Der Worship-Vorrat ist groß genug, dass Transcendence-Tiers "
-                   "erreichbar werden."),
-        missing=("Der Agent führt vor Resets nur Adore aus (TAP-light). Transcend "
-                 "— der bewusste Epiphany-Einsatz für permanente Tier-Boni — fehlt, "
-                 "inklusive der Abwägung aus Spec 15.2 (Wiederanlaufzeit vs. Tier-Gewinn)."),
-        where=("Spielmechanik-Spec Kap. 15.2 (TAP-Transaktion) und 15.1. "
-               "Spielcode: gamefiles/js/religion.js (transcend, getTranscendenceRatio). "
-               "Aktueller Stand: player/brain/reset.py (TAP-light) und docs/brain.md."),
-        prompt=("Erweitere den Kittens-Player um die vollständige TAP-Transaktion "
-                "(Spec 15.2): Transcend-Aktion in player/brain/actions.py + Actor "
-                "(game.religion.transcend() in gamefiles/js/religion.js verifizieren), "
-                "Zulässigkeitsregel: neues Tier erreichbar UND verbleibende Epiphany-"
-                "Struktur verbessert den Restplan UND Wiederanlaufzeit verschlechtert "
-                "die Milestone-Zeit nicht. In die Pre-Reset-Transaktion "
-                "(player/brain/reset.py, vor dem Adore-Schritt) integrieren, "
-                "Transcendence-Tier ins Reset-Gate und Systems-Religion-Panel."),
-    ),
     Frontier(
         id="shatter_engine",
         title="Shatter-Engine-Potenzial — Agent shattert nur konservativ",
@@ -93,28 +69,6 @@ FRONTIERS: list[Frontier] = [
                 "player/brain/tactics.py _time_candidates, ergänze ein Shatter-"
                 "Engine-Panel im Systems-Tab (TC-Rückfluss pro Shatter, Konfidenz) "
                 "und Tests mit Snapshot-Fixtures."),
-    ),
-    Frontier(
-        id="pacts",
-        title="Black Pyramid erreicht — Pacts/Necrocorns nicht automatisiert",
-        trigger=lambda snap, run: (
-            _ziggurat_upgrade_val(snap, "blackPyramid") > 0
-            or A.res_value(snap, "necrocorn") > 0),
-        happening=("Eine Black Pyramid steht (oder Necrocorns existieren) — damit "
-                   "beginnt die Necrocorn-/Pact-Ökonomie des Endgames."),
-        missing=("Der Agent kauft keine Pacts und steuert kein Siphoning: die "
-                 "PactValue-Bilanz (Debt-Kosten, Upkeep, alternativer Necrocorn-Wert) "
-                 "aus Spec 15.5 ist nicht implementiert."),
-        where=("Spielmechanik-Spec Kap. 15.5 (PactValue-Formel) und 15.3/15.4 "
-               "(Alicorn-Kette). Spielcode: gamefiles/js/religion.js (pacts, "
-               "necrocornDeficit). Rezept: docs/brain.md."),
-        prompt=("Erweitere den Kittens-Player um Pacts & Necrocorn-Management (Spec "
-                "15.5): Snapshot-Sektion für game.religion.pacts + Necrocorn-Debt, "
-                "PactValue-Formel (ΔBlackPyramidUtility − DebtCost − UpkeepCost − "
-                "AlternativeNecrocornValue), BUY_PACT/SET_SIPHONING-Aktionen "
-                "(Anhang B), Alicorn→TC-Konvertierungsregel 15.4. Pact-Käufe sind "
-                "irreversibel → vollständige DecisionRecords. Cockpit: Pact-"
-                "Observatory-Panel (Cockpit-Spec 11.3)."),
     ),
     Frontier(
         id="cs_loop",
