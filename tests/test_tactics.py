@@ -253,3 +253,54 @@ def test_cap_rebalance_fires_without_bottleneck():
     village = snap.get("village", {})
     tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
     assert any(c.action.id == "shift:scholar>woodcutter" for c in cands)
+
+
+def test_saving_rule_holds_cheaper_purchase_for_housing():
+    """Live-Fund #2: Library #3 (25 Holz, bezahlbar) darf das Holz nicht
+    verbrauchen, auf das für Hütte #3 (31 Holz, ~6 s entfernt) gespart
+    wird — DelayPenalty der Kaufregel 10.3. Käufe ohne Ressourcenkonflikt
+    (Feld: nur Catnip) bleiben unbestraft."""
+    from player.brain import meta, safety
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal"]}
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 28, "max": 200, "rate": 0.5},
+                   "science": {"value": 120, "max": 675, "rate": 0.35},
+                   "minerals": {"value": 40, "max": 250, "rate": 0.2}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 900}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 31}, "unlocked": True},
+                   "library": {"val": 2, "prices": {"wood": 25}, "unlocked": True},
+                   "mine": {"val": 1, "prices": {"wood": 115}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 2, "farmer": 1, "scholar": 1},
+        kittens=4, max_kittens=4,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    hut = next(c for c in cands if c.action.id == "build:hut")
+    lib = next(c for c in cands if c.action.id == "build:library")
+    field = next(c for c in cands if c.action.id == "build:field")
+    assert not hut.feasible and hut.components.get("potential", 0) > 0
+    assert lib.score < 0 and lib.components.get("delayPenalty", 0) < 0
+    assert field.score > 0 and "delayPenalty" not in field.components
+    wait = next(c for c in cands if c.action.type == "WAIT")
+    assert "Spare auf" in wait.action.exec_spec.get("reason", "")
+
+
+def test_saving_rule_ignores_far_away_targets():
+    """Sparziele jenseits SAVING_HORIZON_S frieren die Ökonomie nicht ein."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 1, "max": 500, "rate": 0.01}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 900}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 400}, "unlocked": True},
+                   "library": {"val": 2, "prices": {"wood": 0.5}, "unlocked": True}},
+        jobs={"woodcutter": 1},
+        kittens=1, max_kittens=1,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    lib = next((c for c in cands if c.action.id == "build:library"), None)
+    assert lib is None or "delayPenalty" not in lib.components

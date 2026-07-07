@@ -86,7 +86,7 @@ SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "optionValue",
                     "storageB", "storageC", "leaderValue", "policyValue",
                     "tapValue", "pactValue",
                     "rrValue", "furnaceValue", "shatterValue", "voidValue",
-                    "tfValue")
+                    "tfValue", "potential", "savingFor")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -254,7 +254,7 @@ def generate(snap: dict, meta_view, safety_result, *,
     _gather_candidates(snap, target, bn, cands)
     _research_candidates(snap, target, cands, lam, lam_rate)
     _building_candidates(snap, target, bn, cands, blocked, reserved, banking,
-                         lam, horizon, relax_whitelist)
+                         lam, horizon, relax_whitelist, lam_rate)
     if banking:
         _banking_candidates(snap, cands)
     _energy_candidates(snap, cands, lam, horizon)
@@ -272,10 +272,71 @@ def generate(snap: dict, meta_view, safety_result, *,
     _time_candidates(snap, cands, lam, horizon, meta_view.run_type)
     _tempus_fugit_candidate(snap, cands, lam, horizon)
     _wait_candidate(snap, bn, cands, meta_view)
+    # Sparlogik = DelayPenalty der Kaufregel 10.3 (Live-Fund: Library #3
+    # wurde vom Holz gekauft, auf das eigentlich für Hütte #3 zu sparen war):
+    _apply_saving_rule(snap, cands)
 
     # Deterministisch sortieren: Score absteigend, dann Action-ID (C.2).
     cands.sort(key=lambda c: (-c.score, c.action.id))
     return cands, bn
+
+
+# Sparziele weiter als 3 min entfernt frieren die Ökonomie nicht ein:
+SAVING_HORIZON_S = 180.0
+
+
+def _apply_saving_rule(snap: dict, cands: list[Candidate]) -> None:
+    """DelayPenalty der Kaufregel 10.3 („Sparen"): Existiert ein noch
+    unbezahlbarer Kandidat mit höherem Wert (`potential`) und endlicher
+    Bezahlbarkeits-ETA ≤ SAVING_HORIZON_S, dann werden billigere machbare
+    Käufe, die dessen fehlende Ressourcen verbrauchen, um die verursachte
+    Verzögerung bestraft (delay/60 s, Clamp wie netValue). Fällt ihr Score
+    dadurch unter 0, wartet der Agent — er spart. Kandidaten, die selbst
+    wertvoller als das Sparziel sind (Meilenstein 3.0, Safety 10.0, höheres
+    potential), bleiben unberührt."""
+    targets = []
+    for c in cands:
+        if c.feasible or c.eta_seconds is None or not math.isfinite(c.eta_seconds):
+            continue
+        pot = c.components.get("potential", 0.0)
+        if pot <= 0 and "milestone" in c.components:
+            pot = 3.0   # unbezahlbares Meilensteinziel ist immer Sparziel
+        if pot > 0 and c.eta_seconds <= SAVING_HORIZON_S:
+            targets.append((pot, c))
+    if not targets:
+        return
+    targets.sort(key=lambda t: (-t[0], t[1].eta_seconds, t[1].action.id))
+    potential, target = targets[0]
+    deltas_t = (target.action.predicted or {}).get("deltas", {})
+    needed = {r: -v for r, v in deltas_t.items() if v < 0}
+    if not needed:
+        return
+    for c in cands:
+        if not c.feasible or c.action.type == "WAIT" or c.score >= potential:
+            continue
+        pred = c.action.predicted or {}
+        if pred.get("stochastic"):
+            continue
+        delay = 0.0
+        for r, v in pred.get("deltas", {}).items():
+            if v >= 0 or r not in needed:
+                continue
+            rate = A.res_rate(snap, r)
+            delay = max(delay, (-v) / rate if rate > 0
+                        else NET_VALUE_CLAMP * NET_VALUE_SCALE)
+        if delay > 0:
+            c.components["delayPenalty"] = -min(NET_VALUE_CLAMP,
+                                                delay / NET_VALUE_SCALE)
+            c.components["savingFor"] = 0.0   # Anzeige-Marker (Sparziel aktiv)
+            c.score = _score(c.components)
+    # WAIT nennt das Sparziel (Weckbedingung fürs Cockpit):
+    for c in cands:
+        if c.action.type == "WAIT":
+            c.action.exec_spec["reason"] = (
+                f"Spare auf {target.action.label} "
+                f"(~{fmt_duration(target.eta_seconds)}) — "
+                + c.action.exec_spec.get("reason", ""))
+            break
 
 
 def _reserved_resource(snap: dict, bn: dict | None, banking: bool = False) -> str | None:
@@ -667,7 +728,7 @@ def _banking_candidates(snap, cands) -> None:
 
 def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
                          banking=False, lam=None, horizon=None,
-                         relax_whitelist=False) -> None:
+                         relax_whitelist=False, lam_rate=None) -> None:
     target_name = target.get("name") if target and target["kind"] == "build" else None
     prices_target = _target_prices(snap, target)
     cap_blocked_res = A.cap_blocks(snap, prices_target) if prices_target else None
@@ -683,6 +744,25 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         if name not in ECONOMY_WHITELIST and not relax_whitelist:
             continue
         if not A.affordable(snap, b["prices"]):
+            # Unbezahlbares Housing ist ein SPARZIEL (Kaufregel 10.3,
+            # DelayPenalty): als infeasible-Kandidat mit potential + ETA
+            # listen, damit _apply_saving_rule billigere Käufe bestraft,
+            # die das Sparziel verzögern würden (Live-Fund: Library #3
+            # verbrauchte das Holz für Hütte #3).
+            if name in HOUSING_BUILDINGS:
+                comp, reject = _housing_eval(snap, name, b, blocked,
+                                             lam, lam_rate, horizon)
+                if not reject:
+                    eta, _res = A.eta_to_afford(snap, b["prices"])
+                    if math.isfinite(eta):
+                        comp["potential"] = _score(comp)
+                        cands.append(Candidate(
+                            actions.buy_building(name, b["label"], b["val"],
+                                                 prices=b["prices"]),
+                            0.0, comp, feasible=False,
+                            reject_reason=(f"Sparziel: noch nicht bezahlbar "
+                                           f"(~{fmt_duration(eta)})"),
+                            eta_seconds=eta))
             continue
 
         energy_deficit = snap.get("derived", {}).get("energy", {}).get("balance", 0) < 0
@@ -702,7 +782,8 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
                     dict(comp), feasible=False, reject_reason=reject))
                 continue
         elif name in HOUSING_BUILDINGS:
-            comp, reject = _housing_eval(snap, name, b, blocked)
+            comp, reject = _housing_eval(snap, name, b, blocked,
+                                         lam, lam_rate, horizon)
             if reject:
                 cands.append(Candidate(
                     actions.buy_building(name, b["label"], b["val"], prices=b["prices"]), 0.0,
@@ -830,7 +911,8 @@ def _apply_food_risk(snap, comp: dict, prices: list[dict]) -> None:
 HOUSING_CAPACITY = {"hut": 2, "logHouse": 1, "mansion": 1}
 
 
-def _housing_eval(snap, name: str, b: dict, blocked) -> tuple[dict, str | None]:
+def _housing_eval(snap, name: str, b: dict, blocked,
+                  lam=None, lam_rate=None, horizon=None) -> tuple[dict, str | None]:
     """HousingValue-Logik nach Spec 12.1 (deterministisch vereinfacht).
 
     Liefert (Score-Komponenten, Ablehnungsgrund|None). Regeln:
@@ -840,7 +922,9 @@ def _housing_eval(snap, name: str, b: dict, blocked) -> tuple[dict, str | None]:
     2. Food-Gate: die Saisonprojektion muss die MEHRLAST der neuen Kitten
        tragen (ersetzt die frühere Pauschalsperre).
     3. Score: Basis 1.6 (Kitten = Arbeiter am Engpass) + 0.4 Paragon-
-       Grenzwert ab 68 Kitten (ab 70 zählt jedes Kitten beim Reset).
+       Grenzwert ab 68 Kitten + dynamischer KittenValue (12.1): der beste
+       verfügbare Job-Grenzwert × Horizont als benefitTime/netValue —
+       neue Kitten sind Arbeiter, ihr Wert steht damit im Score.
     """
     village = snap.get("village", {})
     kittens = village.get("kittens", 0)
@@ -848,6 +932,17 @@ def _housing_eval(snap, name: str, b: dict, blocked) -> tuple[dict, str | None]:
     comp: dict[str, float] = {"housing": 1.6}
     if kittens >= 68:
         comp["paragon"] = 0.4
+    # KittenValue (12.1): ExpectedKittenArrivals × Produktionswert des
+    # besten Jobs − Zeitkosten des Kaufs, alles in Ziel-Sekunden.
+    if lam_rate and horizon:
+        best_js = max((shadow.job_score(snap, j, lam_rate) for j in JOB_ORDER
+                       if A.job_unlocked(snap, j)), default=0.0)
+        if best_js > 0:
+            capacity = HOUSING_CAPACITY.get(name, 1)
+            comp["benefitTime"] = best_js * horizon * capacity
+            comp["costTime"] = shadow.cost_time(b["prices"], lam or {})
+            comp["netValue"] = shadow.net_value(comp["benefitTime"],
+                                                comp["costTime"])
 
     # 1. Bedarfs-Gate
     if max_kittens > kittens:
@@ -2159,6 +2254,9 @@ REASON_TEMPLATES = {
     "leader": "{label}: Trait mit der größten Zielzeitverkürzung (Leader-Regel 12.3).",
     "leaderValue": "{label}: prognostizierter Zielzeitgewinn des Trait-Wechsels (12.3).",
     "netValue": "{label} spart netto Zielzeit (Schattenpreis-Bewertung 10.2/10.3).",
+    "delayPenalty": "{label} würde das aktuelle Sparziel verzögern (DelayPenalty 10.3).",
+    "savingFor": "{label}: Sparziel aktiv — billigere Käufe werden zurückgehalten.",
+    "potential": "{label} ist das aktuelle Sparziel (noch nicht bezahlbar).",
     "optionValue": "{label}: Optionswert = Verkürzung der Rest-ETA durch den Unlock (8.4).",
     "craftPath": "{label}: Craft-Kaskade zum Ziel, Score aus NetValue/EffectiveCost (11.2).",
     "benefitTime": "{label} beschleunigt das Ziel (Benefit in Ziel-Sekunden).",
