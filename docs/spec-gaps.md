@@ -2,12 +2,14 @@
 
 Die [Spielmechanik-Spezifikation](spielmechanik-spec.md) fordert an vielen
 Stellen **dynamische Bewertung** (Simulation, Schattenpreise, Grenzwerte).
-Diese Tabelle ist der ehrliche Abgleich. Stand jetzt: **alle 33 Zeilen
-umgesetzt** (✅); die verbleibenden dokumentierten Näherungen stehen am Ende.
-Der Ausbaugrenzen-Wächter im Cockpit meldet nur noch dynamische Befunde
-(z. B. Deadlocks).
+Diese Tabelle ist der ehrliche Abgleich. Die 33 Zeilen des Erstausbaus sind
+umgesetzt (✅); der Live-Betrieb und ein adversarialer Light-Audit (drei
+Prüf-Agenten, 7. Juli abends) haben danach NEUE offene Zeilen eröffnet
+(#34 ff. unten) — dort steht, wo eine kluge Spec-Mechanik bisher nur als
+Konstante/Sonderfall gebaut ist. Der fertige Auftrag für das wichtigste
+Paket steht am Ende.
 
-Legende: ✅ umgesetzt/spec-nah (offene Lücken erschienen hier als 🟠/🟡 — aktuell keine)
+Legende: ✅ umgesetzt/spec-nah · 🟠 lohnendste offene Lücken · 🟡 offen, geringere Wirkung
 
 ## Bewertungs-Dynamik (Kern-Audit)
 
@@ -57,29 +59,81 @@ Legende: ✅ umgesetzt/spec-nah (offene Lücken erschienen hier als 🟠/🟡 �
 | 32 | 24.1 | **Golden-State-Fixtures + Replay-Test** | `tests/fixtures/{early,mid,late}.json` (eingefroren, deterministisch, ohne Zeitstempel) + Loader `tests/helpers.load_fixture`; `tests/test_replay.py`: Determinismus, Golden-Gewinner je Fixture, state_hash-Stabilität | ✅ |
 | 33 | 8.4 / 22.3 | **Optionswert von Unlocks; generische Deadlock-Auflösung** | OptionValue-Sekundenwert für Forschung/Upgrades aus Referenz-Ratentabellen (gamefiles); Deadlock 22.3: Horizont ×2 → Suchraum lockern → Frontier-Meldung (`tactics.is_deadlock`/`resolve_deadlock`, Safety nie gelockert) | ✅ |
 
-## Stand: Spec vollständig umgesetzt — verbleibende ehrliche Grenzen
+## Offene Lücken aus dem Light-Audit (7. Juli, Live-Betrieb + 3 Prüf-Agenten)
 
-Alle 33 Audit-Zeilen sind ✅. Was bewusst NICHT der Spec-Maximalausbau ist
-(im Code jeweils als REFERENZSCHÄTZUNG/Näherung gekennzeichnet):
+Leitfrage des Audits: Wo fordert die Spec eine RECHNUNG/SIMULATION und der
+Code liefert eine Konstante oder einen Sonderfall? (Vorbild-Funde aus dem
+Live-Betrieb, alle bereits gefixt: Soll-Allokation 12.2, Pfad-Preisvektor,
+Sparfenster der DelayPenalty, Cap-Klausel, Farmer-Hysterese.)
 
-- **EV statt Monte-Carlo (Kap. 5):** Die Planbewertung nutzt deterministische
-  Erwartungswert-Projektionen (`brain/simulate.py`); Zufallsaktionen gehen als
-  EV ein. Spec-konforme Ergebnisverteilungen existieren nur dort, wo das Spiel
-  sie liefert (Trade/Jagd).
-- **Risikoterme als Proxys (5.4):** P(fatal) = Food-Invariante im Horizont,
-  Verlustterm ETA-basiert — kein echtes CVaR über Verteilungen.
-- **Referenzkonstanten:** Challenge-Completion-Zeiten, Necrocorn-/TC-/
-  Paragon-Zeitwerte, Endgame-Referenzraten bᵢ und einige Policy-/Trait-
-  Effekte sind dokumentierte Schätz-/Normierungswerte, keine simulierten
-  Größen. Sie beeinflussen Prioritäten, nicht die Korrektheit der Gates.
-- **Live-Validierung Late-Game:** Pacts, Leviathans, Relic Stations, Void,
-  Challenges und die 12-Schritt-Pre-Reset-Transaktion sind gegen die
-  Referenzimplementierung (gamefiles/) und synthetische Fixtures getestet;
-  ein Live-Nachweis in fortgeschrittenen Spielständen steht aus. Der
-  Governance-Kern (Prognose-Abgleich, MODEL_MISMATCH-Stop) fängt
-  Abweichungen im Betrieb ab.
+| # | Spec | Kluge Spec-Mechanik | Light-Version (Fundstelle) | Status |
+|---|---|---|---|---|
+| 34 | 10.2 / 11.1 | **λ für ALLE Ressourcen** im Critical Path | λ nur über die Preisvektoren von Ziel+Hütte+nächster Forschung (`shadow.shadow_prices`); alles Abseitige λ=0 → Jagd-, Trade-, Leader-, Storage-Overflow- und Cap-Relief-Bewertung fallen auf Schwellen-Fallbacks zurück. DIE Wurzel der Live-Funde | 🟠 |
+| 35 | 13.1 / 13.2 | **Gebäudebewertung über alle Modifier** (direkt+indirekt, Energie, Pollution, Rest-Aktivzeit); Factories nach Craft/Engineer/Pollution | `tactics._building_rate_delta`: EINE Ertragsressource, beobachtete rate/count; Steamworks/Magneto/Factory/Tradepost/Mint nicht gemappt → pauschal economy 0,6 ohne λ; Pollution existiert nirgends | 🟠 |
+| 36 | 5.2 / 8.3 | **Vorwärtssimulation mit Bevölkerungswachstum und echten Käufen** | `simulate.project`: Kittenzahl friert ein (Snapshot liefert keine Ankunftsrate) → FIRST-/PARAGON-Restzeiten teils statisch; Varianten a/b/c sind eine abstrakte Ratenrampe (+100 %/300 s·f), keine simulierten Kaufsequenzen | 🟠 |
+| 37 | 13.4 | **Alle Policies + Kombinationen** über den Restplan bewerten | `policy.POLICY_EFFECTS` deckt 23 von ~66 Policies; der Rest (u. a. alle Race-Relations, Pacts-Policies, fullIndustrialization) ist NIE Kandidat; keine Kombinationsbewertung | 🟡 |
+| 38 | 8.3 / 18.2 | **Restzeiten simuliert, ChallengeValue zustandsabhängig** | 5 von 12 Run-Typen scoren auf Konstanten (SEED 6 h, CHALLENGE const, POSITIVE_CS 60 s×n …); `challenge_value` = Konstante/Konstante → feste Rangfolge | 🟡 |
+| 39 | 10.4 / 6.4 | **Payback gegen den GEPLANTEN Reset**; Makrohorizont „mind. ein voller Run" | `shadow.run_horizon` = 2×Spielzeit geklemmt [30 min, 4 h]; Reset-Projektion (reset.py) wird nicht durchgereicht; 2-h-/4-h-Klemmen schneiden lange Runs ab | 🟡 |
+| 40 | 12.2 | **Marginalraten mit Gebäude-/Upgrade-Multiplikatoren** | `shadow.JOB_BASE_RATES` statisch ×Happiness; `target_allocation` subtrahiert Basisraten von multiplikator-behafteten Ist-Raten (Restrate zu hoch) → Mid-Game-Verzerrung | 🟡 |
+| 41 | 12.1 | **ExpectedKittenArrivals** × KittenValue | `_housing_eval` unterstellt Sofort-Vollbelegung und volle Horizontarbeit; echte Ankunftsrate fehlt (hängt an #36-Snapshot-Feld) | 🟡 |
+| 42 | 20.1 / 20.2 | **V(post) simuliert; Reset-Trigger je Run-Typ** | Neustart als lineare Dreiecksrampe; `reset.evaluate` kennt nur FIRST/PARAGON/CHALLENGE/Perk — RELIGION-, SEED-, POSITIVE_CS-, UNICORN-Runs erreichen ihre Reset-Transaktion nie | 🟡 |
+| 43 | 17.2/17.5 / 19.1 | **λ-bewertete irreversible TC-/CS-Käufe** | `TC_VALUE_REF_S=600`, `PARAGON_VALUE_REF_S=900`, `REBUILD_DELAY_PER_CS_S=60` — Referenzkonstanten steuern Shatter-Batches und CS-Zielzahl (irreversibel) | 🟡 |
+| 44 | 6.1 / 6.3 | **C(S) über alle 7 Dimensionen projiziert; Meilensteine „operational nutzbar"** | `endgame_score` projiziert nur Paragon (übrige ΔlnC-Beiträge 0); `frontier_complete` prüft Unlock-Flags statt Betrieb (Energie/Versorgung) | 🟡 |
+| 45 | 14.1 / 14.2 / 15.1 | **Verdrängungsprüfung, Batch-Optimum, Praise-Integral** | Trade: nur λ-Kosten, kein expliziter Catpower-/Gold-Konkurrenzcheck; Jagd: immer alle Squads, Schwelle statt Batch-Optimum; Praise: Overflow-Heuristik statt Integral bis Adore/Reset | 🟡 |
+| 46 | 5.3 | **Weckquellen vollständig** (inkl. „Fertigstellung eines Sparziels") | `scheduler.next_wakeup`: Saison/Cap/ETA/Kontrollpunkt; Sparziel-, Festival-, Heat-, Cycle-Weckung fehlen (Wirkung gering durch 30-s-Clamp) | 🟡 |
+| 47 | 5.4 | **CVaR über Ergebnisverteilungen** | P(fatal) binär (Food), Verlustterm ETA-basiert — dokumentierter Proxy | 🟡 |
 
-Wenn eine dieser Grenzen im Betrieb sichtbar wird (z. B. wiederholte
-Prognose-Abweichungen in einem Late-Game-Modul), ist der Auftrag: die
-betroffene Referenzschätzung durch eine gemessene Rate oder eine exakte
-gamefiles-Formel ersetzen — die Fundstellen stehen als Kommentar am Wert.
+Sauber spec-treu laut Audit: Kontrollpunkt-Regel 21.2, TAP-Pfad (religion.py),
+Energie-Grenznutzen-Reihenfolge 16.4, Governance-Kern (Kap. 21–23).
+
+## Empfohlenes nächstes Paket: „Economy-Kern ehrlich machen" (#34+#35+#36)
+
+Ein zusammenhängender Umbau, der die Fehlerklasse ALLER bisherigen
+Live-Funde (Null-Woodcutter, Monokultur, „kein Spar-Drive") an der Wurzel
+beseitigt: vollständige Schattenpreise, echte Gebäudeeffekte, wachsende
+Bevölkerung in der Projektion.
+
+Fertiger Auftrag zum Kopieren für eine neue Claude-Code-Session:
+
+> Arbeite auf Branch `working` (nach Abschluss dorthin pushen; falls die
+> Session einen eigenen claude/-Branch anlegt, am Ende nach working
+> mergen). Lies zuerst docs/spec-gaps.md (Abschnitt „Offene Lücken aus dem
+> Light-Audit") und docs/brain.md. Setze das Paket #34+#35+#36 um:
+>
+> 1. **λ für alle Ressourcen (#34, Spec 10.2/11.1):** Ersetze den engen
+>    Preisvektor durch einen PFAD-Preisvektor: aktives Ziel + alle offenen
+>    Meilensteine des aktuellen Runs (meta-Meilensteinliste) + nächste
+>    Housing-Stufe, zeitlich diskontiert (nähere Ziele wiegen mehr; Wahl
+>    dokumentieren). shadow.shadow_prices/rate_shadow_prices rechnen damit;
+>    Jagd-/Trade-/Leader-/Storage-/Cap-Relief-Bewertungen verlieren ihre
+>    λ=0-Fallback-Pfade fast vollständig (Fallbacks als Sicherheitsnetz
+>    behalten). Cockpit zeigt die λ-Topliste (bestehende Komponenten).
+> 2. **Echte Gebäudeeffekte (#35, Spec 13.1/13.2):** driver/snapshot.js
+>    exportiert je Gebäude die vollständigen effects aus
+>    game.bld.buildingsData (Produktion, Verbrauch, Storage, craftRatio,
+>    happiness — Feldnamen aus gamefiles/js/buildings.js ableiten,
+>    defensiv). tactics._building_rate_delta nutzt diese Effekte
+>    (mehrressourcig, inkl. Verbrauch) statt rate/count; Steamworks/
+>    Magneto/Factory/Tradepost/Mint/Brewery bekommen dadurch echte
+>    NetValues statt economy 0,6. Pollution-Feld mitlesen und als
+>    negativen Effekt in NetValue einrechnen (Referenz: buildings.js
+>    cathPollutionPerTickProd).
+> 3. **Wachsende Bevölkerung in der Projektion (#36, Spec 5.2):**
+>    snapshot.js exportiert die Kitten-Ankunftsrate (village.sim,
+>    Referenz: village.js update/kittensPerTick bzw. Spawn-Logik) und
+>    simulate.project lässt die Population wachsen (Housing-Kapazität als
+>    Grenze, Catnip-Mehrlast wie gehabt); paragon_projection/Run-Restzeiten
+>    werden dadurch zustandsabhängig. Housing-Bewertung 12.1 nutzt dieselbe
+>    Ankunftsrate (#41 gleich miterledigen).
+>
+> Leitplanken wie im Repo etabliert: exakte Mechanik aus gamefiles/
+> (Fundstelle im Kommentar zitieren), Fallbacks ohne Snapshot-Daten,
+> deterministisch, alle Bestandstests grün oder minimal begründet
+> angepasst, neue Regressionstests auf make_snap-Fixtures (u. a.:
+> Steamworks bekommt positiven NetValue; λ_furs > 0 sobald Jagd im Pfad
+> nützlich; Projektion mit wachsender Population verkürzt die
+> FIRST_RUN-Restzeit). Verifikation: python -m pytest tests/ -q, dann
+> RUN_E2E=1 KGP_CHROMIUM_PATH=/opt/pw-browsers/chromium python -m pytest
+> tests/test_e2e.py -q. Danach docs/spec-gaps.md (#34/#35/#36/#41 auf ✅
+> mit Fundstellen) und docs/brain.md nachziehen. Commit-Stil wie
+> git log; pushen.
