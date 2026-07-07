@@ -113,7 +113,9 @@ def test_run_horizon_is_clamped_and_grows_with_run_age():
     assert shadow.run_horizon(snap) == shadow.HORIZON_MIN
     snap["calendar"].update({"year": 20})
     assert shadow.run_horizon(snap) == shadow.HORIZON_MAX
-    snap["calendar"].update({"year": 1, "season": 0, "day": 10})
+    # Mittlerer Fall oberhalb der 30-min-Untergrenze (Jahr 2 ≈ 1600 s
+    # Spielzeit → Horizont 3200 s):
+    snap["calendar"].update({"year": 2, "season": 0, "day": 0})
     h = shadow.run_horizon(snap)
     assert shadow.HORIZON_MIN < h < shadow.HORIZON_MAX
 

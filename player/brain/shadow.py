@@ -49,7 +49,12 @@ REFINE_RECIPES: dict[str, list[dict]] = {
 }
 
 # Run-Horizont-Klemmen (siehe run_horizon):
-HORIZON_MIN = 600.0
+# Untergrenze 30 min: Kein sinnvoller Run endet früher (Speedrun-
+# Mindestlaufzeit in reset.py ist 20 min; der FIRST_RUN braucht Stunden).
+# Mit 600 s hatte das Payback-Gate 10.4 früh im Run rentable
+# Produktionsgebäude (Feld #14: Payback ~770 s) abgelehnt und die
+# Catnip-Bank fürs erste Housing massiv verlangsamt (E2E-Smoke-Fund).
+HORIZON_MIN = 1800.0
 HORIZON_MAX = 4 * 3600.0
 
 # Spielzeit-Konstanten (wie state/derived.py): 1 Tag = 2 s.
@@ -263,7 +268,9 @@ def run_horizon(snap: dict) -> float:
     auf null; 1 Tag = 2 s wie in state/derived.py). Konservative Annahme
     analog zur Speedrun-Mindestlaufzeit in reset.py: Der Run läuft noch
     etwa 2× so lange, wie er bereits gedauert hat — junge Runs planen
-    kurz, reife Runs weit. Geklemmt auf [600 s, 4 h].
+    kurz, reife Runs weit. Geklemmt auf [30 min, 4 h] (Untergrenze siehe
+    HORIZON_MIN: Spec 10.4 verlangt Amortisation vor dem GEPLANTEN Reset,
+    und kein geplanter Reset liegt früher als die Speedrun-Mindestlaufzeit).
     """
     cal = snap.get("calendar", {})
     days_per_season = float(cal.get("daysPerSeason", 100)) or 100.0
