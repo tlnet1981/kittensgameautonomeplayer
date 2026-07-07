@@ -86,7 +86,7 @@ SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "optionValue",
                     "storageB", "storageC", "leaderValue", "policyValue",
                     "tapValue", "pactValue",
                     "rrValue", "furnaceValue", "shatterValue", "voidValue",
-                    "tfValue", "potential", "savingFor")
+                    "tfValue", "potential", "savingFor", "allocDeficit")
 # Normierung: 60 s NetValue ≙ 1 Scorepunkt, geklemmt auf ±1.2 — genug, um
 # Ökonomie-Käufe (0.6) zu kippen, aber nie Safety/Meilenstein (3.0+).
 NET_VALUE_SCALE = 60.0
@@ -250,7 +250,7 @@ def generate(snap: dict, meta_view, safety_result, *,
     horizon = shadow.run_horizon(snap) * max(1.0, horizon_scale)
 
     _milestone_candidate(snap, target, bn, cands, blocked)
-    _job_candidates(snap, bn, cands, lam_rate)
+    _job_candidates(snap, bn, cands, lam_rate, goal_prices)
     _gather_candidates(snap, target, bn, cands)
     _research_candidates(snap, target, cands, lam, lam_rate)
     _building_candidates(snap, target, bn, cands, blocked, reserved, banking,
@@ -442,13 +442,62 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
 
 # ---------------------------------------------------------------- Jobs
 
-def _job_candidates(snap, bn, cands, lam_rate=None) -> None:
+def _allocation_prices(snap, goal_prices) -> list[dict] | None:
+    """Preisvektor für die Soll-Allokation (12.2): Meilensteinziel PLUS die
+    nächste Housing-Stufe, sobald die Kapazität voll ist — sonst wäre eine
+    Ressource wie Holz „wertlos", nur weil das aktuelle Ziel sie nicht
+    braucht, obwohl die nächste Hütte sie braucht (Nutzer-Fund:
+    null Woodcutter im ganzen Run)."""
+    prices = list(goal_prices or [])
+    village = snap.get("village", {})
+    if village.get("maxKittens", 0) <= village.get("kittens", 0):
+        for name in sorted(HOUSING_BUILDINGS):
+            b = A.building(snap, name)
+            if b and b.get("unlocked") and b.get("prices"):
+                prices.extend(b["prices"])
+                break
+    return prices or None
+
+
+def _min_farmers(snap, village) -> int:
+    """Kleinste Farmerzahl, mit der die Saisonprojektion über der
+    Warnschwelle bleibt (Food-Invariante I-01 als Allokations-Untergrenze)."""
+    farmers_now = A.job_count(snap, "farmer")
+    if not A.job_unlocked(snap, "farmer"):
+        return 0
+    happiness = village.get("happiness", 1.0) or 1.0
+    rate = shadow.JOB_BASE_RATES["farmer"]["catnip"] * happiness
+    demand = snap.get("derived", {}).get("food", {}).get("demandPerSec", 0.0)
+    warn_floor = max(150.0, 120.0 * demand)
+    total = int(village.get("kittens", 0) or 0)
+    for f in range(0, total + 1):
+        after = project_catnip(snap, demand_delta=(farmers_now - f) * rate)
+        if after["projectedMin"] >= warn_floor:
+            return f
+    return farmers_now
+
+
+def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None) -> None:
     village = snap.get("village", {})
     free = village.get("freeKittens", 0)
     food = snap.get("derived", {}).get("food", {})
     food_tight = food.get("status", "ok") != "ok"
 
+    # Soll-Allokation (Spec 12.2, iterativ): Ziel + nächste Housing-Stufe
+    # bestimmen, wie die Kitten verteilt sein SOLLTEN. Freie Kitten füllen
+    # die größten Defizite; ohne freie Kitten wird pro Zyklus höchstens
+    # ein Kitten vom größten Überschuss zum größten Defizit umgeschult.
+    alloc = {}
+    if not food_tight:
+        alloc_prices = _allocation_prices(snap, goal_prices)
+        if alloc_prices:
+            alloc = shadow.target_allocation(snap, alloc_prices,
+                                             _min_farmers(snap, village))
+
     if free <= 0:
+        if alloc and _allocation_shift_candidate(snap, cands, village,
+                                                 food_tight, alloc):
+            return
         _job_rebalance_candidate(snap, bn, cands, village, food_tight, lam_rate)
         return
 
@@ -459,6 +508,18 @@ def _job_candidates(snap, bn, cands, lam_rate=None) -> None:
             {"jobValue": 1.6, "safety": 1.0},
         ))
         return
+
+    # Freies Kitten → größtes Allokations-Defizit (12.2 Schritt 4):
+    if alloc:
+        deficits = sorted(((alloc[j] - A.job_count(snap, j), j) for j in alloc),
+                          key=lambda t: (-t[0], shadow.ALLOC_JOB_ORDER.index(t[1])))
+        if deficits and deficits[0][0] > 0:
+            job = deficits[0][1]
+            label = next((j["title"] for j in village.get("jobs", [])
+                          if j["name"] == job), job)
+            cands.append(Candidate(actions.assign_job(job, label, 1), 2.4,
+                                   {"jobValue": 2.4, "allocDeficit": 0.0}))
+            return
 
     # JobScore-Zuweisung (Spec 12.2): freies Kitten dem Job mit dem
     # höchsten positiven Zielzeitgewinn pro Sekunde. Ohne λ-Daten (leere
@@ -491,6 +552,31 @@ def _job_candidates(snap, bn, cands, lam_rate=None) -> None:
         cands.append(Candidate(actions.assign_job(job, label, 1), 2.4, comp))
         if src == "Engpass":
             cands[-1].components["bottleneck"] = 0.0  # nur Anzeige-Marker
+
+
+def _allocation_shift_candidate(snap, cands, village, food_tight,
+                                alloc: dict[str, int]) -> bool:
+    """Konvergenz zur Soll-Allokation (12.2 Schritt 7): ein Kitten vom
+    größten Überschuss-Job zum größten Defizit-Job — nur ganze Defizite
+    (inhärente Hysterese), Farmer nie unter die Allokations-Untergrenze."""
+    deficits = sorted(((alloc[j] - A.job_count(snap, j), j) for j in alloc),
+                      key=lambda t: (-t[0], shadow.ALLOC_JOB_ORDER.index(t[1])))
+    surpluses = sorted(((A.job_count(snap, j) - alloc[j], j) for j in alloc),
+                       key=lambda t: (-t[0], shadow.ALLOC_JOB_ORDER.index(t[1])))
+    if not deficits or not surpluses:
+        return False
+    d_count, d_job = deficits[0]
+    s_count, s_job = surpluses[0]
+    if d_count < 1 or s_count < 1 or d_job == s_job:
+        return False
+    if s_job == "farmer" and food_tight:
+        return False
+    label = next((j["title"] for j in village.get("jobs", [])
+                  if j["name"] == d_job), d_job)
+    cands.append(Candidate(
+        actions.shift_job(s_job, d_job, label, 1), 2.2,
+        {"jobValue": 1.2, "allocDeficit": 0.0}))
+    return True
 
 
 def _job_rebalance_candidate(snap, bn, cands, village, food_tight,
@@ -2301,6 +2387,7 @@ REASON_TEMPLATES = {
     "netValue": "{label} spart netto Zielzeit (Schattenpreis-Bewertung 10.2/10.3).",
     "delayPenalty": "{label} würde das aktuelle Sparziel verzögern (DelayPenalty 10.3).",
     "savingFor": "{label}: Sparziel aktiv — billigere Käufe werden zurückgehalten.",
+    "allocDeficit": "{label}: Soll-Allokation 12.2 — größtes Job-Defizit zuerst.",
     "potential": "{label} ist das aktuelle Sparziel (noch nicht bezahlbar).",
     "optionValue": "{label}: Optionswert = Verkürzung der Rest-ETA durch den Unlock (8.4).",
     "craftPath": "{label}: Craft-Kaskade zum Ziel, Score aus NetValue/EffectiveCost (11.2).",

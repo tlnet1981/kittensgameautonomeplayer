@@ -310,3 +310,116 @@ def job_score(snap: dict, job_id: str, lam_rate: dict[str, float]) -> float:
             continue
         total += lam_rate.get(res, 0.0) * rate * happiness
     return total
+
+
+# ================================================================ Soll-Allokation (12.2)
+
+# Deterministische Job-Reihenfolge der Allokation (Tie-Break):
+ALLOC_JOB_ORDER = ("farmer", "woodcutter", "scholar", "miner",
+                   "hunter", "geologist", "priest")
+
+
+def _alloc_eta(prices: list[dict], amounts: dict, rates: dict) -> tuple[int, float]:
+    """(Anzahl Ressourcen ohne Rate, max. ETA) — lexikografisch vergleichbar:
+    erst zählt, wie viele Zielressourcen GAR NICHT produziert werden, dann
+    die Engpass-ETA. So ist „eine tote Ressource zum Leben erwecken" immer
+    wertvoller als jede ETA-Verkürzung."""
+    dead = 0
+    worst = 0.0
+    for p in prices:
+        missing = p["val"] - amounts.get(p["name"], 0.0)
+        if missing <= 0:
+            continue
+        r = rates.get(p["name"], 0.0)
+        if r <= RATE_EPS:
+            dead += 1
+        else:
+            worst = max(worst, missing / r)
+    return dead, worst
+
+
+def target_allocation(snap: dict, goal_prices: list[dict] | None,
+                      min_farmers: int = 0) -> dict[str, int]:
+    """Soll-Jobverteilung nach Spec 12.2 (iterativ, deterministisch):
+
+    1. min_farmers (Food-Invariante I-01) werden vorab reserviert.
+    2. Jedes weitere Kitten geht an den Job mit dem größten marginalen
+       Zielzeitgewinn; nach jeder Zuweisung werden die angenommenen Raten
+       aktualisiert (dadurch fallende Grenzwerte — kein Alle-auf-einen-Job).
+    3. Bleibt kein positiver Grenzwert (Ziel bezahlbar/gedeckt), werden
+       restliche Kitten round-robin auf Jobs ohne volle Ertragsressource
+       verteilt (Balance statt Leerlauf).
+
+    Basisraten: beobachtete Raten MINUS aktuelle Kitten-Beiträge — die
+    Allokation plant, als wären alle Kitten neu verteilbar. Leeres
+    goal_prices → {} (Aufrufer nutzt den bisherigen Fallback)."""
+    village = snap.get("village", {})
+    total = int(village.get("kittens", 0) or 0)
+    if total <= 0 or not goal_prices:
+        return {}
+    jobs = [j for j in ALLOC_JOB_ORDER if A.job_unlocked(snap, j)]
+    if not jobs:
+        return {}
+    happiness = village.get("happiness", 1.0) or 1.0
+
+    amounts = {p["name"]: A.res_value(snap, p["name"]) for p in goal_prices}
+    rates: dict[str, float] = {}
+    for p in goal_prices:
+        rates[p["name"]] = A.res_rate(snap, p["name"])
+    # Kitten-Beiträge herausrechnen (nur bekannte Job-Ressourcen):
+    for j in jobs:
+        count = A.job_count(snap, j)
+        for res, rate in JOB_BASE_RATES.get(j, {}).items():
+            if res in rates:
+                rates[res] -= count * rate * happiness
+
+    def _capped(res: str) -> bool:
+        cap = A.res_cap(snap, res)
+        return cap > 0 and A.res_value(snap, res) >= cap * CAP_FULL_RATIO
+
+    alloc = {j: 0 for j in jobs}
+    remaining = total
+    if "farmer" in alloc and min_farmers > 0:
+        take = min(min_farmers, remaining)
+        alloc["farmer"] = take
+        remaining -= take
+        for res, rate in JOB_BASE_RATES["farmer"].items():
+            if res in rates:
+                rates[res] += take * rate * happiness
+
+    for _ in range(remaining):
+        base = _alloc_eta(goal_prices, amounts, rates)
+        best_job, best_gain = None, (0, 0.0)
+        for j in jobs:
+            gain_d = gain_e = 0.0
+            trial = dict(rates)
+            touched = False
+            for res, rate in JOB_BASE_RATES.get(j, {}).items():
+                if res in trial and not _capped(res):
+                    trial[res] += rate * happiness
+                    touched = True
+            if not touched:
+                continue
+            with_j = _alloc_eta(goal_prices, amounts, trial)
+            gain = (base[0] - with_j[0], base[1] - with_j[1])
+            if gain > best_gain:
+                best_gain, best_job = gain, j
+        if best_job is None:
+            break   # kein positiver Grenzwert mehr → Rest per Round-Robin
+        alloc[best_job] += 1
+        for res, rate in JOB_BASE_RATES.get(best_job, {}).items():
+            if res in rates:
+                rates[res] += rate * happiness
+        remaining -= 1
+
+    # Round-Robin-Rest: Jobs ohne volle Ertragsressource, feste Reihenfolge.
+    if remaining > 0:
+        open_jobs = [j for j in jobs
+                     if not all(_capped(r) for r in JOB_BASE_RATES.get(j, {}))]
+        if open_jobs:
+            i = 0
+            while remaining > 0:
+                alloc[open_jobs[i % len(open_jobs)]] += 1
+                i += 1
+                remaining -= 1
+    return alloc

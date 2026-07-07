@@ -341,3 +341,52 @@ def test_farmer_kept_when_projection_tight():
     village = snap.get("village", {})
     tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
     assert not any(c.action.id.startswith("shift:farmer>") for c in cands)
+
+
+def test_allocation_includes_woodcutter_for_next_hut():
+    """Nutzer-Fund: null Woodcutter im ganzen Run, weil λ nur am aktiven
+    (Science-)Ziel hing. Die Soll-Allokation (12.2) bewertet Ziel PLUS
+    nächste Housing-Stufe — Holz wird gebraucht, ein Kitten muss fällen."""
+    from player.brain import meta, safety
+    techs = {"calendar": {"researched": True},
+             "agriculture": {"researched": True},
+             "archery": {"researched": False, "prices": {"science": 300}}}
+    snap = make_snap(
+        resources={"catnip": {"value": 2000, "max": 5000, "rate": 5.0},
+                   "wood": {"value": 3, "max": 200, "rate": 0.0},
+                   "science": {"value": 50, "max": 500, "rate": 0.2}},
+        buildings={"field": {"val": 15, "prices": {"catnip": 500}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 0, "farmer": 0, "scholar": 2},
+        kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    shift = next((c for c in cands if c.action.id.startswith("shift:")), None)
+    assert shift is not None and shift.action.exec_spec["to"] == "woodcutter"
+    assert "allocDeficit" in shift.components
+
+
+def test_allocation_respects_min_farmers_and_sums():
+    """Soll-Allokation: Summe == Kitten, Farmer nie unter der
+    Food-Untergrenze, deterministisch bei Wiederholung."""
+    from player.brain import shadow
+    snap = make_snap(
+        resources={"catnip": {"value": 300, "max": 5000, "rate": 0.5},
+                   "wood": {"value": 0, "max": 200, "rate": 0.0},
+                   "science": {"value": 0, "max": 500, "rate": 0.0}},
+        buildings={"field": {"val": 4, "prices": {"catnip": 120}, "unlocked": True}},
+        jobs={"woodcutter": 0, "farmer": 0, "scholar": 0},
+        kittens=5, max_kittens=6, season="autumn",
+        catnip_field_base=4 * 0.125,
+    )
+    prices = [{"name": "wood", "val": 100}, {"name": "science", "val": 60}]
+    mf = tactics._min_farmers(snap, snap["village"])
+    a1 = shadow.target_allocation(snap, prices, mf)
+    a2 = shadow.target_allocation(snap, prices, mf)
+    assert a1 == a2
+    assert sum(a1.values()) == 5
+    assert a1.get("farmer", 0) >= mf
+    assert a1.get("woodcutter", 0) >= 1 and a1.get("scholar", 0) >= 1
