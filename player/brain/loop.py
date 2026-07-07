@@ -278,7 +278,7 @@ class Brain:
         # Nur im ACTIVE-Modus (im MISMATCH/SAFE_STOP ist Nichtstun gewollt);
         # Sicherheitsinvarianten werden nie gelockert (22.3 Satz 2).
         if mode == "ACTIVE" and selected.action.type == "WAIT" \
-                and tactics.is_deadlock(candidates, bottleneck):
+                and tactics.is_deadlock(candidates, bottleneck, snap):
             candidates, bottleneck, dl = tactics.resolve_deadlock(
                 snap, meta_view, safety_result)
             apply_mode_gate(candidates, mode)

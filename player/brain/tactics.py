@@ -464,12 +464,29 @@ def _gather_candidates(snap, target, bn, cands) -> None:
     # Refine: Holz aus Catnip, solange es keine/kaum Woodcutter gibt.
     wood_needed = bn and bn.get("resource") == "wood"
     catnip_val = A.res_value(snap, "catnip")
-    if wood_needed and A.job_count(snap, "woodcutter") == 0 and catnip_val >= 100:
-        missing_wood = next((m["missing"] for m in bn.get("missing", []) if m["name"] == "wood"), 0)
-        batch = max(1, min(5, int(catnip_val // 100), math.ceil(missing_wood)))
-        comp = {"bottleneck": 2.0}
-        _apply_food_risk(snap, comp, [{"name": "catnip", "val": 100 * batch}])
-        cands.append(Candidate(actions.refine_catnip(batch), sum(comp.values()), comp))
+    if wood_needed and A.job_count(snap, "woodcutter") == 0:
+        if catnip_val >= 100:
+            missing_wood = next((m["missing"] for m in bn.get("missing", []) if m["name"] == "wood"), 0)
+            batch = max(1, min(5, int(catnip_val // 100), math.ceil(missing_wood)))
+            comp = {"bottleneck": 2.0}
+            _apply_food_risk(snap, comp, [{"name": "catnip", "val": 100 * batch}])
+            cands.append(Candidate(actions.refine_catnip(batch), sum(comp.values()), comp))
+        else:
+            # Konversions-Input reicht noch nicht (Live-Deadlock-Fund):
+            # Refine als sichtbar-abgelehnter Kandidat MIT endlicher ETA
+            # plus aktives Sammeln — sonst stünde hier nur WAIT und die
+            # Deadlock-Erkennung schlüge fälschlich an (22.3).
+            eta = _conversion_eta(snap, bn)
+            cands.append(Candidate(
+                actions.refine_catnip(1), 0.0, {"bottleneck": 0.0},
+                feasible=False,
+                reject_reason=(f"fehlen {100 - catnip_val:.0f} catnip für Refine "
+                               f"(~{fmt_duration(eta)})")))
+            comp = {"bottleneck": 0.3}
+            _apply_food_risk(snap, comp, [{"name": "catnip", "val": 10}])
+            score = sum(comp.values())
+            if score > 0:
+                cands.append(Candidate(actions.gather_catnip(10), score, comp))
 
 
 # ---------------------------------------------------------------- Forschung
@@ -1945,8 +1962,13 @@ def _tempus_fugit_candidate(snap, cands, lam=None, horizon=None) -> None:
 def _wait_candidate(snap, bn, cands, meta_view) -> None:
     if bn and bn.get("resource"):
         miss = ", ".join(f"{m['missing']:.0f} {m['name']}" for m in bn.get("missing", []))
+        eta = bn.get("etaSeconds")
+        if (eta is None or not math.isfinite(eta)):
+            conv = _conversion_eta(snap, bn)
+            if conv is not None and math.isfinite(conv):
+                eta = conv   # endliche Weckbedingung über die Konversionskette
         reason = (f"Warte auf {bn['resource']} für „{meta_view.objective_label}“: "
-                  f"fehlen {miss} (~{fmt_duration(bn.get('etaSeconds'))})")
+                  f"fehlen {miss} (~{fmt_duration(eta)})")
         wake = "Replan bei Bezahlbarkeit, neuem Unlock oder Kitten-Ankunft"
     else:
         reason = "Kein Kandidat mit positivem Wert — beobachte Produktion"
@@ -1956,16 +1978,51 @@ def _wait_candidate(snap, bn, cands, meta_view) -> None:
 
 # ================================================================ Deadlock (22.3)
 
-def is_deadlock(candidates: list[Candidate], bn: dict | None) -> bool:
+def _conversion_eta(snap: dict, bn: dict | None) -> float | None:
+    """Endliche Weckbedingung über die KONVERSIONSKETTE (Live-Deadlock-Fund):
+    Ist die Engpass-Ressource per Refine/Craft herstellbar (Rezepte wie in
+    shadow.REFINE_RECIPES bzw. Workshop-Crafts), liefert dies die Zeit, bis
+    die Inputs für EINE Konversionseinheit reichen — z. B. Catnip wächst auf
+    100 fürs erste Refine, obwohl die Holzrate selbst 0 ist. None, wenn keine
+    Konversion existiert oder kein Input in endlicher Zeit erreichbar ist."""
+    res = (bn or {}).get("resource")
+    if not res:
+        return None
+    recipe = A.craft_recipe(snap, res)
+    prices = recipe["prices"] if recipe else shadow.REFINE_RECIPES.get(res)
+    if not prices:
+        return None
+    worst = 0.0
+    for p in prices:
+        missing = p["val"] - A.res_value(snap, p["name"])
+        if missing <= 0:
+            continue
+        rate = A.res_rate(snap, p["name"])
+        if rate <= 0:
+            return None
+        worst = max(worst, missing / rate)
+    return worst
+
+
+def is_deadlock(candidates: list[Candidate], bn: dict | None,
+                snap: dict | None = None) -> bool:
     """Deadlock-Definition (Spec 22.3): kein zulässiger Kandidat mit
     positivem Score existiert UND WAIT hat keine Weckbedingung mit
-    endlicher Zeit (die endliche Weckbedingung von _wait_candidate ist die
-    Engpass-ETA — fehlt sie oder ist sie ∞, verbessert Warten nichts)."""
+    endlicher Zeit. Endliche Weckbedingungen sind die Engpass-ETA ODER —
+    mit Snapshot — die Konversions-ETA (_conversion_eta): Warten verbessert
+    den Zustand auch, wenn der Input einer Refine-/Craft-Konversion in
+    endlicher Zeit reicht."""
     if any(c.feasible and c.score > 0 and c.action.type != "WAIT"
            for c in candidates):
         return False
     eta = (bn or {}).get("etaSeconds")
-    return eta is None or not math.isfinite(eta)
+    if eta is not None and math.isfinite(eta):
+        return False
+    if snap is not None:
+        conv = _conversion_eta(snap, bn)
+        if conv is not None and math.isfinite(conv):
+            return False
+    return True
 
 
 def resolve_deadlock(snap: dict, meta_view, safety_result
@@ -1989,12 +2046,12 @@ def resolve_deadlock(snap: dict, meta_view, safety_result
     Rückgabe: (candidates, bottleneck, detail) mit detail["stage"] ∈
     {"a", "b", "c"}; in Stufe c zusätzlich detail["notice"]."""
     cands, bn = generate(snap, meta_view, safety_result, horizon_scale=2.0)
-    if not is_deadlock(cands, bn):
+    if not is_deadlock(cands, bn, snap):
         return cands, bn, {"stage": "a",
                            "detail": "Horizontverdopplung löst den Deadlock (22.3 a)"}
     cands, bn = generate(snap, meta_view, safety_result, horizon_scale=2.0,
                          relax_whitelist=True)
-    if not is_deadlock(cands, bn):
+    if not is_deadlock(cands, bn, snap):
         return cands, bn, {"stage": "b",
                            "detail": "gelockerter Suchraum (ECONOMY_WHITELIST auf) "
                                      "löst den Deadlock (22.3 b)"}

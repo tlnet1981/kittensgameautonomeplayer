@@ -146,3 +146,43 @@ def test_deterministic_ordering():
     c2, _, s2, _ = _generate(snap)
     assert [c.action.id for c in c1] == [c.action.id for c in c2]
     assert s1.action.id == s2.action.id
+
+
+# ---------------------------------------------------------------- Deadlock-Regression (Live-Fund)
+
+def test_wood_first_low_catnip_is_not_a_deadlock():
+    """Live-Fund: Ziel 'Erstes Holz veredeln', Catnip < 100 (Refine noch
+    unbezahlbar), keine Woodcutter (Holzrate 0). Früher: nur WAIT →
+    Deadlock-Fehlalarm + Stillstand. Jetzt: Gather-Kandidat sammelt den
+    Konversions-Input aktiv, und die Konversions-ETA ist eine endliche
+    Weckbedingung (kein Deadlock, 22.3)."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 60, "max": 5000, "rate": 1.2},
+                   "wood": {"value": 0, "max": 200, "rate": 0.0}},
+        buildings={"field": {"val": 12, "prices": {"catnip": 350},
+                             "unlocked": True}},
+    )
+    mv = meta.evaluate(snap)
+    assert mv.objective_label == "Erstes Holz veredeln"
+    cands, bn = tactics.generate(snap, mv, safety.check(snap))[:2]
+    positive = [c for c in cands if c.feasible and c.score > 0
+                and c.action.type != "WAIT"]
+    assert positive, "es muss einen aktiven Kandidaten geben (Gather)"
+    assert any(c.action.id.startswith("gather") for c in positive)
+    assert not tactics.is_deadlock(cands, bn, snap)
+    # Refine ist sichtbar abgelehnt mit endlicher ETA im Grund:
+    refine = next(c for c in cands if c.action.id.startswith("refine"))
+    assert not refine.feasible and "catnip" in (refine.reject_reason or "")
+
+
+def test_real_deadlock_without_conversion_still_detected():
+    """Gegenprobe: Engpass ohne Rate UND ohne Konversionsrezept bleibt ein
+    echter Deadlock (22.3) — die Konversions-ETA-Prüfung weicht das
+    Kriterium nicht generell auf."""
+    from player.brain.records import Candidate as C
+    from player.brain import actions
+    wait_c = C(actions.wait("x", "y"), 0.01, {"base": 0.01})
+    snap = make_snap(resources={"uranium": {"value": 0, "max": 100, "rate": 0.0}})
+    assert tactics.is_deadlock([wait_c], {"resource": "uranium",
+                                          "etaSeconds": None}, snap)

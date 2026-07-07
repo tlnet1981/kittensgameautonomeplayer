@@ -428,13 +428,16 @@ def test_is_deadlock_definition():
 
 
 def _deadlock_snap(extra_buildings=None):
-    """Kein positiver Kandidat: Engpass Wood ohne Rate (ETA ∞), nichts
-    leistbar, keine Kitten. zebraForge (außerhalb der ECONOMY_WHITELIST)
-    wird erst im gelockerten Suchraum sichtbar."""
+    """ECHTER Deadlock: Engpass Wood ohne Rate (ETA ∞), nichts leistbar.
+    Ein besetzter Woodcutter schließt den Gather→Refine-Konversionszweig
+    (der seit dem Live-Deadlock-Fix sonst einen aktiven Kandidaten liefert
+    und die Lage korrekt als Nicht-Deadlock einstuft); Catnip-Rate 0 hält
+    auch die Konversions-ETA unendlich. zebraForge (außerhalb der
+    ECONOMY_WHITELIST) wird erst im gelockerten Suchraum sichtbar."""
     buildings = {"field": {"val": 10, "prices": {"catnip": 100}},
                  "barn": {"val": 0, "prices": {}}}
     buildings.update(extra_buildings or {})
-    return make_snap(buildings=buildings)
+    return make_snap(buildings=buildings, jobs={"woodcutter": 1})
 
 
 def test_deadlock_stage_b_relaxes_whitelist_not_safety():
