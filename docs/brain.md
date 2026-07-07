@@ -169,20 +169,25 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
 - **Space:** Missionen sind Meilenstein-Ziele (Orbital Launch → Mond);
   Planeten-Gebäude generische Kandidaten mit Engpass-Kopplung
   (Lunar Outpost → Unobtainium usw.).
-- **Time (17.x, Basisausbaustufe):** Chronoforge-Ausbau (Resource Retrieval
-  priorisiert), Cryochambers; konservative Shatter-Regel: nur mit RR ≥ 1,
-  Heat-Spielraum und 5-TC-Reserve, Batch ≤ 5.
+- **Shatter-Engine (17.1–17.5, `brain/timecrystal.py`):** TC-Bilanz,
+  RRValue/FurnaceValue steuern den Chronoforge-Ausbau; Shatter nach den
+  Spec-Regeln A–D mit deterministischer Batch-Suche unter Heat-/Cap-
+  Constraints und Cycle-Referenztabelle. Ohne λ-/Time-Daten greift die
+  alte konservative Regel (RR ≥ 1, Heat-Spielraum, 5-TC-Reserve, Batch ≤ 5).
 - **Chronosphere-Zielzahl (19.1, `brain/chrono.py`):** CSValue-Suche über
   n−2…n+3 (Carryover 1,5 %/CS, UO-Kosten über λ); gekauft wird nur bis zur
   optimalen Zahl, nicht mehr opportunistisch.
 - **TC-Schutz-Gate (I-02 / 9.1):** Reset mit ≥ 3 Time Crystals wird ohne
   Anachronomancy blockiert.
-- **Run-Typ-Wahl (8.3, `meta.determine_run_plan`):** zulässige Run-Typen
-  (FIRST/PRICE_RATIO/PARAGON) × drei Varianten (Minimal-/ausgeglichener/
-  investitionsstarker Pfad) werden per EV-Projektion (`brain/simulate.py`)
-  simuliert; Score = −Restzeit zum Run-Ziel, Tie-Break lexikografisch (C.2).
-  Die 13 Run-Typen aus Spec 8.2 sind als Konstanten angelegt; zulässig sind
-  bislang drei.
+- **Run-Typ-Wahl (8.2/8.3, `meta.determine_run_plan`):** alle **13
+  Run-Typen** der Spec sind aktiv zulässig (Zulässigkeits-Gates bilden die
+  9.2-Engine-Kaskade ab); je Typ drei Varianten (Minimal-/ausgeglichener/
+  investitionsstarker Pfad) per EV-Projektion (`brain/simulate.py`);
+  Score vor der Progressionsfront = −Restzeit − Risikoterme (5.4-Proxys),
+  nach der Front = E[ΔlnC/Δt] über den Endgame-Index C(S)
+  (`brain/endgame.py`, Spec 6.3); Tie-Break lexikografisch (C.2).
+  Makrophasen P0–P8 aus operationalen Austrittskriterien
+  (`meta.determine_phase`).
 - **Reset-Wert (20.1):** ResetValue = V(post) − V(continue) über die
   EV-Projektion am gleichen Realzeithorizont entscheidet den FIRST-Reset
   (Schwelle 35 bleibt notwendige Vorbedingung); Perk-Finanzierung bleibt
@@ -192,20 +197,56 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
 - **Paragon-Speedrun (20.4):** Reset, wenn die marginale Paragonrate
   (5-min-Fenster) unter 50 % der Ø-Rate des Runs fällt; Mindestlaufzeit
   20 min, Mindestgewinn 10 Paragon.
-- **TAP-light (15.2):** Vor jedem Reset wird Adore ausgeführt, wenn
-  Apocrypha aktiv ist (Worship → permanente Epiphany). Transcend ist noch
-  nicht automatisiert (Epiphany-Verlustrechnung).
+- **TAP vollständig (15.2, `brain/religion.py`):** transcend_value rechnet
+  die Epiphany-/Worship-Bilanz (Formeln aus religion.js); `tap_plan` liefert
+  die geordneten Schritte Transcend→Adore→Praise, ausgeführt in der
+  Pre-Reset-Transaktion. Alicorn→TC- und Tears→BLS-Konvertierung nach
+  Grenzwertregel (15.4), Pacts über PactValue mit Upkeep/Debt/Siphoning
+  (15.5) — alles irreversible Aktionen mit Commit-Grenze.
+- **Pre-Reset-Transaktion (20.3):** `reset.execute_reset` folgt der vollen
+  12-Schritt-Sequenz (Save-Export, Challenge-Verifikation, permanente
+  Käufe, TAP, Konvertierungen, CS-/Cryo-Zielstand, Restwert-Crafts,
+  Post-Reset-Projektion, harte Assertions, applyPending + Reset,
+  Validierung); jeder Schritt einzeln als `reset.step`-Event geloggt.
+- **Policies (13.4, `brain/policy.py`):** Bewertung über λ/Horizont mit
+  I-07-Alternativenprüfung, 13.4-Startkandidaten als Suchraum-Prior;
+  Kauf über die PolicyBtnController-API als irreversible Transaktion.
+- **Challenges (18, `brain/challenge.py`):** Katalog aus challenges.js,
+  ChallengeValue-Auswahl (18.2), CHALLENGE_RUN; Reset nur, wenn das Spiel
+  die Challenge als erfüllt markiert (18.4).
 
-## Bewusste Vereinfachungen gegenüber der Spec (Stand Schattenpreis-Ausbau)
+## Governance-Kern (Spec G-02/G-06/G-10, Kap. 21–23)
+
+- **AgentMode:** ACTIVE / MODEL_MISMATCH / SAFE_STOP. Versionsprüfung läuft
+  periodisch; bei Abweichung sind nur READ_ONLY-Aktionen und das Abschalten
+  von Verbrauchern zulässig (`loop.apply_mode_gate`), Reset ist gesperrt.
+  Freigabe über das Cockpit (`acknowledge_mismatch`).
+- **Prognose-Abgleich (G-10):** Aktionen tragen ein `predicted`-Dict;
+  nach Ausführung wird die beobachtete Änderung mit Toleranz verglichen
+  (`loop.check_prediction`), drei harte Abweichungen in Folge führen in
+  MODEL_MISMATCH.
+- **Ereignisgetriebenes Replanning (21):** `brain/scheduler.py` berechnet
+  die nächste Weckzeit (Saison, ½-Cap, 10 %-ETA, 30-s-Kontrollpunkt);
+  harte Trigger werden per Vorzyklus-Signatur klassifiziert; irreversible
+  Aktionen laufen durch die Commit-Grenze (`loop.commit_guard`: Re-Read +
+  Precondition unmittelbar vor Ausführung).
+- **Deadlock (22.3):** kein positiver Kandidat + keine endliche
+  Weckbedingung ⇒ Horizont ×2, dann Suchraum lockern, dann
+  Frontier-Meldung — Sicherheitsinvarianten werden nie gelockert.
+
+## Bewusste Näherungen gegenüber der Spec (Stand Spec-Vollausbau)
+
+Alle 33 Zeilen des Spec-Audits sind umgesetzt ([spec-gaps.md](spec-gaps.md)).
+Was bleibt, sind dokumentierte Näherungen — im Code jeweils als
+REFERENZSCHÄTZUNG gekennzeichnet:
 
 | Spec | Hier | Warum |
 |---|---|---|
-| Stochastische Vorwärtssimulation (Kap. 5) | deterministische **EV-Projektion** (`brain/simulate.py`) für Makro-Entscheidungen; Taktik weiter auf Live-Raten | Erwartungswerte statt Monte-Carlo: transparent, deterministisch, testbar |
-| Schattenpreise λᵢ (10.2) | numerische Ableitung über die Engpass-ETA + Craft-Kaskade (`brain/shadow.py`) | exakte ∂ETA/∂Rᵢ über den vollen Abhängigkeitsgraphen wäre Modellduplikat; Näherungen im Modul dokumentiert |
-| Model-Mismatch-Stop (22.2) | Warnung + DEGRADED | privater Betrieb gegen Online-Spiel |
-| Challenges (Kap. 18) | nicht automatisiert | irreversibel + regeländernd; Aktions-/Gate-Gerüst vorhanden |
-| Policies (13.4) | nicht automatisiert | exklusiv-irreversibel; Panel-Scoping im Actor bereit |
-| Pacts/Necrocorns (15.5), volle Shatter-Engine (17), Seed-/CS-Loops (19.2+) | Grundbausteine (Leviathan-Handel, Shatter-Basis, CS-Zielzahl-Suche, Cryochambers) | exakte Endgame-Bilanzen wären eigene Modellierungsprojekte — Architektur (Ziel-Arten, Kandidaten, Gates) nimmt sie auf |
+| Stochastische Vorwärtssimulation (Kap. 5) | deterministische **EV-Projektion** (`brain/simulate.py`); Zufallsaktionen als Erwartungswerte | transparent, deterministisch, testbar |
+| Schattenpreise λᵢ (10.2) | numerische Ableitung über die Engpass-ETA + Craft-Kaskade (`brain/shadow.py`) | exakte ∂ETA/∂Rᵢ über den vollen Abhängigkeitsgraphen wäre Modellduplikat |
+| CVaR-Risikoterme (5.4) | deterministische Proxys: P(fatal) = Food-Invariante im Horizont, Verlustterm ETA-basiert | echtes CVaR bräuchte Ergebnisverteilungen |
+| Referenzkonstanten (Challenge-Zeiten, TC-/Necrocorn-Zeitwerte, Endgame-bᵢ, einzelne Policy-/Trait-Effekte) | dokumentierte Schätz-/Normierungswerte mit gamefiles-Fundstelle am Wert | beeinflussen Prioritäten, nicht die Korrektheit der Gates; bei Prognose-Abweichung im Betrieb durch gemessene Raten ersetzen |
+| Late-Game-Live-Nachweis (Pacts, Leviathans, Relic, Void, Challenges) | gegen gamefiles-Formeln + synthetische Fixtures getestet | Live-Validierung braucht fortgeschrittene Spielstände; der Governance-Kern (Prognose-Abgleich, MODEL_MISMATCH) fängt Abweichungen ab |
 
 **Erweitern:** Neue Spielschicht = (1) Snapshot-Sektion in `driver/snapshot.js`,
 (2) ggf. neue Ziel-Art in `tactics._target_prices/_target_obj/_milestone_candidate`,
