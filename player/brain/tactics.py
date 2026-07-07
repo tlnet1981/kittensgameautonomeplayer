@@ -20,7 +20,7 @@ from typing import Any
 
 from player.state import access as A
 from player.state.derived import CATNIP_PER_FIELD_PER_SEC, project_catnip
-from . import actions, chrono, policy, religion, shadow, timecrystal
+from . import actions, chrono, frontier, policy, religion, shadow, timecrystal
 from .records import Candidate
 
 # Verbrauch eines Kittens (0,85 Catnip/Tick × 5 Ticks/s), Fallback für die
@@ -78,8 +78,10 @@ CAP_RELIEF_CRAFTS = {
 WAIT_SCORE = 0.01
 
 # Reine Anzeige-Komponenten (Sekundenwerte der Schattenpreis-/CS-Rechnung) —
-# sie fließen NICHT additiv in den Score ein; netValue geht normiert ein.
-SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "jobScore", "csValue",
+# sie fließen NICHT additiv in den Score ein; netValue/optionValue gehen
+# normiert ein (siehe _score).
+SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "optionValue",
+                    "jobScore", "csValue",
                     "tradeValue", "huntValue", "praiseValue",
                     "storageB", "storageC", "leaderValue", "policyValue",
                     "tapValue", "pactValue",
@@ -99,11 +101,13 @@ JOB_ORDER = ("woodcutter", "farmer", "scholar", "miner",
 
 def _score(comp: dict[str, float]) -> float:
     """Score aus Komponenten: Sekundenwerte (SHADOW_INFO_KEYS) zählen nicht
-    additiv; netValue geht normiert ein (Kaufregel 10.3, NetValue primär)."""
+    additiv; netValue (Kaufregel 10.3) und optionValue (Optionswert 8.4)
+    gehen normiert und geklemmt ein."""
     s = sum(v for k, v in comp.items() if k not in SHADOW_INFO_KEYS)
-    if "netValue" in comp:
-        s += max(-NET_VALUE_CLAMP, min(NET_VALUE_CLAMP,
-                                       comp["netValue"] / NET_VALUE_SCALE))
+    for key in ("netValue", "optionValue"):
+        if key in comp:
+            s += max(-NET_VALUE_CLAMP, min(NET_VALUE_CLAMP,
+                                           comp[key] / NET_VALUE_SCALE))
     return s
 
 
@@ -205,8 +209,16 @@ def _target_obj(snap: dict, target: dict | None) -> dict | None:
 
 # ================================================================ Kandidaten
 
-def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dict | None]:
-    """Erzeugt alle Kandidaten inkl. Scores; gibt (candidates, bottleneck) zurück."""
+def generate(snap: dict, meta_view, safety_result, *,
+             horizon_scale: float = 1.0,
+             relax_whitelist: bool = False) -> tuple[list[Candidate], dict | None]:
+    """Erzeugt alle Kandidaten inkl. Scores; gibt (candidates, bottleneck) zurück.
+
+    horizon_scale/relax_whitelist werden NUR von der Deadlock-Auflösung
+    (resolve_deadlock, Spec 22.3) gesetzt: Horizontverdopplung der λ-/
+    Payback-Bewertung bzw. Aufhebung der ECONOMY_WHITELIST-Suchraum-
+    Heuristik. Sicherheitsinvarianten (blocked_types, foodRisk, Storage-
+    Gates 11.3, Kaufregel 10.3) bleiben dabei UNVERÄNDERT."""
     target = meta_view.active.target if meta_view.active else None
     bn = bottleneck_info(snap, target)
     cands: list[Candidate] = []
@@ -219,19 +231,19 @@ def generate(snap: dict, meta_view, safety_result) -> tuple[list[Candidate], dic
     goal_prices = _target_prices(snap, target)
     lam = shadow.shadow_prices(snap, goal_prices) if goal_prices else {}
     lam_rate = shadow.rate_shadow_prices(snap, goal_prices) if goal_prices else {}
-    horizon = shadow.run_horizon(snap)
+    horizon = shadow.run_horizon(snap) * max(1.0, horizon_scale)
 
     _milestone_candidate(snap, target, bn, cands, blocked)
     _job_candidates(snap, bn, cands, lam_rate)
     _gather_candidates(snap, target, bn, cands)
-    _research_candidates(snap, target, cands, lam)
+    _research_candidates(snap, target, cands, lam, lam_rate)
     _building_candidates(snap, target, bn, cands, blocked, reserved, banking,
-                         lam, horizon)
+                         lam, horizon, relax_whitelist)
     if banking:
         _banking_candidates(snap, cands)
     _energy_candidates(snap, cands, lam, horizon)
     _leader_candidate(snap, cands, lam, goal_prices, horizon)
-    _upgrade_candidates(snap, cands, lam)
+    _upgrade_candidates(snap, cands, lam, lam_rate)
     _policy_candidates(snap, meta_view.run_type, cands, lam, horizon)
     _hunt_candidate(snap, cands, lam)
     _craft_candidates(snap, target, bn, cands, lam)
@@ -462,7 +474,55 @@ def _gather_candidates(snap, target, bn, cands) -> None:
 
 # ---------------------------------------------------------------- Forschung
 
-def _research_candidates(snap, target, cands, lam=None) -> None:
+# OptionValue-Referenztabelle (Spec 8.4/13.3): Rate-Effekte der wichtigsten
+# Frühspiel-Techs aus der Referenzversion — diese Techs liegen zugleich auf
+# dem Meilensteinpfad (meta.P0_MILESTONES) bzw. öffnen eine neue
+# Progressionsschicht (13.3-Klassen). ΔRate = Produktion des ERSTEN
+# freigeschalteten Trägers (1 Job / 1 Gebäude, ×5 Ticks/s):
+# - agriculture → Farmer-Job (science.js:31-34 unlocks jobs:["farmer"];
+#   village.js:27-33 modifiers catnip 1/Tick) → 5.0/s
+# - archery     → Hunter-Job (science.js:44-47; village.js:56-62
+#   manpower 0.06/Tick) → 0.3/s
+# - mining      → Mine + Miner (science.js:56-59 buildings:["mine"];
+#   village.js:67-73 minerals 0.05/Tick) → 0.25/s
+# - metal       → Smelter (science.js:68-70 buildings:["smelter"];
+#   buildings.js:1019 ironPerTickAutoprod 0.02/Tick) → 0.1/s
+# - construction→ Lumber Mill (science.js:124-127 buildings inkl.
+#   "lumberMill"; ≈ 1 Woodcutter-Äquivalent, village.js:15-21
+#   wood 0.018/Tick) → 0.09/s
+TECH_OPTION_RATE_EFFECTS: dict[str, dict[str, float]] = {
+    "agriculture": {"catnip": 5.0},
+    "archery": {"manpower": 0.3},
+    "mining": {"minerals": 0.25},
+    "metal": {"iron": 0.1},
+    "construction": {"wood": 0.09},
+}
+
+# Analog für die frühen Workshop-Upgrades: (Job, Ressource, Ratio) —
+# workshop.js:10-15 mineralHoes catnipJobRatio 0.5; :24-29 ironHoes 0.3;
+# :37-42 mineralAxes woodJobRatio 0.7; :51-56 ironAxes 0.5. ΔRate =
+# Ratio × Jobbesetzung × Basisrate (shadow.JOB_BASE_RATES).
+UPGRADE_OPTION_JOB_RATIO: dict[str, tuple[str, str, float]] = {
+    "mineralHoes": ("farmer", "catnip", 0.5),
+    "ironHoes": ("farmer", "catnip", 0.3),
+    "mineralAxes": ("woodcutter", "wood", 0.7),
+    "ironAxes": ("woodcutter", "wood", 0.5),
+}
+
+
+def _option_value(lam_rate, rate_delta: dict[str, float]) -> float:
+    """OptionValue(m) = E[T_F | ohne m] − E[T_F | mit m] (Spec 8.4) als
+    dokumentierte Näherung: die Projektion MIT dem Unlock-Effekt verkürzt
+    die Ziel-ETA um Σ λ_rate_i · ΔRate_i Sekunden (λ_rate = Zielzeitgewinn
+    pro dauerhafter Einheit/s, shadow.rate_shadow_prices). Nur Rate-Effekte
+    aus der gamefiles-Referenz; 0.0 ohne λ_rate-Daten → Fallback fester
+    Unlock-Score."""
+    if not lam_rate or not rate_delta:
+        return 0.0
+    return sum(lam_rate.get(res, 0.0) * dr for res, dr in rate_delta.items())
+
+
+def _research_candidates(snap, target, cands, lam=None, lam_rate=None) -> None:
     target_name = target.get("name") if target and target["kind"] == "research" else None
     affordable_techs = []
     for t in snap.get("science", {}).get("techs", []):
@@ -476,12 +536,18 @@ def _research_candidates(snap, target, cands, lam=None) -> None:
     for t in affordable_techs[:2]:
         comp = {"unlock": 1.9}
         # Sekundenkosten transparent machen — Unlocks werden aber nie durch
-        # die Payback-Regel gesperrt (Spec 10.4), der Score bleibt fix:
+        # die Payback-Regel gesperrt (Spec 10.4):
         ct = shadow.cost_time(t["prices"], lam) if lam else 0.0
         if ct > 1e-9:
             comp["costTime"] = ct
+        # Optionswert (8.4): kein Pauschalbonus — Techs der Referenztabelle
+        # bekommen die berechnete Ziel-ETA-Verkürzung als Sekundenwert, der
+        # normiert in den Score eingeht; sonst bleibt der feste Unlock-Score.
+        ov = _option_value(lam_rate, TECH_OPTION_RATE_EFFECTS.get(t["name"], {}))
+        if ov > 1e-9:
+            comp["optionValue"] = ov
         cands.append(Candidate(actions.research(t["name"], t["label"], prices=t["prices"]),
-                               1.9, comp))
+                               _score(comp), comp))
 
 
 # ---------------------------------------------------------------- Gebäude
@@ -506,7 +572,8 @@ def _banking_candidates(snap, cands) -> None:
 
 
 def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
-                         banking=False, lam=None, horizon=None) -> None:
+                         banking=False, lam=None, horizon=None,
+                         relax_whitelist=False) -> None:
     target_name = target.get("name") if target and target["kind"] == "build" else None
     prices_target = _target_prices(snap, target)
     cap_blocked_res = A.cap_blocks(snap, prices_target) if prices_target else None
@@ -514,7 +581,12 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
 
     for b in snap.get("buildings", []):
         name = b["name"]
-        if name == target_name or not b["unlocked"] or name not in ECONOMY_WHITELIST:
+        if name == target_name or not b["unlocked"]:
+            continue
+        # ECONOMY_WHITELIST ist eine reine SUCHRAUM-Heuristik — die
+        # Deadlock-Auflösung (22.3) darf sie aufheben (relax_whitelist);
+        # alle Sicherheits-Gates weiter unten bleiben unverändert.
+        if name not in ECONOMY_WHITELIST and not relax_whitelist:
             continue
         if not A.affordable(snap, b["prices"]):
             continue
@@ -1021,7 +1093,7 @@ def _leader_candidate(snap, cands, lam, goal_prices, horizon) -> None:
 
 # ---------------------------------------------------------------- Upgrades
 
-def _upgrade_candidates(snap, cands, lam=None) -> None:
+def _upgrade_candidates(snap, cands, lam=None, lam_rate=None) -> None:
     ups = [u for u in snap.get("workshop", {}).get("upgrades", [])
            if u["unlocked"] and not u["researched"] and A.affordable(snap, u["prices"])]
     ups.sort(key=lambda u: (sum(p["val"] for p in u["prices"]), u["name"]))
@@ -1032,8 +1104,18 @@ def _upgrade_candidates(snap, cands, lam=None) -> None:
         ct = shadow.cost_time(u["prices"], lam) if lam else 0.0
         if ct > 1e-9:
             comp["costTime"] = ct
+        # Optionswert (8.4) für die Referenz-Upgrades: ΔRate = Ratio ×
+        # Jobbesetzung × Basisrate (UPGRADE_OPTION_JOB_RATIO, workshop.js).
+        job_ratio = UPGRADE_OPTION_JOB_RATIO.get(u["name"])
+        if job_ratio is not None:
+            job, res, ratio = job_ratio
+            base = shadow.JOB_BASE_RATES.get(job, {}).get(res, 0.0)
+            ov = _option_value(lam_rate,
+                               {res: ratio * A.job_count(snap, job) * base})
+            if ov > 1e-9:
+                comp["optionValue"] = ov
         cands.append(Candidate(actions.buy_upgrade(u["name"], u["label"], prices=u["prices"]),
-                               1.4, comp))
+                               _score(comp), comp))
 
 
 # ---------------------------------------------------------------- Policies (13.4)
@@ -1152,6 +1234,20 @@ def _craft_ratio(snap) -> float:
     return float(snap.get("workshop", {}).get("craftRatio", 0.0) or 0.0)
 
 
+# Cap-Management (Spec 11.4): einheitliches Basisgewicht der Optionen
+# „werterhaltender Craft" / „profitabler Trade" bei drohendem Cap-Verlust —
+# die AUSWAHL zwischen den Optionen trifft der netValue-Sekundenwert in
+# _score (NetValue bestätigt die Reihenfolge, keine blinde Prioritätsliste);
+# die alten Füllstands-Schwellen (0.92 Craft, 0.95 Trade) bleiben reine
+# TRIGGER-Vorfilter. NetValue ≤ 0 heißt: „akzeptierter Verlust" ist die
+# beste Option — der Kandidat wird als infeasible dokumentiert. Ohne
+# λ-Daten bleibt das alte Verhalten (feste Scores 1.6/1.1).
+CAP_OPTION_BASE = 1.5
+CAP_ACCEPTED_LOSS = ("akzeptierter Verlust ist die beste Option (11.4): "
+                     "NetValue {nv:.1f} s ≤ 0 — kein werterhaltender Abfluss "
+                     "mit positivem Zielwert")
+
+
 def _craft_candidates(snap, target, bn, cands, lam=None) -> None:
     prices_target = _target_prices(snap, target) or []
 
@@ -1165,9 +1261,11 @@ def _craft_candidates(snap, target, bn, cands, lam=None) -> None:
             gap = p["val"] - A.res_value(snap, p["name"])
             if gap > 0:
                 _craft_toward(snap, p["name"], gap, cands, depth=0, seen=seen,
-                              lam=lam)
+                              lam=lam, goal_prices=prices_target)
 
-    # b) Cap-Verlust am Input vermeiden (11.4):
+    # b) Cap-Verlust am Input vermeiden (11.4) — Trigger-Vorfilter 0.92,
+    #    Auswahl per NetValue (siehe CAP_OPTION_BASE):
+    goal_res = {p["name"] for p in prices_target}
     for input_res, craft_name in CAP_RELIEF_CRAFTS.items():
         recipe = A.craft_recipe(snap, craft_name)
         if not recipe:
@@ -1181,15 +1279,53 @@ def _craft_candidates(snap, target, bn, cands, lam=None) -> None:
         if r["value"] / r["maxValue"] > 0.92 and r["value"] >= price \
                 and craft_name not in seen:
             batch = max(1, min(10, int((r["value"] * 0.3) // price)))
-            cands.append(Candidate(
-                actions.craft(craft_name, recipe["label"], batch,
-                              prices=recipe["prices"], craft_ratio=_craft_ratio(snap)),
-                1.6, {"capLoss": 1.6}))
+            act = actions.craft(craft_name, recipe["label"], batch,
+                                prices=recipe["prices"],
+                                craft_ratio=_craft_ratio(snap))
+            if lam:
+                # NetValue des werterhaltenden Crafts: λ-Wert des Produkts
+                # minus OpportunityCost der Inputs, die ZUGLEICH im Ziel-
+                # preisvektor stehen (11.2). Der überlaufende Input selbst
+                # hat außerhalb des Ziels Alternativwert 0 — er verfiele
+                # sonst am Cap (11.4).
+                units = batch * (1.0 + _craft_ratio(snap))
+                ben = lam.get(craft_name, 0.0) * units
+                opp = sum(lam.get(q["name"], 0.0) * q["val"] * batch
+                          for q in recipe["prices"] if q["name"] in goal_res)
+                nv = shadow.net_value(ben, opp)
+                if nv <= 0:
+                    cands.append(Candidate(
+                        act, 0.0, {"capLoss": 0.0, "netValue": nv},
+                        feasible=False,
+                        reject_reason=CAP_ACCEPTED_LOSS.format(nv=nv)))
+                else:
+                    comp = {"capLoss": CAP_OPTION_BASE, "netValue": nv}
+                    cands.append(Candidate(act, _score(comp), comp))
+            else:
+                cands.append(Candidate(act, 1.6, {"capLoss": 1.6}))
 
 
 def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
-                  seen: set[str], lam=None) -> None:
-    """Rekursiver Abstieg im Craft-Graphen (max. Tiefe 4)."""
+                  seen: set[str], lam=None, goal_prices=None) -> None:
+    """Rekursiver Abstieg im Craft-Graphen (max. Tiefe 4).
+
+    Score (Spec 11.2): Mit λ-Daten NetValue-basiert statt Tiefen-Score —
+
+        EffectiveCost(craft) = Σ_j λ_j·Input_j / CraftYield
+                               + OpportunityCost(inputs)
+
+    Herleitung der Implementierung: Inputs AUSSERHALB des Zielpreisvektors
+    tragen ihr λ ausschließlich über die Kaskade AUS dem Produkt
+    (λ_input = λ_produkt / Inputmenge, shadow._propagate_cascade) — ihr
+    Alternativwert ist 0 und sie kürzen sich exakt gegen den Produktnutzen.
+    Übrig bleibt als effektive Kostenposition die OPPORTUNITÄT der Inputs,
+    die ZUGLEICH im Zielpreisvektor stehen (λ der Alternativverwendung:
+    das Ziel direkt bezahlen). NetValue = λ_produkt·Einheiten − Opportunität;
+    Basisgewicht 1.0 als Kaskaden-Marker, netValue geht normiert in den
+    Score ein (Kaufregel 10.3: negativer NetValue wird nie ausgeführt).
+    Kaskade und Batching (kleinste Charge bis Gate, max. 10) bleiben.
+    Fallback ohne λ oder ohne λ_Produkt: alter Tiefen-Score
+    max(0.5, 2.0 − 0.1·Tiefe)."""
     if depth > 4 or craft_name in seen:
         return
     seen.add(craft_name)
@@ -1203,19 +1339,19 @@ def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
             (A.res_value(snap, q["name"]) // q["val"]
              for q in recipe["prices"] if q["val"] > 0), default=1)
         batch = max(1, min(10, int(max_by_inputs), math.ceil(gap)))
-        score = max(0.5, 2.0 - 0.1 * depth)
-        comp = {"milestone": score}
-        # Sekundenwerte transparent machen (Score bleibt fix — Crafts der
-        # Meilenstein-Kaskade sind zwingende Dependencies, Spec 10.4):
-        if lam:
-            cost_t = shadow.cost_time(
-                [{"name": q["name"], "val": q["val"] * batch}
-                 for q in recipe["prices"]], lam)
-            ben_t = lam.get(craft_name, 0.0) * batch
-            if cost_t > 1e-9 or ben_t > 1e-9:
-                comp["costTime"] = cost_t
-                comp["benefitTime"] = ben_t
-                comp["netValue"] = shadow.net_value(ben_t, cost_t)
+        lam_prod = (lam or {}).get(craft_name, 0.0)
+        if lam and lam_prod > 1e-9:
+            yield_per = 1.0 + _craft_ratio(snap)
+            goal_res = {p["name"] for p in (goal_prices or [])}
+            ben_t = lam_prod * batch * yield_per
+            opp_t = sum(lam.get(q["name"], 0.0) * q["val"] * batch
+                        for q in recipe["prices"] if q["name"] in goal_res)
+            comp = {"craftPath": 1.0, "benefitTime": ben_t, "costTime": opp_t,
+                    "netValue": shadow.net_value(ben_t, opp_t)}
+            score = _score(comp)
+        else:
+            score = max(0.5, 2.0 - 0.1 * depth)
+            comp = {"milestone": score}
         cands.append(Candidate(
             actions.craft(craft_name, recipe["label"], batch,
                           prices=recipe["prices"], craft_ratio=_craft_ratio(snap)),
@@ -1225,7 +1361,7 @@ def _craft_toward(snap, craft_name: str, gap: float, cands, depth: int,
     for m in missing:
         if A.craft_recipe(snap, m["name"]) is not None:
             _craft_toward(snap, m["name"], m["missing"], cands, depth + 1, seen,
-                          lam=lam)
+                          lam=lam, goal_prices=goal_prices)
 
 
 # ---------------------------------------------------------------- Religion
@@ -1521,6 +1657,9 @@ def _trade_candidates(snap, bn, cands, lam=None) -> None:
             ))
 
     # Gold am Cap ist verschenkter Handelsspielraum (Cap-Regel 11.4):
+    # 0.95-Füllstand bleibt Trigger-Vorfilter; mit λ-Daten entscheidet der
+    # NetValue-Sekundenwert (TradeValue 14.1) über die Auswahl — NetValue
+    # ≤ 0 ⇒ akzeptierter Verlust (CAP_OPTION_BASE, siehe Kommentar oben).
     gold_res = A.resource(snap, "gold")
     if gold_res and gold_res.get("maxValue", 0) > 0 \
             and gold_res["value"] / gold_res["maxValue"] > 0.95 \
@@ -1531,10 +1670,19 @@ def _trade_candidates(snap, bn, cands, lam=None) -> None:
             have = A.res_value(snap, p["name"])
             batch = int(min(batch, have // p["val"])) if p["val"] else batch
         if batch >= 1 and not any(c.action.id == f"trade:{race['name']}" for c in cands):
-            cands.append(Candidate(
-                _trade_action(snap, race, diplo, batch), 1.1,
-                {"capLoss": 1.1},
-            ))
+            act = _trade_action(snap, race, diplo, batch)
+            if lam:
+                nv = _trade_value(snap, race, diplo, lam) * batch
+                if nv <= 0:
+                    cands.append(Candidate(
+                        act, 0.0, {"capLoss": 0.0, "netValue": nv},
+                        feasible=False,
+                        reject_reason=CAP_ACCEPTED_LOSS.format(nv=nv)))
+                else:
+                    comp = {"capLoss": CAP_OPTION_BASE, "netValue": nv}
+                    cands.append(Candidate(act, _score(comp), comp))
+            else:
+                cands.append(Candidate(act, 1.1, {"capLoss": 1.1}))
 
 
 # ---------------------------------------------------------------- Religion / Festival
@@ -1806,6 +1954,57 @@ def _wait_candidate(snap, bn, cands, meta_view) -> None:
     cands.append(Candidate(actions.wait(reason, wake), WAIT_SCORE, {"base": WAIT_SCORE}))
 
 
+# ================================================================ Deadlock (22.3)
+
+def is_deadlock(candidates: list[Candidate], bn: dict | None) -> bool:
+    """Deadlock-Definition (Spec 22.3): kein zulässiger Kandidat mit
+    positivem Score existiert UND WAIT hat keine Weckbedingung mit
+    endlicher Zeit (die endliche Weckbedingung von _wait_candidate ist die
+    Engpass-ETA — fehlt sie oder ist sie ∞, verbessert Warten nichts)."""
+    if any(c.feasible and c.score > 0 and c.action.type != "WAIT"
+           for c in candidates):
+        return False
+    eta = (bn or {}).get("etaSeconds")
+    return eta is None or not math.isfinite(eta)
+
+
+def resolve_deadlock(snap: dict, meta_view, safety_result
+                     ) -> tuple[list[Candidate], dict | None, dict]:
+    """Generische Deadlock-Auflösung (Spec 22.3) — deterministisch, EIN
+    Durchlauf, kein Loop:
+
+    (a) Makrohorizont der λ-/Payback-Bewertung verdoppeln und einmal neu
+        bewerten (längerer Horizont kann Payback-Gates 10.4 öffnen);
+    (b) zusätzlich die Suchraum-Heuristik lockern: ECONOMY_WHITELIST-
+        Beschränkung der Gebäude-Kandidaten aufheben (nur für DIESE
+        Bewertung — der Normalzyklus behält die Heuristik);
+    (c) bleibt der Deadlock, wird eine Frontier-Wächter-Meldung „deadlock"
+        erzeugt (frontier.deadlock_notice — der Betreiber sieht sie im
+        Cockpit), und der Agent wartet weiter.
+
+    Sicherheitsinvarianten und Versionsbindung werden NIEMALS gelockert
+    (22.3 Satz 2): blocked_types, foodRisk, Storage-Gates 11.3 und die
+    Kaufregel 10.3 gelten in jeder Stufe unverändert.
+
+    Rückgabe: (candidates, bottleneck, detail) mit detail["stage"] ∈
+    {"a", "b", "c"}; in Stufe c zusätzlich detail["notice"]."""
+    cands, bn = generate(snap, meta_view, safety_result, horizon_scale=2.0)
+    if not is_deadlock(cands, bn):
+        return cands, bn, {"stage": "a",
+                           "detail": "Horizontverdopplung löst den Deadlock (22.3 a)"}
+    cands, bn = generate(snap, meta_view, safety_result, horizon_scale=2.0,
+                         relax_whitelist=True)
+    if not is_deadlock(cands, bn):
+        return cands, bn, {"stage": "b",
+                           "detail": "gelockerter Suchraum (ECONOMY_WHITELIST auf) "
+                                     "löst den Deadlock (22.3 b)"}
+    notice = frontier.deadlock_notice(meta_view.run_type,
+                                      meta_view.objective_label)
+    return cands, bn, {"stage": "c",
+                       "detail": "Deadlock bleibt — Frontier-Meldung (22.3 c)",
+                       "notice": notice}
+
+
 # ================================================================ Begründung
 
 REASON_TEMPLATES = {
@@ -1826,6 +2025,8 @@ REASON_TEMPLATES = {
     "leader": "{label}: Trait mit der größten Zielzeitverkürzung (Leader-Regel 12.3).",
     "leaderValue": "{label}: prognostizierter Zielzeitgewinn des Trait-Wechsels (12.3).",
     "netValue": "{label} spart netto Zielzeit (Schattenpreis-Bewertung 10.2/10.3).",
+    "optionValue": "{label}: Optionswert = Verkürzung der Rest-ETA durch den Unlock (8.4).",
+    "craftPath": "{label}: Craft-Kaskade zum Ziel, Score aus NetValue/EffectiveCost (11.2).",
     "benefitTime": "{label} beschleunigt das Ziel (Benefit in Ziel-Sekunden).",
     "costTime": "{label} kostet Ziel-Sekunden (Schattenpreis-Bewertung).",
     "jobScore": "{label} maximiert den Zielzeitgewinn pro Kitten (JobScore 12.2).",

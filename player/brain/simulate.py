@@ -105,6 +105,23 @@ class Projection:
                 return self.kittens[i - 1] + frac * (self.kittens[i] - self.kittens[i - 1])
         return self.kittens[-1] if self.kittens else 0.0
 
+    # ------------------------------------------------------------ Food (I-01)
+    def food_fatal(self) -> bool:
+        """P(fatal)-Proxy für die Plan-Risikobewertung (Spec 6.2 + I-01):
+        True, wenn die Projektion die Catnip-Reserve innerhalb des Horizonts
+        auf null fallen sieht, während Kitten leben — die Food-Invariante
+        ist unser einziger fataler Pfad. DETERMINISTISCHER PROXY, kein CVaR:
+        das Spec-5.4-Zufallsmodell bräuchte Ergebnisverteilungen; hier wird
+        bewusst nur der EV-Pfad geprüft (dokumentierte Näherung). Fehlt
+        Catnip in der Projektion (unvollständiger Snapshot), konservativ
+        False — keine geratene Katastrophe."""
+        for i, row in enumerate(self.series):
+            if "catnip" not in row:
+                return False
+            if self.times[i] > 0 and row["catnip"] <= EPS and self.kittens[i] > 0:
+                return True
+        return False
+
     # ------------------------------------------------------------ Paragon
     def paragon_projection(self, t: float) -> float:
         """Reset-Paragon zum Zeitpunkt t: max(0, kittens−70) + year//1000

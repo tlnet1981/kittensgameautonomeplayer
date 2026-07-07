@@ -272,6 +272,24 @@ class Brain:
         # Kaufregel (Spec 10.3): nur Aktionen mit positivem NetValue; sonst WAIT.
         selected = next((c for c in candidates if c.feasible and c.score > 0),
                         next(c for c in candidates if c.action.type == "WAIT"))
+        # Deadlock-Auflösung (Spec 22.3): kein positiver Kandidat UND WAIT
+        # ohne endliche Weckbedingung → deterministisch (a) Horizont
+        # verdoppeln, (b) Suchraum lockern, (c) Frontier-Meldung „deadlock".
+        # Nur im ACTIVE-Modus (im MISMATCH/SAFE_STOP ist Nichtstun gewollt);
+        # Sicherheitsinvarianten werden nie gelockert (22.3 Satz 2).
+        if mode == "ACTIVE" and selected.action.type == "WAIT" \
+                and tactics.is_deadlock(candidates, bottleneck):
+            candidates, bottleneck, dl = tactics.resolve_deadlock(
+                snap, meta_view, safety_result)
+            apply_mode_gate(candidates, mode)
+            selected = next((c for c in candidates if c.feasible and c.score > 0),
+                            next(c for c in candidates if c.action.type == "WAIT"))
+            trigger = f"DEADLOCK: Auflösung Stufe {dl['stage']} (22.3)"
+            replan_reason = {"type": "hard", "source": "deadlock",
+                             "detail": dl["detail"]}
+            notice = dl.get("notice")
+            if notice and notice["id"] not in known:
+                self.rt.frontier_notify(notice)
         if "safety" in selected.components and safety_result.reason:
             trigger = f"SAFETY: {safety_result.reason}"
             replan_reason = {"type": "hard", "source": "safety",

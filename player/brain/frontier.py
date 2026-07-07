@@ -74,3 +74,29 @@ def to_dict(f: Frontier) -> dict[str, Any]:
 
 def by_id(fid: str) -> Frontier | None:
     return next((f for f in FRONTIERS if f.id == fid), None)
+
+
+def deadlock_notice(run_type: str, objective: str) -> dict[str, Any]:
+    """Dynamische Frontier-Meldung der Deadlock-Auflösung (Spec 22.3 Stufe c,
+    tactics.resolve_deadlock): kein zulässiger positiver Kandidat, WAIT ohne
+    endliche Weckbedingung, und weder Horizontverdopplung noch gelockerter
+    Suchraum haben einen Plan erzeugt. Nutzt denselben Meldungsmechanismus
+    wie die statischen Frontiers (to_dict → runtime.frontier_notify) —
+    einmalig pro Quittierung, Zustand überlebt Neustarts."""
+    return to_dict(Frontier(
+        id="deadlock",
+        title="Deadlock: kein zulässiger positiver Kandidat (22.3)",
+        trigger=lambda snap, rt: True,   # dynamisch — nie in FRONTIERS gepollt
+        happening=(f"Im Run-Typ {run_type} mit Ziel „{objective}“ existiert "
+                   f"kein Kandidat mit positivem Wert, und Warten hat keine "
+                   f"endliche Weckbedingung."),
+        missing=("Der Agent hat Horizontverdopplung und gelockerten Suchraum "
+                 "(ECONOMY_WHITELIST) erfolglos versucht; Sicherheits­"
+                 "invarianten wurden nicht gelockert (22.3). Vermutlich fehlt "
+                 "eine noch nicht implementierte Spielschicht."),
+        where="Spielmechanik-Spec 22.3 (Deadlock-Auflösung), docs/brain.md",
+        prompt=("Der Agent steckt in einem Deadlock (Spec 22.3): kein "
+                "zulässiger positiver Kandidat trotz erweitertem Horizont und "
+                "gelockertem Suchraum. Analysiere den aktuellen Snapshot und "
+                "ergänze die fehlende Entscheidungsschicht in player/brain/."),
+    ))
