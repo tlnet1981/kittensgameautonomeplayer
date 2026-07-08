@@ -99,9 +99,15 @@ die numerische Ableitung über die Engpass-ETA; Nicht-Zielressourcen erben
 entstehen pro Kandidat `Cost_time`/`Benefit_time`/`NetValue` (10.2/10.3)
 und die **Payback-Regel (10.4)**: reine Produktionskäufe, deren
 Amortisation nach dem Run-Horizont läge, werden abgelehnt (Unlocks, Safety
-und Meilenstein-Dependencies sind ausgenommen). Ohne λ-Daten greift
-überall die bisherige Heuristik (Sicherheitsnetz — durch den Pfadvektor
-fast nie mehr aktiv). Die **Sparregel (10.3 DelayPenalty)** neutralisiert
+und Meilenstein-Dependencies sind ausgenommen). Der Horizont ist seit #39
+der **GEPLANTE Reset** (Spec 10.4/6.4): die Makroplan-Restzeit
+(`run_plan["restzeitS"]`) fließt als `reset.evaluate["etaSeconds"]` in
+`tactics.generate(run_horizon_s=…)` — nach unten auf
+`HORIZON_PLANNED_MIN` gefloort (Anti-Deadlock), nach oben ungeklemmt
+(lange Runs planen lang); ohne Projektion/Reset-Ziel bleibt
+`shadow.run_horizon` (2×Spielzeit, [30 min, 4 h]) der Fallback.
+Ohne λ-Daten greift überall die bisherige Heuristik (Sicherheitsnetz —
+durch den Pfadvektor fast nie mehr aktiv). Die **Sparregel (10.3 DelayPenalty)** neutralisiert
 zusätzlich den netValue-Bonus von Käufen, die das Sparziel verzögern —
 sonst würde jeder Pfad-netValue am +Clamp die Penalty überstimmen.
 Das Cockpit zeigt die **λ-Topliste** des Pfads im Economy-Tab
@@ -225,16 +231,36 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
   die Projektion lässt die **Population wachsen** (#36:
   `village.kittensPerSec` aus dem Snapshot, Housing-Kapazität als Grenze,
   Catnip-Mehrlast je Ankunft) — FIRST-/PARAGON-/PRICE_RATIO-Restzeiten
-  sind damit zustandsabhängig statt eingefroren;
+  sind damit zustandsabhängig statt eingefroren. Seit #38 sind ALLE
+  Restzeiten projiziert: SEED = ETA der nächsten ganzen Carryover-Einheit
+  (`chrono.seed_progress`), POSITIVE_CS = Verdienzeit der
+  Wiederaufbaukosten, SHATTER-Ziel = Reserve + Heat-gedeckelter Batch
+  (`meta._shatter_tc_target`), CHALLENGE = Zielprojektion
+  (`challenge.completion_eta` — unbeobachtbar/unerreichbar → ehrlich ∞).
   Score vor der Progressionsfront = −Restzeit − Risikoterme (5.4-Proxys),
   nach der Front = E[ΔlnC/Δt] über den Endgame-Index C(S)
   (`brain/endgame.py`, Spec 6.3); Tie-Break lexikografisch (C.2).
+  Die Gewinner-Restzeit (`run_plan["restzeitS"]`) ist zugleich der
+  geplante-Reset-Horizont der Payback-Regel (#39).
   Makrophasen P0–P8 aus operationalen Austrittskriterien
   (`meta.determine_phase`).
 - **Reset-Wert (20.1):** ResetValue = V(post) − V(continue) über die
   EV-Projektion am gleichen Realzeithorizont entscheidet den FIRST-Reset
   (Schwelle 35 bleibt notwendige Vorbedingung); Perk-Finanzierung bleibt
-  harte Regel; beide V-Werte stehen im reason-Text.
+  harte Regel; beide V-Werte stehen im reason-Text. Seit #42 ist V(post)
+  eine echte **Neustart-Kurzsimulation** (`reset._post_reset_paragon`:
+  Carryover-Startkapital aus `chrono.carryover_vector`, Kitten wachsen
+  mit der Ankunftsrate × Paragon-Bonus-Verhältnis — portiert aus
+  prestige.js `getParagonProductionRatio` + game.js `getLimitedDR`);
+  ohne beobachtete Ankunftsrate bleibt die lineare Rampe der Fallback
+  (`vPostMode` macht den Pfad transparent).
+- **Reset-Trigger je Run-Typ (20.2, #42):** RELIGION_RUN (TAP-Punkt via
+  `transcend_value["worth"]`), UNICORN_RUN (Ziggurat + voller
+  2500er-Opfer-Batch), SEED_RUN (Seed-Basis via
+  `seed_progress["basisReached"]`) und POSITIVE_CS_RUN
+  (`positive_cs_check`-Dominanz, ohne Paragon-Mindestgewinn) haben
+  eigene, ResetValue-geprüfte Zweige VOR dem Perk-Catch-all in
+  `reset.evaluate` — sie erreichen ihre Reset-Transaktion.
 - **Leader (12.3):** Trait/Job-Paar per λ-Bewertung der Trait-Boni
   (`set_leader` via Census); Wechsel nur über 120-s-Gewinnschwelle.
 - **Paragon-Speedrun (20.4):** Reset, wenn die marginale Paragonrate
@@ -256,7 +282,12 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
   Kauf über die PolicyBtnController-API als irreversible Transaktion.
 - **Challenges (18, `brain/challenge.py`):** Katalog aus challenges.js,
   ChallengeValue-Auswahl (18.2), CHALLENGE_RUN; Reset nur, wenn das Spiel
-  die Challenge als erfüllt markiert (18.4).
+  die Challenge als erfüllt markiert (18.4). Seit #38 ist der
+  ChallengeValue zustandsabhängig: Completion über die Zielprojektion
+  (`completion_eta` je Challenge-Ziel), Belohnung über `reward_seconds`
+  (Produktionszeit-Äquivalent übersetzbarer Effekte); die
+  Referenzschätzungen sind NUR noch Fallback, wenn die Zielobjekte im
+  Snapshot komplett fehlen — beobachtbar-unerreichbar zählt ehrlich 0.
 
 ## Governance-Kern (Spec G-02/G-06/G-10, Kap. 21–23)
 
@@ -293,7 +324,7 @@ REFERENZSCHÄTZUNG gekennzeichnet:
 | Schattenpreise λᵢ (10.2) | numerische Ableitung über die Engpass-ETA je Pfadziel + Craft-Kaskade, kombiniert als rang-diskontiertes Maximum (`brain/shadow.py`, #34) | exakte ∂ETA/∂Rᵢ über den vollen Abhängigkeitsgraphen wäre Modellduplikat; ETA-Diskont wäre endogen |
 | Gebäude-Ratio-Effekte (13.1) | Ratio × beobachtete Netto-Rate; magnetoRatio/happiness/craftRatio als Breitband-Näherung über die Ressourcenliste (#35) | die echte Basis-Produktion je Ressource ist im Snapshot nicht isolierbar; Näherung am Wert dokumentiert |
 | CVaR-Risikoterme (5.4) | deterministische Proxys: P(fatal) = Food-Invariante im Horizont, Verlustterm ETA-basiert | echtes CVaR bräuchte Ergebnisverteilungen |
-| Referenzkonstanten (Challenge-Zeiten, TC-/Necrocorn-Zeitwerte, Endgame-bᵢ, einzelne Policy-/Trait-Effekte) | dokumentierte Schätz-/Normierungswerte mit gamefiles-Fundstelle am Wert | beeinflussen Prioritäten, nicht die Korrektheit der Gates; bei Prognose-Abweichung im Betrieb durch gemessene Raten ersetzen |
+| Referenzkonstanten (TC-/Necrocorn-Zeitwerte, Endgame-bᵢ, einzelne Policy-/Trait-Effekte; Challenge-Referenzen seit #38 nur noch Fallback ohne Snapshot-Zielobjekte) | dokumentierte Schätz-/Normierungswerte mit gamefiles-Fundstelle am Wert | beeinflussen Prioritäten, nicht die Korrektheit der Gates; bei Prognose-Abweichung im Betrieb durch gemessene Raten ersetzen |
 | Late-Game-Live-Nachweis (Pacts, Leviathans, Relic, Void, Challenges) | gegen gamefiles-Formeln + synthetische Fixtures getestet | Live-Validierung braucht fortgeschrittene Spielstände; der Governance-Kern (Prognose-Abgleich, MODEL_MISMATCH) fängt Abweichungen ab |
 
 **Erweitern:** Neue Spielschicht = (1) Snapshot-Sektion in `driver/snapshot.js`,

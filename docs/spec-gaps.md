@@ -6,9 +6,10 @@ Diese Tabelle ist der ehrliche Abgleich. Die 33 Zeilen des Erstausbaus sind
 umgesetzt (✅); der Live-Betrieb und ein adversarialer Light-Audit (drei
 Prüf-Agenten, 7. Juli abends) haben danach NEUE offene Zeilen eröffnet
 (#34 ff. unten) — dort steht, wo eine kluge Spec-Mechanik bisher nur als
-Konstante/Sonderfall gebaut ist. Das wichtigste Paket daraus
-(#34+#35+#36+#41, „Economy-Kern ehrlich machen") ist am 8. Juli umgesetzt
-worden (✅ mit Fundstellen in den Zeilen, Abschluss-Notiz am Ende).
+Konstante/Sonderfall gebaut ist. Die beiden wichtigsten Pakete daraus
+sind am 8. Juli umgesetzt worden: „Economy-Kern ehrlich machen"
+(#34+#35+#36+#41) und „Makro & Reset ehrlich machen" (#38+#39+#42) —
+✅ mit Fundstellen in den Zeilen, Abschluss-Notizen am Ende.
 
 Legende: ✅ umgesetzt/spec-nah · 🟠 lohnendste offene Lücken · 🟡 offen, geringere Wirkung
 
@@ -73,11 +74,11 @@ Sparfenster der DelayPenalty, Cap-Klausel, Farmer-Hysterese.)
 | 35 | 13.1 / 13.2 | **Gebäudebewertung über alle Modifier** (direkt+indirekt, Energie, Pollution, Rest-Aktivzeit); Factories nach Craft/Engineer/Pollution | snapshot.js exportiert das volle `effects`-Dict pro Gebäude (+ `pollution`-Sektion); `tactics._rate_delta_from_effects`: mehrressourcig inkl. Verbrauch (PerTick ×TPS, DemandRatio ×Bedarf, Ratio ×Rate, coalRatioGlobal nur 1. Exemplar, magnetoRatio/happiness/craftRatio als dokumentierte Näherungen), Mint/Brewery in der Whitelist, Pollution als λ-bewerteter Zeitkostenterm (`_pollution_cost_time`, Schwelle 5e8). Restnäherungen ehrlich: craftRatio nur Autocraft-Durchsatz, tradeRatio/standingRatio via Trade-EV 14.1, Pollution nur das Arrival-Slowdown-Regime | ✅ |
 | 36 | 5.2 / 8.3 | **Vorwärtssimulation mit Bevölkerungswachstum und echten Käufen** | snapshot.js exportiert `village.kittensPerSec` (village.js calculateKittensPerTick ×TPS); `simulate.project` lässt die Population wachsen (Housing-Klemme, Catnip-Mehrlast) → FIRST-/PARAGON-/PRICE_RATIO-Restzeiten zustandsabhängig. Offen bleibt der zweite Halbsatz: Varianten a/b/c sind weiter eine abstrakte Ratenrampe, keine simulierten Kaufsequenzen (Wirkung deutlich kleiner, Restlücke dokumentiert) | ✅ |
 | 37 | 13.4 | **Alle Policies + Kombinationen** über den Restplan bewerten | `policy.POLICY_EFFECTS` deckt 23 von ~66 Policies; der Rest (u. a. alle Race-Relations, Pacts-Policies, fullIndustrialization) ist NIE Kandidat; keine Kombinationsbewertung | 🟡 |
-| 38 | 8.3 / 18.2 | **Restzeiten simuliert, ChallengeValue zustandsabhängig** | 5 von 12 Run-Typen scoren auf Konstanten (SEED 6 h, CHALLENGE const, POSITIVE_CS 60 s×n …); `challenge_value` = Konstante/Konstante → feste Rangfolge | 🟡 |
-| 39 | 10.4 / 6.4 | **Payback gegen den GEPLANTEN Reset**; Makrohorizont „mind. ein voller Run" | `shadow.run_horizon` = 2×Spielzeit geklemmt [30 min, 4 h]; Reset-Projektion (reset.py) wird nicht durchgereicht; 2-h-/4-h-Klemmen schneiden lange Runs ab | 🟡 |
+| 38 | 8.3 / 18.2 | **Restzeiten simuliert, ChallengeValue zustandsabhängig** | Alle Restzeit-Konstanten ersetzt: SEED = ETA der nächsten ganzen Carryover-Einheit (`chrono.seed_progress`), POSITIVE_CS = Verdienzeit der Wiederaufbaukosten (`rebuild_cost_vector`/beobachtete Raten), SHATTER-Ziel = Reserve + Heat-gedeckelter Batch (`meta._shatter_tc_target`), CHALLENGE = Zielprojektion je Challenge (`challenge.completion_eta`, Mindestlaufzeit-Floor; unbeobachtbar/unerreichbar → ehrlich ∞). `challenge_value` = `reward_seconds` (Produktionszeit-Äquivalent) / projizierte Completion; Referenzschätzungen NUR noch als Fallback ohne Zielobjekte im Snapshot. Restnäherungen ehrlich: Energy-Stages nicht ablesbar, postApocalypse prinzipiell nicht projizierbar, reward_seconds nur für übersetzbare Effekte | ✅ |
+| 39 | 10.4 / 6.4 | **Payback gegen den GEPLANTEN Reset**; Makrohorizont „mind. ein voller Run" | Die Makroplan-Restzeit (`meta.determine_run_plan` → `run_plan["restzeitS"]`) fließt als `reset.evaluate["etaSeconds"]` in `tactics.generate(run_horizon_s=…)`: das Payback-Gate prüft gegen den geplanten Reset, nach unten `HORIZON_PLANNED_MIN` (Anti-Deadlock), nach OBEN ungeklemmt (6.4 — lange Runs planen lang); `resolve_deadlock` reicht durch. `shadow.run_horizon` (2×Spielzeit, [30 min, 4 h]) bleibt Heuristik-Fallback ohne Projektion/Reset-Ziel/bei TC-Block; `_score_plans` bewertet bewusst weiter mit der Heuristik (keine Zirkularität Plan→Horizont→Plan) | ✅ |
 | 40 | 12.2 | **Marginalraten mit Gebäude-/Upgrade-Multiplikatoren** | `shadow.JOB_BASE_RATES` statisch ×Happiness; `target_allocation` subtrahiert Basisraten von multiplikator-behafteten Ist-Raten (Restrate zu hoch) → Mid-Game-Verzerrung | 🟡 |
 | 41 | 12.1 | **ExpectedKittenArrivals** × KittenValue | `_housing_eval`: Slots füllen sequenziell mit `village.kittensPerSec` (Slot i arbeitet H − i/Rate); ohne Snapshot-Rate Fallback Sofort-Vollbelegung; Food-Gate bleibt bewusst worst-case (I-01) | ✅ |
-| 42 | 20.1 / 20.2 | **V(post) simuliert; Reset-Trigger je Run-Typ** | Neustart als lineare Dreiecksrampe; `reset.evaluate` kennt nur FIRST/PARAGON/CHALLENGE/Perk — RELIGION-, SEED-, POSITIVE_CS-, UNICORN-Runs erreichen ihre Reset-Transaktion nie | 🟡 |
+| 42 | 20.1 / 20.2 | **V(post) simuliert; Reset-Trigger je Run-Typ** | Vier Zweige VOR dem Perk-Catch-all in `reset.evaluate`: RELIGION (TAP-Punkt via `transcend_value["worth"]`), UNICORN (Ziggurat + 2500er-Opfer-Batch), SEED (`seed_progress["basisReached"]`), POSITIVE_CS (`positive_cs_check`-Dominanz) — je ResetValue-geprüft (`_goal_reset_decision`). V(post) = Neustart-Kurzsimulation (`_post_reset_paragon`: Carryover-Startkapital, Ankunftsrate × Paragon-Bonus-Verhältnis aus portiertem prestige.js `getParagonProductionRatio`/game.js `getLimitedDR`); ohne Ankunftsrate bleibt die lineare Rampe als Fallback (`vPostMode` transparent). Restnäherung: paragonRatio-Effekt konservativ 1.0 (nicht im Snapshot) | ✅ |
 | 43 | 17.2/17.5 / 19.1 | **λ-bewertete irreversible TC-/CS-Käufe** | `TC_VALUE_REF_S=600`, `PARAGON_VALUE_REF_S=900`, `REBUILD_DELAY_PER_CS_S=60` — Referenzkonstanten steuern Shatter-Batches und CS-Zielzahl (irreversibel) | 🟡 |
 | 44 | 6.1 / 6.3 | **C(S) über alle 7 Dimensionen projiziert; Meilensteine „operational nutzbar"** | `endgame_score` projiziert nur Paragon (übrige ΔlnC-Beiträge 0); `frontier_complete` prüft Unlock-Flags statt Betrieb (Energie/Versorgung) | 🟡 |
 | 45 | 14.1 / 14.2 / 15.1 | **Verdrängungsprüfung, Batch-Optimum, Praise-Integral** | Trade: nur λ-Kosten, kein expliziter Catpower-/Gold-Konkurrenzcheck; Jagd: immer alle Squads, Schwelle statt Batch-Optimum; Praise: Overflow-Heuristik statt Integral bis Adore/Reset | 🟡 |
@@ -99,54 +100,21 @@ Ankunftsrate). Bewusst offen gebliebene Restnäherungen stehen ehrlich in
 den Tabellenzeilen (craftRatio nur Autocraft, tradeRatio via Trade-EV,
 Pollution nur Arrival-Slowdown, Kaufsequenz-Simulation der Varianten).
 
-## Empfohlenes nächstes Paket: „Makro & Reset ehrlich machen" (#38+#39+#42)
+## Erledigt (8. Juli): Paket „Makro & Reset ehrlich machen" (#38+#39+#42)
 
-Die strategische Rückgrat-Schicht: Run-Typ-Wahl und Reset-Timing rechnen
-heute teils auf Konstanten. Ein zusammenhängender Umbau in
-`meta.py`/`reset.py`/`simulate.py`/`challenge.py`/`shadow.py`.
-
-Fertiger Auftrag zum Kopieren für eine neue Claude-Code-Session:
-
-> Arbeite auf Branch `working` (nach Abschluss dorthin pushen; falls die
-> Session einen eigenen claude/-Branch anlegt, am Ende nach working
-> mergen). Lies zuerst docs/spec-gaps.md (Tabelle „Offene Lücken aus dem
-> Light-Audit") und docs/brain.md. Setze das Paket #38+#39+#42 um:
->
-> 1. **Restzeiten simuliert statt Konstanten (#38, Spec 8.3/18.2):**
->    Ersetze in meta._plan_restzeit die Konstanten-Restzeiten (SEED 6 h,
->    CHALLENGE-Konstante, POSITIVE_CS 60 s×n, SHATTER Reserve+15) durch
->    Projektionen über simulate.project (Zeit bis Zielbedingung im
->    aktuellen Zustand; wo eine Bedingung nicht projizierbar ist, ehrlich
->    math.inf statt Konstante). challenge.challenge_value: ΔE[T_F] über
->    die Projektion MIT dem Belohnungseffekt (Referenz-Effekt aus
->    gamefiles/js/challenges.js) statt fester Zähler; Completion-Zeit über
->    die Projektion der Zielbedingung statt fester Nenner.
-> 2. **Payback gegen den geplanten Reset (#39, Spec 10.4/6.4):**
->    shadow.run_horizon bekommt die echte Reset-Projektion: loop reicht
->    reset.evaluate-Ergebnis (erwartete Restlaufzeit bis zum empfohlenen
->    Reset bzw. Perk-Finanzierung) in generate() durch; Fallback bleibt
->    die heutige Heuristik. Die 4-h-/2-h-Klemmen fallen, wo eine echte
->    Projektion vorliegt (6.4: Horizont mindestens ein voller Run).
-> 3. **Reset-Pfade je Run-Typ + V(post) (#42, Spec 20.1/20.2):**
->    reset.evaluate bekommt Trigger für RELIGION_RUN (nach optimalem
->    TAP-Punkt, religion.tap_plan), UNICORN_RUN (Ziel-Infrastruktur
->    erreicht), SEED_RUN (Seed-Basis erreicht), POSITIVE_CS_RUN
->    (chrono.positive_cs_check dominiert) — jeweils ResetValue-geprüft.
->    V(post) über eine echte Kurz-Simulation des Neustarts (simulate mit
->    Post-Reset-Startzustand aus chrono.carryover_vector + permanente
->    Boni) statt linearer Dreiecksrampe; die Rampe bleibt Fallback.
->
-> Leitplanken wie im Repo etabliert: exakte Mechanik aus gamefiles/
-> (Fundstelle im Kommentar), Fallbacks ohne Daten, deterministisch
-> (Tie-Breaks C.2), Bestandstests grün oder minimal begründet angepasst,
-> neue Regressionstests auf make_snap-Fixtures (u. a.: SEED-Restzeit
-> reagiert auf den Zustand; run_horizon folgt der Reset-Projektion;
-> RELIGION_RUN erreicht seine Reset-Transaktion). Verifikation:
-> python -m pytest tests/ -q, dann RUN_E2E=1
-> KGP_CHROMIUM_PATH=/opt/pw-browsers/chromium python -m pytest
-> tests/test_e2e.py -q. Danach docs/spec-gaps.md (#38/#39/#42 auf ✅ mit
-> Fundstellen) und docs/brain.md nachziehen. Commit-Stil wie git log;
-> pushen.
+Die strategische Rückgrat-Schicht ist umgesetzt: Alle Restzeit-Konstanten
+der Run-Typ-Wahl sind Projektionen gewichen (ehrlich ∞, wo nichts
+beobachtbar ist), das Payback-Gate prüft gegen den GEPLANTEN Reset (die
+Makroplan-Restzeit fließt einquellig meta → reset.etaSeconds →
+tactics.generate; 4-h-Klemme nur noch im Heuristik-Fallback), und
+RELIGION/UNICORN/SEED/POSITIVE_CS haben eigene ResetValue-geprüfte
+Reset-Trigger vor dem Perk-Catch-all — mit V(post) als echter
+Neustart-Kurzsimulation (Rampe bleibt Fallback, vPostMode transparent).
+Fundstellen in den Zeilen #38/#39/#42 oben; Regressionstests in
+`tests/test_macro_reset.py` (u. a. SEED-Restzeit reagiert auf den
+Zustand; run_horizon folgt der Reset-Projektion; RELIGION_RUN erreicht
+seine Reset-Transaktion). Bewusst offene Restnäherungen stehen in den
+Tabellenzeilen.
 
 Danach als Paket 3 sinnvoll: #37 (Policy-Vollabdeckung) + #40 (Job-Raten
 mit echten Multiplikatoren) + #43 (irreversible TC-/CS-Käufe λ-basiert).
