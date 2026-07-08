@@ -559,3 +559,60 @@ def test_allocation_active_in_warn_state_with_surplus_farmer():
         if mf < 2:
             assert any(c.action.id.startswith("shift:farmer>") and c.feasible
                        for c in cands)
+
+
+def test_cap_raising_building_becomes_dependency_when_goal_cap_blocked():
+    """Live-Fund (Screenshot): Ziel Metal Working (1000 Science) bei
+    Science-Cap 500 — Library #2 ist der einzige Fix, wurde aber vom
+    Payback-Gate abgelehnt (Cap-Erhöhung hatte keinen bewerteten Nutzen)
+    → Deadlock Stufe c. Jetzt: <res>Max-Effekte zählen als Cap-Relief
+    (Storage-Regel 11.3 A) und machen das Gebäude zur Ziel-Dependency."""
+    from player.brain import meta, safety
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal"]}
+    techs["metal"] = {"researched": False, "prices": {"science": 1000},
+                      "unlocked": True}
+    snap = make_snap(
+        resources={"catnip": {"value": 4000, "max": 5000, "rate": 4.0},
+                   "wood": {"value": 60, "max": 200, "rate": 0.18},
+                   "science": {"value": 500, "max": 500, "rate": 0.35},
+                   "minerals": {"value": 20, "max": 250, "rate": 0.25}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 800}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "mine": {"val": 1, "prices": {"wood": 115}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True,
+                               "effects": {"scienceMax": 250,
+                                           "sciencePerTickBase": 0.0}}},
+        techs=techs,
+        jobs={"woodcutter": 1, "scholar": 1}, kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    assert mv.objective_label == "Metal Working erforschen"
+    cands, bn = tactics.generate(snap, mv, safety.check(snap))[:2]
+    lib = next(c for c in cands if c.action.id == "build:library")
+    assert lib.feasible and lib.components.get("storage", 0) > 0
+    assert not tactics.is_deadlock(cands, bn, snap)
+
+
+def test_cap_raising_building_still_payback_gated_without_cap_block():
+    """Gegenprobe: OHNE Cap-Block am Ziel bleibt die Library ein normaler
+    Produktionskandidat — das Cap-Relief ist kein Freifahrtschein."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 4000, "max": 5000, "rate": 4.0},
+                   "wood": {"value": 60, "max": 200, "rate": 0.18},
+                   "science": {"value": 100, "max": 500, "rate": 0.35}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 800}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True,
+                               "effects": {"scienceMax": 250,
+                                           "sciencePerTickBase": 0.0}}},
+        techs={"calendar": {"researched": True}, "agriculture": {"researched": True},
+               "archery": {"researched": False, "prices": {"science": 300},
+                           "unlocked": True}},
+        jobs={"woodcutter": 1, "scholar": 1}, kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    lib = next((c for c in cands if c.action.id == "build:library"), None)
+    assert lib is None or "storage" not in lib.components

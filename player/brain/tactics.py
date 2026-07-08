@@ -1047,9 +1047,14 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         if name in ENERGY_PRODUCERS and energy_deficit:
             # Energie-Defizit drosselt Produktion global — Erzeuger vorziehen (16.4).
             comp["energy"] = 2.0
-        elif name in STORAGE_BUILDINGS:
+        elif name in STORAGE_BUILDINGS \
+                or _cap_relief_effect(b, cap_blocked_res) > 0:
             # Storage-Regel 11.3: zulässig nur, wenn mindestens eine der
-            # Bedingungen A–D erfüllt ist (siehe _storage_eval).
+            # Bedingungen A–D erfüllt ist (siehe _storage_eval). Der Zweig
+            # gilt auch für Nicht-Storage-Gebäude, deren Effekte das
+            # blockierende Cap heben (Library → scienceMax): Bedingung A
+            # macht sie zur zwingenden Dependency des Ziels — damit greift
+            # das Payback-Gate 10.4 hier spec-konform NICHT.
             comp, reject = _storage_eval(snap, name, b, bn, cap_blocked_res,
                                          lam, horizon)
             if reject:
@@ -1435,7 +1440,22 @@ def _housing_eval(snap, name: str, b: dict, blocked,
     return comp, None
 
 
-def _storage_relieves(snap, storage_name, cap_blocked_res) -> bool:
+def _cap_relief_effect(b: dict, cap_blocked_res) -> float:
+    """Cap-Zuwachs des Gebäudes für die blockierte Ressource aus den echten
+    Snapshot-Effekten (`<res>Max`, seit #35 exportiert). Live-Fund: Ziel
+    Metal Working (1000 Science) bei Science-Cap 500 — die Library ist der
+    einzige Fix, war aber weder Storage-Gebäude noch hatte ihre
+    Cap-Erhöhung irgendeinen bewerteten Nutzen → Payback ∞ → Deadlock."""
+    if not cap_blocked_res:
+        return 0.0
+    effects = b.get("effects") or {}
+    try:
+        return float(effects.get(f"{cap_blocked_res}Max") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _storage_relieves(snap, storage_name, cap_blocked_res, b=None) -> bool:
     if not cap_blocked_res:
         return False
     relief_map = {
@@ -1443,7 +1463,11 @@ def _storage_relieves(snap, storage_name, cap_blocked_res) -> bool:
         "warehouse": {"wood", "minerals", "iron"},
         "harbor": {"catnip", "wood", "minerals", "iron", "coal", "gold"},
     }
-    return cap_blocked_res in relief_map.get(storage_name, set())
+    if cap_blocked_res in relief_map.get(storage_name, set()):
+        return True
+    # Generisch (Spec 11.3 A gilt für JEDES cap-erhöhende Gebäude, nicht
+    # nur die klassische Storage-Dreierliste — Library hebt scienceMax!):
+    return b is not None and _cap_relief_effect(b, cap_blocked_res) > 0
 
 
 # Cap-Zuwachs je Storage-Gebäude — REFERENZWERTE Kittens Game 1.5.0.2
@@ -1540,7 +1564,7 @@ def _storage_eval(snap, name: str, b: dict, bn, cap_blocked_res,
     Sekunden-Nettowert als Anzeige-Komponente (storageB/storageC)."""
     comp: dict[str, float] = {}
     # A: Cap blockiert das Meilenstein-Ziel.
-    if _storage_relieves(snap, name, cap_blocked_res):
+    if _storage_relieves(snap, name, cap_blocked_res, b):
         comp["storage"] = 2.2
         return comp, None
     gains = _storage_cap_gains(b)
