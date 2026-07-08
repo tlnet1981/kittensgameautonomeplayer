@@ -175,3 +175,7 @@ def test_twelfth_library_does_not_eat_housing_savings():
     winner = next(c for c in cands if c.feasible)
     assert not any(p["name"] == "wood"
                    for p in winner.action.exec_spec.get("prices", []))
+
+
+# Die Multi-Ziel-Sparregel (Save-Analyse Decision #18) wird auf
+# Kandidaten-Ebene in tests/test_allocation_path_saving.py geprüft.

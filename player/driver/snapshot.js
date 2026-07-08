@@ -232,7 +232,17 @@
         out.buildings = [];
         for (const bd of g.bld.buildingsData) {
             const ext = g.bld.getBuildingExt(bd.name);
-            const meta = ext.meta || bd;
+            // getMeta() mischt bei Staged Buildings (library/pasture/
+            // aqueduct/amphitheatre …) die Attribute der AKTUELLEN Stage
+            // ein — deren effects setzt calculateEffects zur Laufzeit in
+            // stages[stage].effects (buildings.js:608 stageMeta.effects),
+            // die Top-Level-Effekte sind dort 0/leer. Ohne den Merge war
+            // die Gebäudebewertung (#35) für diese Klasse blind (Live-
+            // Fund: Library ohne effects → flacher Engpass-Bonus).
+            let meta = ext.meta || bd;
+            try {
+                if (typeof ext.getMeta === "function") { meta = ext.getMeta() || meta; }
+            } catch (e) { /* Merge-Fehler → Rohobjekt reicht */ }
             if (!meta.unlocked && !(bd.val > 0)) { continue; }
             let prices = [];
             try { prices = g.bld.getPrices(bd.name) || []; } catch (e) { /* stage-Sonderfälle */ }

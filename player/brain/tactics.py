@@ -343,24 +343,35 @@ def _apply_saving_rule(snap: dict, cands: list[Candidate]) -> None:
     if not targets:
         return
     targets.sort(key=lambda t: (-t[0], t[1].eta_seconds, t[1].action.id))
-    potential, target = targets[0]
-    deltas_t = (target.action.predicted or {}).get("deltas", {})
-    needed = {r: -v for r, v in deltas_t.items() if v < 0}
-    if not needed:
+    target = targets[0][1]   # bestwertiges Ziel: nur für die WAIT-Meldung
+    # ALLE Sparziele schützen (10.3), nicht nur das bestwertige: sonst
+    # blendet ein Science-Meilenstein (pot 3.0, braucht nur Science) das
+    # Housing-Sparziel (pot 2.8, braucht Holz) aus und die Library frisst
+    # ungestraft das Hütten-Holz (Live-Fund, Save-Analyse Decision #18).
+    needs = []
+    for pot, t in targets:
+        deltas_t = (t.action.predicted or {}).get("deltas", {})
+        needed = {r: -v for r, v in deltas_t.items() if v < 0}
+        if needed:
+            needs.append((pot, needed))
+    if not needs:
         return
     for c in cands:
-        if not c.feasible or c.action.type == "WAIT" or c.score >= potential:
+        if not c.feasible or c.action.type == "WAIT":
             continue
         pred = c.action.predicted or {}
         if pred.get("stochastic"):
             continue
         delay = 0.0
-        for r, v in pred.get("deltas", {}).items():
-            if v >= 0 or r not in needed:
-                continue
-            rate = A.res_rate(snap, r)
-            delay = max(delay, (-v) / rate if rate > 0
-                        else NET_VALUE_CLAMP * NET_VALUE_SCALE)
+        for potential, needed in needs:
+            if c.score >= potential:
+                continue   # Kandidat ist selbst wertvoller als DIESES Ziel
+            for r, v in pred.get("deltas", {}).items():
+                if v >= 0 or r not in needed:
+                    continue
+                rate = A.res_rate(snap, r)
+                delay = max(delay, (-v) / rate if rate > 0
+                            else NET_VALUE_CLAMP * NET_VALUE_SCALE)
         if delay > 0:
             # Ein Kauf, der das Sparziel verzögert, darf seinen Score nicht
             # aus dem eigenen netValue finanzieren: das Sparziel ist die
