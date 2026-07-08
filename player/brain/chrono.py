@@ -17,9 +17,12 @@ Bewusste Näherungen (dokumentiert statt versteckt):
 - UOCost: kumulierte Preise der Einheiten n+1…k (Preis-Ratio 1.25 der
   Referenzversion), bewertet über den Schattenpreis λ (falls übergeben),
   sonst ETA-basiert (Menge ÷ Rate). Unbeschaffbare Positionen ⇒ CSValue −inf.
-- RebuildDelay: pauschal REBUILD_DELAY_PER_CS_S Sekunden je Chronosphere —
-  jeder Bestand muss im Folgerun neu errichtet werden, bevor der Carryover
-  erneut wirkt (grobe Logistik-Konstante, kein Spielwert).
+- RebuildDelay (#43): ETA des Wiederaufbaus der Einheiten 1…k im Folgerun
+  aus den BEOBACHTETEN Raten (Preisreihe Basis × 1.25^j, Muster wie
+  rebuild_cost_vector) — jeder Bestand muss im Folgerun neu errichtet
+  werden, bevor der Carryover erneut wirkt. Nur ohne beobachtete Rate
+  einer Preisressource greift die dokumentierte Fallback-Konstante
+  REBUILD_DELAY_PER_CS_S × k (grobe Logistik-Näherung, kein Spielwert).
 """
 
 from __future__ import annotations
@@ -35,7 +38,9 @@ RATE_EPS = 1e-7
 CARRYOVER_PER_CS = 0.015
 # Preis-Ratio des Chronosphere-Gebäudes in der Referenzversion:
 CS_PRICE_RATIO = 1.25
-# Wiederaufbau-Näherung je Chronosphere im Folgerun (siehe Modul-Docstring):
+# Wiederaufbau-Näherung je Chronosphere im Folgerun — NUR NOCH FALLBACK
+# (#43), wenn eine Preisressource keine beobachtete Rate hat (siehe
+# _rebuild_eta_seconds und Modul-Docstring):
 REBUILD_DELAY_PER_CS_S = 60.0
 # Suchfenster um den aktuellen Bestand (Spec 19.1: n−2 … n+3):
 SEARCH_BELOW, SEARCH_ABOVE = 2, 3
@@ -79,6 +84,30 @@ def _extra_units_cost_seconds(snap: dict, prices: list[dict], n: int, k: int,
     return total
 
 
+def _rebuild_eta_seconds(snap: dict, prices: list[dict], n: int,
+                         k: int) -> float | None:
+    """RebuildDelay(k) als ETA (#43): Wiederaufbaukosten der Einheiten
+    1…k im Folgerun (Basispreis × Σ_{j<k} 1.25^j; der Snapshot-Preis gilt
+    für Einheit n+1 = Basis × 1.25^n, Muster wie rebuild_cost_vector),
+    dividiert durch die BEOBACHTETE Rate — Engpass-ETA = max über die
+    Preisressourcen (Muster wie die POSITIVE_CS-Restzeit, #38).
+    None, wenn eine benötigte Preisressource keine beobachtete Rate hat
+    (Rate ≈ 0) — der Aufrufer nutzt dann die Fallback-Konstante."""
+    if k <= 0:
+        return 0.0
+    scale = sum(CS_PRICE_RATIO ** j for j in range(k)) / CS_PRICE_RATIO ** n
+    worst = 0.0
+    for p in prices:
+        amount = p["val"] * scale
+        if amount <= EPS:
+            continue
+        rate = A.res_rate(snap, p["name"])
+        if rate <= RATE_EPS:
+            return None
+        worst = max(worst, amount / rate)
+    return worst
+
+
 def optimal_chronosphere_count(snap: dict, lam: dict | None = None
                                ) -> tuple[int | None, dict]:
     """Optimale Chronosphere-Zahl im Fenster n−2 … n+3 (Spec 19.1).
@@ -86,26 +115,34 @@ def optimal_chronosphere_count(snap: dict, lam: dict | None = None
     Rückgabe (n_target, detail); (None, …) ohne verwertbare Chronosphere-
     Daten im Snapshot — der Aufrufer fällt dann auf das Altverhalten zurück.
     Tie-Break deterministisch: bei gleichem CSValue gewinnt das kleinere k.
+    RebuildDelay je k als beobachtete ETA (#43, _rebuild_eta_seconds);
+    detail["rebuildMode"] = "eta" | "fallback" (Konstante × k).
     """
     b = A.building(snap, "chronosphere")
     if b is None or not b.get("prices"):
         return None, {"reason": "keine Chronosphere-Daten im Snapshot — Fallback"}
     n = int(b.get("val", 0))
     carry_per_cs = _carryover_seconds_per_cs(snap)
+    rebuild_mode = "eta"
     values: dict[int, float] = {}
     for k in range(max(0, n - SEARCH_BELOW), n + SEARCH_ABOVE + 1):
         cost = _extra_units_cost_seconds(snap, b["prices"], n, k, lam)
         if math.isinf(cost):
             values[k] = -math.inf
             continue
+        rebuild = _rebuild_eta_seconds(snap, b["prices"], n, k)
+        if rebuild is None:
+            rebuild = REBUILD_DELAY_PER_CS_S * k
+            rebuild_mode = "fallback"
         values[k] = (carry_per_cs * k                    # Carryover + ResetTimeSaving
                      - cost                              # UOCost
-                     - REBUILD_DELAY_PER_CS_S * k)       # RebuildDelay
+                     - rebuild)                          # RebuildDelay
     n_target = min(values, key=lambda k: (-values[k], k))
     detail = {
         "n": n,
         "nTarget": n_target,
         "carryoverPerCsS": round(carry_per_cs, 1),
+        "rebuildMode": rebuild_mode,
         "csValues": {k: (None if math.isinf(v) else round(v, 1))
                      for k, v in values.items()},
         # Marginaler Sekundenwert der NÄCHSTEN Chronosphere (fürs Cockpit):

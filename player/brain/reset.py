@@ -30,6 +30,9 @@ from player.state import access as A
 from player.state.derived import derive
 
 from . import actions, challenge, chrono, religion, simulate
+# Re-Export (#43): die Ports leben jetzt in prestige.py (timecrystal
+# braucht sie ohne reset-Import); bestehende Aufrufer/Tests unverändert.
+from .prestige import _limited_dr, paragon_production_ratio  # noqa: F401
 
 FIRST_RESET_MIN_PARAGON = 35
 # Mindestprojektion für Folge-Resets — verhindert Mini-Runs:
@@ -261,33 +264,7 @@ def _goal_reset_decision(snap: dict, projection: float,
 
 
 # ------------------------------------------------- Permanente Boni (Ports)
-
-def _limited_dr(effect: float, limit: float) -> float:
-    """Port von game.js getLimitedDR (Zeilen 2303-2323): die ersten 75 %
-    des Limits sind frei von Diminishing Returns; der Rest nähert sich
-    asymptotisch +25 % — (1 − δ/(x+δ))·δ mit δ = 0.25·limit."""
-    abs_effect = abs(effect)
-    max_undiminished = 0.75 * limit
-    if abs_effect <= max_undiminished:
-        return effect
-    diminished = abs_effect - max_undiminished
-    delta = 0.25 * limit
-    total = max_undiminished + (1 - delta / (diminished + delta)) * delta
-    return -total if effect < 0 else total
-
-
-def paragon_production_ratio(paragon: float, burned_paragon: float = 0.0, *,
-                             paragon_ratio: float = 1.0,
-                             dark_future: bool = False) -> float:
-    """Port von prestige.js getParagonProductionRatio (Zeilen 523-534):
-    +1 % Produktion je Paragon (×paragonRatio), gekappt per getLimitedDR
-    auf 2×paragonRatio; burnedParagon ebenso mit Kappe 1× (4× im Dark
-    Future). paragonRatio-Effekte (Perks/Challenges) stehen nicht im
-    Snapshot → Aufrufer nutzen konservativ 1.0 (dokumentiert)."""
-    prod = _limited_dr(paragon * 0.010 * paragon_ratio, 2 * paragon_ratio)
-    burned_cap = (4 if dark_future else 1) * paragon_ratio
-    prod += _limited_dr(burned_paragon * 0.010 * paragon_ratio, burned_cap)
-    return prod
+# Seit #43 in prestige.py; Re-Export siehe Modulkopf.
 
 
 # ---------------------------------------------------------------- ResetValue

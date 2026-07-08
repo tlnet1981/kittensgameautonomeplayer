@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from player.state import access as A
 
-from . import challenge, religion, shadow
+from . import challenge, prestige, religion, shadow
 
 EPS = 1e-9
 
@@ -54,12 +54,15 @@ TC_RESERVE = 5.0
 # Deterministische Obergrenze der Batch-Suche (Rechenbudget, kein Spielwert):
 SHATTER_BATCH_SEARCH_MAX = 50
 
-# REFERENZSCHÄTZUNGEN (ehrlich gekennzeichnet, keine Spielkonstanten):
-# Sekundenwert eines Time Crystals ohne λ_TC am aktiven Ziel — bewusst hoch,
-# damit die Engine ohne echten TC-Schattenpreis konservativ shattert:
+# REFERENZSCHÄTZUNGEN (ehrlich gekennzeichnet, keine Spielkonstanten).
+# Seit #43 sind beide NUR NOCH FALLBACK ohne beobachtbare Daten:
+# Sekundenwert eines Time Crystals — Ausgabe-Entscheidungen (rr_value,
+# Regel D) nutzen tc_opportunity_s (max aus λ_TC und Shatter-Jahresertrag);
+# die Konstante greift nur, wenn beides fehlt (bewusst hoch = konservativ):
 TC_VALUE_REF_S = 600.0
-# Sekundenwert eines Paragon-Punkts für Regel D (Paragon wirkt run-
-# übergreifend, außerhalb des Ziel-λ — Schätzung wie challenge.py):
+# Sekundenwert eines Paragon-Punkts für Regel D — maßgeblich ist
+# paragon_value_s (Δ getParagonProductionRatio × λ-bewertete Produktion);
+# die Konstante greift nur ohne λ-bewertete Produktionsdaten:
 PARAGON_VALUE_REF_S = 900.0
 
 # Cycle-Referenztabelle (calendar.js:55-218, cycles[].effects): je Cycle die
@@ -198,10 +201,39 @@ def _yield_seconds(snap: dict, lam: dict[str, float], gain: float,
 
 
 def _lam_tc(lam: dict[str, float] | None) -> float:
-    """λ_TC — Schattenpreis eines Time Crystals; ohne Ziel-λ die
-    dokumentierte Referenzschätzung TC_VALUE_REF_S (konservativ hoch)."""
+    """λ_TC für die SHATTER-Regeln A/B — Schattenpreis eines Time
+    Crystals; ohne Ziel-λ die dokumentierte Referenzschätzung
+    TC_VALUE_REF_S (konservativ hoch).
+
+    Bewusst NICHT tc_opportunity_s (#43): Regeln A/B vergleichen den
+    Shatter-Ertrag mit den TC-Kosten — würde λ_TC dort selbst als
+    Shatter-Ertrag definiert, wäre der Vergleich selbstreferenziell
+    (die Alternative zum Shattern IST das Shattern; Regel A könnte nie
+    feuern). λ_TC am aktiven Ziel bleibt die einzige echte Alternative."""
     v = (lam or {}).get("timeCrystal", 0.0)
     return v if v > EPS else TC_VALUE_REF_S
+
+
+def tc_opportunity_s(snap: dict, lam: dict[str, float] | None
+                     ) -> tuple[float, str]:
+    """Opportunitätswert eines Time Crystals in Ziel-Sekunden für
+    AUSGABE-Entscheidungen (#43: RR-Kauf 17.2, Paragon-Shatter Regel D).
+
+    Der beste beobachtbare Alternativnutzen eines TC ist das Maximum aus
+    - λ_TC am aktiven Ziel (TC direkt fürs Ziel verwendbar) und
+    - dem λ-bewerteten Shatter-Jahresertrag (1 TC ≙ 1 Shatter-Jahr,
+      time.js ShatterTCBtn; Ertrag je Jahr = Produktion/Tick × 4000 ×
+      shatterTCGain der aktuellen RR-Stufe, siehe _yield_seconds).
+    Fallback TC_VALUE_REF_S nur, wenn beides keine Daten liefert.
+    Rückgabe (wert, modus) mit modus ∈ lambda|shatterYield|fallback."""
+    lam_tc = (lam or {}).get("timeCrystal", 0.0)
+    yield_s = _yield_seconds(snap, lam or {},
+                             SHATTER_TC_GAIN_PER_RR * rr_level(snap), 1)
+    if lam_tc > EPS or yield_s > EPS:
+        if lam_tc >= yield_s:
+            return lam_tc, "lambda"
+        return yield_s, "shatterYield"
+    return TC_VALUE_REF_S, "fallback"
 
 
 # ================================================================ 17.2 RR-Wert
@@ -217,7 +249,9 @@ def rr_value(snap: dict, lam: dict[str, float] | None,
       RR-Kauf und der Reserve übrig bleibt (1 TC je Shatter); Zuflüsse
       (tc_balance) werden bewusst NICHT eingerechnet (dokumentiert).
     - TCPrice(k+1): Effektivpreis aus dem Snapshot (snapshot.js rechnet
-      priceRatio 1.3^val ein, time.js:491).
+      priceRatio 1.3^val ein, time.js:491), bewertet mit tc_opportunity_s
+      (#43): der TC-Einsatz kostet den besten Alternativnutzen (λ_TC am
+      Ziel oder Shatter-Jahresertrag), nicht eine Konstante.
     None ohne Resource-Retrieval-Eintrag im Snapshot (Schicht nicht erreicht).
     """
     u = _cfu(snap, "ressourceRetrieval")
@@ -228,12 +262,15 @@ def rr_value(snap: dict, lam: dict[str, float] | None,
     stock = A.res_value(snap, "timeCrystal")
     expected_shatters = max(0.0, stock - price_tc - TC_RESERVE)
     marginal_s = _yield_seconds(snap, lam or {}, SHATTER_TC_GAIN_PER_RR, 1)
-    value = marginal_s * expected_shatters - price_tc * _lam_tc(lam)
+    tc_value_s, tc_mode = tc_opportunity_s(snap, lam)
+    value = marginal_s * expected_shatters - price_tc * tc_value_s
     return {
         "rrValueS": round(value, 2),
         "marginalPerShatterS": round(marginal_s, 4),
         "expectedShatters": round(expected_shatters, 1),
         "priceTc": price_tc,
+        "tcValueS": round(tc_value_s, 2),
+        "tcValueMode": tc_mode,
         "level": int(u.get("val", 0)),
     }
 
@@ -307,6 +344,41 @@ def cycle_bonus_s(snap: dict, cycle_idx: int, lam: dict[str, float],
             continue
         total += (mult - 1.0) * rate * lam_i * horizon
     return total
+
+
+# ================================================================ Paragon-Wert
+
+def paragon_value_s(snap: dict, lam: dict[str, float] | None,
+                    horizon: float) -> float:
+    """Zustandsabhängiger Sekundenwert EINES Paragon-Punkts (#43).
+
+    Paragon wirkt als Produktionsmultiplikator auf jede Rate (game.js
+    calcResourcePerTick:3282-3287, ×(1+getParagonProductionRatio)). Der
+    Wert eines weiteren Punkts ist der Ratenzuwachs der λ-bewerteten
+    Produktion über den Horizont:
+
+        Δratio/(1+ratio_now) × Σ_i λ_i·rate_i × H
+
+    mit Δratio aus dem Port prestige.paragon_production_ratio (LimitedDR-
+    Kappe inklusive — nahe der 2.0-Kappe ist ein Paragon ehrlich fast
+    wertlos). Die beobachteten Raten enthalten (1+ratio_now) bereits,
+    daher die Normierung. 0.0 ohne λ-bewertete Produktion — der Aufrufer
+    (Regel D) fällt dann auf PARAGON_VALUE_REF_S zurück."""
+    lam = lam or {}
+    prod_s = 0.0
+    for r in snap.get("resources", []):
+        lam_i = lam.get(r["name"], 0.0)
+        rate = r.get("perSec", 0.0)
+        if lam_i > 0.0 and rate > EPS:
+            prod_s += lam_i * rate
+    if prod_s <= EPS:
+        return 0.0
+    p = snap.get("prestige", {})
+    paragon = float(p.get("paragon", 0) or 0)
+    burned = float(p.get("burnedParagon", 0) or 0)
+    ratio_now = prestige.paragon_production_ratio(paragon, burned)
+    ratio_new = prestige.paragon_production_ratio(paragon + 1.0, burned)
+    return (ratio_new - ratio_now) / (1.0 + ratio_now) * prod_s * horizon
 
 
 # ================================================================ 17.5 Shatter-Regeln
@@ -393,22 +465,30 @@ def _rule_c(snap: dict, max_batch: int) -> tuple[int, dict] | None:
                    "yearsToGoal": years_needed}
 
 
-def _rule_d(snap: dict, lam: dict[str, float] | None, max_batch: int
-            ) -> tuple[int, dict] | None:
+def _rule_d(snap: dict, lam: dict[str, float] | None, max_batch: int,
+            horizon: float) -> tuple[int, dict] | None:
     """Regel D: Paragon aus Jahren > TC-Verbrauch. Reset-Paragon enthält
     floor(year/1000) (Anhang D) — der Sprung über die nächste 1000er-Grenze
-    bringt +1 Paragon; er lohnt, wenn PARAGON_VALUE_REF_S (dokumentierte
-    Referenzschätzung) die λ-bewerteten TC-Kosten übersteigt."""
+    bringt +1 Paragon; er lohnt, wenn der zustandsabhängige Paragon-Wert
+    (paragon_value_s, #43; Fallback PARAGON_VALUE_REF_S ohne λ-bewertete
+    Produktion) die TC-Kosten zum Opportunitätswert (tc_opportunity_s)
+    übersteigt."""
     year = int(snap.get("calendar", {}).get("year", 0) or 0)
     years_to_boundary = YEARS_PER_PARAGON - (year % YEARS_PER_PARAGON)
     if years_to_boundary > max_batch:
         return None
-    cost_s = years_to_boundary * TC_PRICE_PER_SHATTER * _lam_tc(lam)
-    value = PARAGON_VALUE_REF_S - cost_s
+    paragon_s = paragon_value_s(snap, lam, horizon)
+    if paragon_s <= EPS:
+        paragon_s = PARAGON_VALUE_REF_S
+    tc_value_s, tc_mode = tc_opportunity_s(snap, lam)
+    cost_s = years_to_boundary * TC_PRICE_PER_SHATTER * tc_value_s
+    value = paragon_s - cost_s
     if value <= EPS:
         return None
     return years_to_boundary, {"valueS": round(value, 2),
                                "paragonGain": 1,
+                               "paragonValueS": round(paragon_s, 2),
+                               "tcValueMode": tc_mode,
                                "tcCostS": round(cost_s, 2)}
 
 
@@ -438,7 +518,7 @@ def shatter_decision(snap: dict, lam: dict[str, float] | None,
     hit = _rule_c(snap, max_batch)
     if hit:
         return hit[0], "C", hit[1]
-    hit = _rule_d(snap, lam, max_batch)
+    hit = _rule_d(snap, lam, max_batch, horizon)
     if hit:
         return hit[0], "D", hit[1]
     return None
