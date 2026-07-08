@@ -126,6 +126,7 @@ class Brain:
         self.last_meta: meta.MetaView | None = None
         self.last_bottleneck: dict | None = None
         self.last_reset_eval: dict | None = None
+        self.last_lambda_top: list[dict] = []   # λ-Topliste (#34, Cockpit)
         self.force_reset = False   # Debug-Control aus dem Cockpit
         # Verlauf der Paragon-Projektion für die Speedrun-Regel (Spec 20.4):
         self.paragon_samples: list[tuple[float, int]] = []
@@ -327,7 +328,12 @@ class Brain:
         )
         self.last_record = record
         bus.publish("decision.committed", record.to_dict())
-        bus.publish("plan.updated", self._plan_payload(meta_view, bottleneck))
+        # λ-Topliste fürs Cockpit (#34): bewusst billige Doppelrechnung des
+        # Pfad-λ (deterministisch, 2 ETA-Auswertungen je Preisposition) —
+        # generate() kapselt seinen λ-Satz, der Payload braucht nur die Top-N.
+        lam, lam_rate = tactics.path_lambdas(snap, meta_view)
+        bus.publish("plan.updated", self._plan_payload(
+            meta_view, bottleneck, tactics.lambda_top(lam, lam_rate)))
         self.narrator.track_bottleneck((bottleneck or {}).get("resource"),
                                        meta_view.objective_label)
 
@@ -446,10 +452,16 @@ class Brain:
         })
         self.decisions_made = 0
 
-    def _plan_payload(self, meta_view: meta.MetaView, bottleneck: dict | None) -> dict:
+    def _plan_payload(self, meta_view: meta.MetaView, bottleneck: dict | None,
+                      lambda_top: list[dict] | None = None) -> dict:
         payload = meta_view.to_dict()
         payload["bottleneck"] = bottleneck
         payload["reset"] = self.last_reset_eval
+        # λ-Topliste (#34): frisch aus dem Zyklus oder der letzte Stand
+        # (Status-Payload außerhalb des Zyklus, runtime.status_payload).
+        if lambda_top is not None:
+            self.last_lambda_top = lambda_top
+        payload["lambdaTop"] = self.last_lambda_top
         return payload
 
 

@@ -50,8 +50,14 @@ Keine hut-Meilensteine mehr — Housing wird nach Bedarf entschieden:
 1. **Bedarfs-Gate:** nur bei voller Kapazität (`maxKittens == kittens`;
    0 == 0 → die erste Hütte entsteht dynamisch).
 2. **Food-Gate:** Saisonprojektion inkl. Mehrlast der neuen Kitten
-   (Kapazität × Bedarf/Kitten) muss über der Warnschwelle bleiben.
-3. **Score:** 1.6 Basis + 0.4 Paragon-Grenzwert ab 68 Kitten.
+   (Kapazität × Bedarf/Kitten) muss über der Warnschwelle bleiben —
+   bewusst worst-case (Kapazität sofort voll), auch wenn die echte
+   Ankunftsrate bekannt ist (I-01 rechnet konservativ).
+3. **Score:** 1.6 Basis + 0.4 Paragon-Grenzwert ab 68 Kitten + KittenValue
+   (12.1): **ExpectedKittenArrivals** über die echte Ankunftsrate
+   (`village.kittensPerSec`, #41) — Slots füllen sequenziell, Slot i
+   arbeitet nur H − i/Rate; ohne Snapshot-Rate Fallback
+   Sofort-Vollbelegung.
 
 Generalprinzip: Bau-**Meilensteine** gibt es nur noch für Gate-Gebäude
 (Library, Workshop, Mine, Smelter, Tradepost, Temple, Ziggurat, Steamworks,
@@ -78,14 +84,47 @@ Preise und damit keinen Engpass (im Live-Test gefundener Deadlock).
 
 Der Engpass ist die Ressource mit der größten Zeit-bis-leistbar am aktiven
 Ziel (`eta = fehlend / netRate`; ∞ bei Rate ≤ 0 oder wenn das **Cap** die
-Zielmenge blockiert → Storage-Gate). Darauf aufbauend berechnet
-`shadow.shadow_prices` **echte Schattenpreise** λᵢ (Sekunden Zielzeit pro
-Einheit, numerische Ableitung über die Engpass-ETA; Nicht-Zielressourcen
-erben λ über die Craft-Kaskade). Daraus entstehen pro Kandidat
-`Cost_time`/`Benefit_time`/`NetValue` (10.2/10.3) und die **Payback-Regel
-(10.4)**: reine Produktionskäufe, deren Amortisation nach dem Run-Horizont
-läge, werden abgelehnt (Unlocks, Safety und Meilenstein-Dependencies sind
-ausgenommen). Ohne λ-Daten greift überall die bisherige Heuristik.
+Zielmenge blockiert → Storage-Gate). λ berechnet sich seit #34 über den
+**PFAD-Preisvektor** (`tactics.path_targets`): aktives Ziel (Rang 0), die
+nächste Housing-Stufe (Rang 1, Kitten sind die Dauerressource des Pfads)
+und alle offenen Meilensteine des Runs (`meta.MetaView.open_targets`) in
+Listenreihenfolge, gekappt bei 12 Einträgen. Kombination als
+**diskontiertes Maximum** `λᵢ = max_k(w_k·λᵢ^(k))` mit Rang-Gewicht
+`w_k = 1/(1+k)` (`shadow.path_weight`): das Maximum, weil eine marginale
+Einheit genau EIN sequenzielles Ziel bedient (eine Summe würde sie allen
+gutschreiben); der Rang-Diskont, weil ETA-Diskontierung endogen wäre
+(λ→Verhalten→ETA-Rückkopplung). Je Ziel rechnet `shadow._single_lambda`
+die numerische Ableitung über die Engpass-ETA; Nicht-Zielressourcen erben
+λ über die Craft-Kaskade (einmal über das kombinierte Maximum). Daraus
+entstehen pro Kandidat `Cost_time`/`Benefit_time`/`NetValue` (10.2/10.3)
+und die **Payback-Regel (10.4)**: reine Produktionskäufe, deren
+Amortisation nach dem Run-Horizont läge, werden abgelehnt (Unlocks, Safety
+und Meilenstein-Dependencies sind ausgenommen). Ohne λ-Daten greift
+überall die bisherige Heuristik (Sicherheitsnetz — durch den Pfadvektor
+fast nie mehr aktiv). Die **Sparregel (10.3 DelayPenalty)** neutralisiert
+zusätzlich den netValue-Bonus von Käufen, die das Sparziel verzögern —
+sonst würde jeder Pfad-netValue am +Clamp die Penalty überstimmen.
+Das Cockpit zeigt die **λ-Topliste** des Pfads im Economy-Tab
+(`plan.lambdaTop`, Top 8 mit λ und λ̇).
+
+### Echte Gebäudeeffekte (`tactics._rate_delta_from_effects`, Spec 13.1/13.2)
+
+`driver/snapshot.js` exportiert je Gebäude das volle `effects`-Dict aus
+`game.bld.buildingsData` (pro Einheit, stage-aware) plus eine
+`pollution`-Sektion. `_building_rate_delta` übersetzt es in ein
+mehrressourciges ΔRate inkl. Verbrauch: PerTickProd/Con/Base ×TPS
+(catnipPerTickBase ×Saisonmodifikator), DemandRatio ×Bedarf, `<res>Ratio`
+×beobachteter Rate, `coalRatioGlobal` nur beim ersten Exemplar (das Spiel
+staffelt ihn nicht mit der Zahl), magnetoRatio/happiness/craftRatio als
+dokumentierte Breitband-Näherungen. Steamworks/Magneto/Factory/Tradepost/
+Mint/Brewery bekommen damit echte NetValues statt `economy 0.6`;
+netto-negativer Nutzen (Steamworks-Kohle) läuft transparent in die
+Payback-Ablehnung. **Pollution** kostet oberhalb der Spiel-Schwelle (5e8)
+λ-bewertete Zielsekunden über verlangsamte Kitten-Ankünfte
+(`_pollution_cost_time`, Komponente `pollutionCost`). Bewusst unbewertet:
+tradeRatio/standingRatio (bereits in der Trade-EV 14.1), Festival-Effekte,
+manuelle Craft-Nutzung des craftRatio. Ohne `effects` im Snapshot greift
+die alte Beobachtungs-Heuristik (rate/count).
 
 ### Score-Komponenten (additiv, alle im Cockpit sichtbar)
 
@@ -109,8 +148,8 @@ Zusätzlich tragen Kandidaten **Sekundenwert-Komponenten** (reine Anzeige,
 nicht additiv): `costTime`/`benefitTime`/`netValue` (Schattenpreis-Rechnung;
 netValue fließt normiert in den Score ein: 60 s ≙ 1 Punkt, Clamp ±1,2),
 `jobScore`, `tradeValue`, `huntValue`, `praiseValue`, `csValue`,
-`storageB`/`storageC`, `leaderValue`. Der Decision Inspector zeigt damit
-die echten Zeit-Äquivalente jeder Entscheidung.
+`storageB`/`storageC`, `leaderValue`, `pollutionCost`. Der Decision
+Inspector zeigt damit die echten Zeit-Äquivalente jeder Entscheidung.
 
 **Kaufregel (10.3):** ausgeführt wird der beste machbare Kandidat mit
 Score > 0 — sonst WAIT. **Tie-Break (C.2):** bei Score-Gleichheit gewinnt
@@ -183,6 +222,10 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
   Run-Typen** der Spec sind aktiv zulässig (Zulässigkeits-Gates bilden die
   9.2-Engine-Kaskade ab); je Typ drei Varianten (Minimal-/ausgeglichener/
   investitionsstarker Pfad) per EV-Projektion (`brain/simulate.py`);
+  die Projektion lässt die **Population wachsen** (#36:
+  `village.kittensPerSec` aus dem Snapshot, Housing-Kapazität als Grenze,
+  Catnip-Mehrlast je Ankunft) — FIRST-/PARAGON-/PRICE_RATIO-Restzeiten
+  sind damit zustandsabhängig statt eingefroren;
   Score vor der Progressionsfront = −Restzeit − Risikoterme (5.4-Proxys),
   nach der Front = E[ΔlnC/Δt] über den Endgame-Index C(S)
   (`brain/endgame.py`, Spec 6.3); Tie-Break lexikografisch (C.2).
@@ -242,8 +285,9 @@ REFERENZSCHÄTZUNG gekennzeichnet:
 
 | Spec | Hier | Warum |
 |---|---|---|
-| Stochastische Vorwärtssimulation (Kap. 5) | deterministische **EV-Projektion** (`brain/simulate.py`); Zufallsaktionen als Erwartungswerte | transparent, deterministisch, testbar |
-| Schattenpreise λᵢ (10.2) | numerische Ableitung über die Engpass-ETA + Craft-Kaskade (`brain/shadow.py`) | exakte ∂ETA/∂Rᵢ über den vollen Abhängigkeitsgraphen wäre Modellduplikat |
+| Stochastische Vorwärtssimulation (Kap. 5) | deterministische **EV-Projektion** (`brain/simulate.py`) mit wachsender Population (#36); Zufallsaktionen als Erwartungswerte; Wachstumsstopp bei Hunger nicht modelliert (food_fatal deckt die Katastrophe) | transparent, deterministisch, testbar |
+| Schattenpreise λᵢ (10.2) | numerische Ableitung über die Engpass-ETA je Pfadziel + Craft-Kaskade, kombiniert als rang-diskontiertes Maximum (`brain/shadow.py`, #34) | exakte ∂ETA/∂Rᵢ über den vollen Abhängigkeitsgraphen wäre Modellduplikat; ETA-Diskont wäre endogen |
+| Gebäude-Ratio-Effekte (13.1) | Ratio × beobachtete Netto-Rate; magnetoRatio/happiness/craftRatio als Breitband-Näherung über die Ressourcenliste (#35) | die echte Basis-Produktion je Ressource ist im Snapshot nicht isolierbar; Näherung am Wert dokumentiert |
 | CVaR-Risikoterme (5.4) | deterministische Proxys: P(fatal) = Food-Invariante im Horizont, Verlustterm ETA-basiert | echtes CVaR bräuchte Ergebnisverteilungen |
 | Referenzkonstanten (Challenge-Zeiten, TC-/Necrocorn-Zeitwerte, Endgame-bᵢ, einzelne Policy-/Trait-Effekte) | dokumentierte Schätz-/Normierungswerte mit gamefiles-Fundstelle am Wert | beeinflussen Prioritäten, nicht die Korrektheit der Gates; bei Prognose-Abweichung im Betrieb durch gemessene Raten ersetzen |
 | Late-Game-Live-Nachweis (Pacts, Leviathans, Relic, Void, Challenges) | gegen gamefiles-Formeln + synthetische Fixtures getestet | Live-Validierung braucht fortgeschrittene Spielstände; der Governance-Kern (Prognose-Abgleich, MODEL_MISMATCH) fängt Abweichungen ab |
