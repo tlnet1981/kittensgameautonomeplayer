@@ -280,7 +280,8 @@ def generate(snap: dict, meta_view, safety_result, *,
     _energy_candidates(snap, cands, lam, horizon)
     _leader_candidate(snap, cands, lam, goal_prices, horizon)
     _upgrade_candidates(snap, cands, lam, lam_rate)
-    _policy_candidates(snap, meta_view.run_type, cands, lam, horizon)
+    _policy_candidates(snap, meta_view.run_type, cands, lam, horizon,
+                       getattr(meta_view, "run_plan", None))
     _hunt_candidate(snap, cands, lam)
     _craft_candidates(snap, target, bn, cands, lam)
     _trade_candidates(snap, bn, cands, lam)
@@ -1814,16 +1815,18 @@ def _upgrade_candidates(snap, cands, lam=None, lam_rate=None) -> None:
 
 # ---------------------------------------------------------------- Policies (13.4)
 
-def _policy_candidates(snap, run_type, cands, lam, horizon) -> None:
+def _policy_candidates(snap, run_type, cands, lam, horizon,
+                       run_plan=None) -> None:
     """Policy-Kandidat (Spec 13.4 + I-07): höchstens EINE Policy pro Zyklus
     (Chargenregel 10.5 — Policies sind irreversibel, keine Batches).
 
     Kandidat wird nur die aktuell beste unblockierte, bezahlbare Policy mit
-    positivem PolicyValue, die die I-07-Prüfung besteht (PolicyValue ≥ Wert
-    jeder ausgeschlossenen Alternative über den Restplan-Horizont — die
-    Auswahl inkl. 13.4-Prior liegt in brain/policy.py). Ohne policies-Daten
-    im Snapshot oder ohne λ-Daten entsteht kein Kandidat (Fallback)."""
-    best = policy.best_policy(snap, run_type, lam, horizon)
+    positivem Zweigwert, die die I-07-Prüfung besteht (Zweigwert ≥ Wert
+    jeder ausgeschlossenen Alternative über den Restplan-Horizont aus
+    run_plan["restzeitS"], #37 — die Auswahl inkl. 13.4-Prior liegt in
+    brain/policy.py). Ohne policies-Daten im Snapshot oder ohne λ-Daten
+    entsteht kein Kandidat (Fallback)."""
+    best = policy.best_policy(snap, run_type, lam, horizon, run_plan=run_plan)
     if best is None:
         return
     pol, value, alt_values = best
