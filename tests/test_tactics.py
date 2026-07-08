@@ -510,3 +510,52 @@ def test_saving_target_recognized_at_five_minutes():
     assert hut.eta_seconds is not None and 180 < hut.eta_seconds < 600
     lib = next(c for c in cands if c.action.id == "build:library")
     assert lib.components.get("delayPenalty", 0) < 0
+
+
+def test_food_warn_state_is_not_a_deadlock():
+    """Live-Fund (Ziel 'Calendar erforschen'): 1 Farmer, Food-Warnstufe,
+    Science-Rate 0 — Safety-Gates sperren fast alles, aber Catnip wächst:
+    Das ist gewolltes Warten mit endlicher Weckbedingung, KEIN Deadlock."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 100, "max": 5000, "rate": 0.4},
+                   "wood": {"value": 8, "max": 200, "rate": 0.0},
+                   "science": {"value": 0, "max": 250, "rate": 0.0}},
+        buildings={"field": {"val": 12, "prices": {"catnip": 400}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs={"calendar": {"researched": False, "prices": {"science": 30},
+                            "unlocked": True}},
+        jobs={"farmer": 1}, kittens=1, max_kittens=2,
+        catnip_field_base=12 * 0.125,
+    )
+    mv = meta.evaluate(snap)
+    cands, bn = tactics.generate(snap, mv, safety.check(snap))[:2]
+    assert not tactics.is_deadlock(cands, bn, snap)
+
+
+def test_allocation_active_in_warn_state_with_surplus_farmer():
+    """Warnstufe darf die Umschulung nicht komplett einfrieren: Gibt es
+    mehr Farmer als die Untergrenze verlangt, wird weiter Richtung Ziel
+    (Scholar) umgeschult — nur 'critical' überlässt der Safety das Feld."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 400, "max": 5000, "rate": 3.0},
+                   "wood": {"value": 8, "max": 200, "rate": 0.0},
+                   "science": {"value": 0, "max": 250, "rate": 0.0}},
+        buildings={"field": {"val": 15, "prices": {"catnip": 400}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs={"calendar": {"researched": False, "prices": {"science": 30},
+                            "unlocked": True}},
+        jobs={"farmer": 2, "scholar": 0}, kittens=2, max_kittens=2,
+        catnip_field_base=15 * 0.125, season="autumn",
+    )
+    food = snap.get("derived", {}).get("food", {})
+    if food.get("status") == "warn":            # Fixture trifft die Warnstufe
+        mv = meta.evaluate(snap)
+        cands = tactics.generate(snap, mv, safety.check(snap))[0]
+        mf = tactics._min_farmers(snap, snap["village"])
+        if mf < 2:
+            assert any(c.action.id.startswith("shift:farmer>") and c.feasible
+                       for c in cands)

@@ -605,8 +605,12 @@ def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None,
     # bestimmen, wie die Kitten verteilt sein SOLLTEN. Freie Kitten füllen
     # die größten Defizite; ohne freie Kitten wird pro Zyklus höchstens
     # ein Kitten vom größten Überschuss zum größten Defizit umgeschult.
+    # Sie läuft auch in der WARNSTUFE (Live-Fund: sonst friert bei „warn"
+    # die gesamte Umschulung ein und die Deadlock-Meldung feuert) — die
+    # Food-Untergrenze steckt in min_farmers; nur bei „critical" hat die
+    # Safety das Monopol.
     alloc = {}
-    if not food_tight:
+    if food.get("status", "ok") != "critical":
         alloc_prices = _allocation_prices(snap, goal_prices, next_research)
         if alloc_prices:
             alloc = shadow.target_allocation(snap, alloc_prices,
@@ -2655,6 +2659,13 @@ def is_deadlock(candidates: list[Candidate], bn: dict | None,
     if snap is not None:
         conv = _conversion_eta(snap, bn)
         if conv is not None and math.isfinite(conv):
+            return False
+        # Food-Erholung ist eine endliche Weckbedingung (Live-Fund: bei
+        # Warn-/Kritisch-Lage sperren Safety-Gates viele Kandidaten — das
+        # ist gewolltes Warten, kein Deadlock, solange Catnip wächst oder
+        # die nächste Saison die Felder verstärkt):
+        food = snap.get("derived", {}).get("food", {})
+        if food.get("status", "ok") != "ok" and A.res_rate(snap, "catnip") > 0:
             return False
     return True
 
