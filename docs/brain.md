@@ -193,9 +193,12 @@ leer — Referenzpreise dürfen keine Engpasslöser-Boni verteilen, sonst
 umgeht die Library die Sparregel).
 
 `shadow._alloc_eta` bewertet als gewichtete Engpass-Zeitsumme
-Σ wᵢ·min(ETAᵢ, 1 h): SUMME statt Maximum, damit kein unbeeinflussbarer
-Posten alle übrigen Verbesserungen maskiert; tote Ressourcen zählen als
-1 h (Totzeit-Deckel: Hoffnungslosem jagt niemand nach). Cap-volle und von
+Σ wᵢ·sat(ETAᵢ) mit Sättigung sat(η) = 1h·η/(η+1h): SUMME statt Maximum,
+damit kein unbeeinflussbarer Posten alle übrigen Verbesserungen maskiert;
+tote Ressourcen zählen als volle Totzeit (1 h), nahe Ziele praktisch als
+ihre ETA, und große Ziele (ETA > 1 h selbst mit Kitten — Live-Fund
+2750er-Science) geben streng monoton weiter Gewinn ab (ein harter Deckel
+machte den Gewinn exakt 0 → nie ein Scholar). Cap-volle und von
 keinem Job produzierbare Posten fliegen vorab aus dem Vektor; die
 Beitrags-Baseline ist bei 0 gefloort (sonst hinge der Fixpunkt vom
 Ist-Zustand ab — Oszillation). Regressionstests:
