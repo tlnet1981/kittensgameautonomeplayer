@@ -36,7 +36,7 @@
   // SHADOW_INFO_KEYS in player/brain/tactics.py) — Darstellung mit „s"-Suffix,
   // sie zählen nicht additiv zum Score:
   const SECONDS_KEYS = new Set(["costTime", "benefitTime", "netValue", "optionValue",
-    "jobScore", "csValue", "tradeValue", "huntValue", "praiseValue",
+    "jobScore", "csValue", "pollutionCost", "tradeValue", "huntValue", "praiseValue",
     "storageB", "storageC", "leaderValue", "policyValue", "tapValue", "pactValue",
     "rrValue", "furnaceValue", "shatterValue", "voidValue", "tfValue",
     "potential", "savingFor"]);

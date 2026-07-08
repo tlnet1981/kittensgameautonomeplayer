@@ -60,12 +60,13 @@ HOUSING_BUILDINGS = {"hut", "logHouse", "mansion"}
 STORAGE_BUILDINGS = {"barn", "warehouse", "harbor"}
 # Energie-Erzeuger (Spec 16.4): bei Defizit priorisiert.
 ENERGY_PRODUCERS = {"steamworks", "magneto", "solarFarm", "hydroPlant", "reactor"}
-# Gebäude, die der generische Ökonomie-Score überhaupt anfasst:
+# Gebäude, die der generische Ökonomie-Score überhaupt anfasst
+# (mint/brewery seit #35: echte Effekt-NetValues statt Whitelist-Skip):
 ECONOMY_WHITELIST = (set(BUILDING_PRODUCES) | HOUSING_BUILDINGS | STORAGE_BUILDINGS
                      | ENERGY_PRODUCERS
                      | {"workshop", "unicornPasture", "amphitheatre", "tradepost",
                         "temple", "factory", "chapel", "aqueduct", "ziggurat",
-                        "chronosphere"})
+                        "chronosphere", "mint", "brewery"})
 
 # Craft-Rezepte zur Cap-Verlust-Vermeidung: Input-Ressource -> Craft-Name.
 CAP_RELIEF_CRAFTS = {
@@ -81,7 +82,7 @@ WAIT_SCORE = 0.01
 # sie fließen NICHT additiv in den Score ein; netValue/optionValue gehen
 # normiert ein (siehe _score).
 SHADOW_INFO_KEYS = ("costTime", "benefitTime", "netValue", "optionValue",
-                    "jobScore", "csValue",
+                    "jobScore", "csValue", "pollutionCost",
                     "tradeValue", "huntValue", "praiseValue",
                     "storageB", "storageC", "leaderValue", "policyValue",
                     "tapValue", "pactValue",
@@ -1108,19 +1109,34 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         # Sekundenwerte als transparente Komponenten; NetValue fließt über
         # _score normiert ein. Safety-/Unlock-/Energie-/Storage-/Housing-
         # Käufe und der Banking-Modus bleiben unberührt (Vorrangregeln).
-        if lam and not banking and name in BUILDING_PRODUCES \
-                and not any(k in comp for k in ("storage", "energy", "housing")):
-            rate_delta = _building_rate_delta(snap, name, BUILDING_PRODUCES[name])
+        # Seit #35 zählt jedes Gebäude mit Effekt-Daten (Snapshot) oder
+        # BUILDING_PRODUCES-Fallback — Steamworks/Magneto/Factory/
+        # Tradepost/Mint/Brewery bekommen echte NetValues statt economy 0.6.
+        # Eligibility statt „ΔRate nicht leer": auch ein LEERES Delta muss
+        # durchs Payback-Gate (nutzlose Produktionsgebäude, Benefit 0).
+        lam_eligible = (lam and not banking
+                        and not any(k in comp for k in ("storage", "energy", "housing"))
+                        and (b.get("effects") or name in BUILDING_PRODUCES))
+        if lam_eligible:
+            rate_delta = _building_rate_delta(snap, b)
             cost_t = shadow.cost_time(b["prices"], lam)
             ben_t = shadow.benefit_time(rate_delta, lam, horizon)
-            if cost_t > 1e-9 or ben_t > 1e-9:
+            # Pollution als Zeitkostenterm (#35): verlangsamte Kitten-
+            # Ankünfte, λ-bewertet (siehe _pollution_cost_time).
+            poll_cost = _pollution_cost_time(snap, b.get("effects") or {},
+                                             horizon, lam_rate)
+            if cost_t > 1e-9 or abs(ben_t) > 1e-9 or poll_cost > 1e-9:
                 comp["costTime"] = cost_t
                 comp["benefitTime"] = ben_t
-                comp["netValue"] = shadow.net_value(ben_t, cost_t)
+                if poll_cost > 1e-9:
+                    comp["pollutionCost"] = poll_cost
+                comp["netValue"] = shadow.net_value(ben_t, cost_t + poll_cost)
                 # Payback-Gate (10.4): NUR reine Produktions-/Ökonomiekäufe.
                 # Engpasslöser gelten als zwingende Dependency des Ziels.
+                # Netto-negativer Nutzen (z. B. Steamworks-coalRatioGlobal
+                # −80 %) → payback() liefert bei ≤ 0 sauber inf → Ablehnung.
                 if "bottleneck" not in comp and cost_t > 1e-9:
-                    pb = shadow.payback(cost_t, ben_t / horizon)
+                    pb = shadow.payback(cost_t + poll_cost, ben_t / horizon)
                     if pb > horizon:
                         cands.append(Candidate(
                             actions.buy_building(name, b["label"], b["val"], prices=b["prices"]),
@@ -1147,19 +1163,30 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
         cands.append(Candidate(actions.buy_building(name, b["label"], b["val"], prices=b["prices"]), score, comp))
 
 
-def _building_rate_delta(snap, name: str, produces: str) -> dict[str, float]:
-    """Geschätzter Produktionszuwachs des nächsten Exemplars (Näherung):
+def _building_rate_delta(snap, b: dict) -> dict[str, float]:
+    """Multi-Ressourcen-ΔRate des nächsten Exemplars in Einheiten/s (#35).
+
+    Mit Snapshot-Effekten (b["effects"], buildings.js buildingsData):
+    echte Bewertung über _rate_delta_from_effects — Produktion UND
+    Verbrauch, mehrressourcig. Ohne Effekte (Alt-Fixtures) das
+    Bestandsverhalten als Fallback:
     - field: bekannte Basisrate × aktueller Saisonmodifikator
     - pasture: senkt den Verbrauch um 0,5 % des Catnip-Bedarfs
     - sonst: beobachtete Netto-Rate / Gebäudeanzahl; erstes Exemplar ohne
       Bestandsdaten ≈ +10 % der laufenden Produktion (Ratio-Gebäude).
-    Ohne Rate: leer → benefit_time = 0, Fallback greift."""
+    Leeres Dict → benefit_time = 0, der Aufrufer-Fallback greift."""
+    if b.get("effects"):
+        return _rate_delta_from_effects(snap, b)
+    name = b["name"]
     if name == "field":
         mod = snap.get("calendar", {}).get("currentCatnipModifier", 1.0) or 1.0
         return {"catnip": CATNIP_PER_FIELD_PER_SEC * mod}
     if name == "pasture":
         demand = snap.get("derived", {}).get("food", {}).get("demandPerSec", 0.0)
         return {"catnip": 0.005 * demand} if demand > 0 else {}
+    produces = BUILDING_PRODUCES.get(name)
+    if not produces:
+        return {}
     val = A.bld_val(snap, name)
     rate = A.res_rate(snap, produces)
     if rate <= 0:
@@ -1167,6 +1194,158 @@ def _building_rate_delta(snap, name: str, produces: str) -> dict[str, float]:
     if val >= 1:
         return {produces: rate / val}
     return {produces: rate * 0.1}
+
+
+# Effekt-Suffixe der PerTick-Klasse (buildings.js-Namenskonvention), längste
+# zuerst — Werte sind PRO EINHEIT und PRO TICK (×TPS für Einheiten/s);
+# Con-Werte sind im Spiel bereits negativ (z. B. Mint goldPerTickCon −0.005).
+_PER_TICK_SUFFIXES = ("PerTickAutoprod", "PerTickProd", "PerTickCon",
+                      "PerTickBase", "PerTick")
+# Effekte, die hier bewusst NICHT als ΔRate zählen (Doppelzählung/eigene
+# Bewertungspfade — Begründungen in _rate_delta_from_effects):
+_RATE_DELTA_SKIP = frozenset({
+    "energyConsumption", "energyProduction",       # Energie-Regel 16.4
+    "cathPollutionPerTickProd", "cathPollutionPerTickCon",  # Pollution-Term
+    "tradeRatio", "standingRatio",   # bereits in der Trade-EV 14.1 bewertet
+                                     # (diplomacy.tradeRatio/standingRatio)
+    "festivalRatio", "festivalArrivalRatio",        # Festival separat (15.x)
+    "unhappinessRatio", "maxKittensRatio", "magnetoBoostRatio",
+})
+
+
+def _rate_delta_from_effects(snap, b: dict) -> dict[str, float]:
+    """Übersetzt das Effekt-Dict eines Gebäudes (pro Einheit, buildings.js)
+    in ΔRate je Ressource in Einheiten/s (#35, Spec 13.1/13.2).
+
+    Mapping (dokumentierte Näherungen):
+    - <res>PerTickProd/Con/Base/Autoprod/PerTick → ×TPS direkt;
+      catnipPerTickBase zusätzlich × currentCatnipModifier (das Spiel
+      skaliert die Feld-Basisrate mit der Saison, calendar.js).
+    - <res>DemandRatio (negativ) → (−v) × Bedarf: Catnip-Bedarf aus
+      derived.food.demandPerSec (Pasture buildings.js catnipDemandRatio
+      −0.005), sonst beobachteter Nettoverbrauch als Bedarfsproxy.
+    - <res>Ratio generisch → v × max(0, beobachtete Rate): Ratio wirkt im
+      Spiel auf die BASIS-Produktion, beobachtet wird die Netto-Rate —
+      konservative Näherung (LumberMill woodRatio 0.1).
+    - coalRatioGlobal → NUR beim ersten Exemplar (on == 0): das Spiel
+      staffelt diesen Effekt nicht mit der Gebäudezahl (buildings.js
+      getEffect: `if (effectName == "coalRatioGlobal") effect = effectValue`).
+    - magnetoRatio → globaler Produktionsboost: v × Rate über alle nicht
+      craftbaren Ressourcen mit positiver Rate (Breitband-Näherung an
+      game.js getAutoProductionRatio).
+    - happiness (Prozentpunkte, village.js updateHappines:
+      `happiness += getEffect("happiness")`) → (v/100) × dieselbe
+      Globalschleife (Produktion ~linear in Happiness, Näherung).
+    - craftRatio → v × Rate über craftbare Ressourcen mit positiver Rate
+      (nur der beobachtbare Autocraft-Durchsatz; der Nutzen für MANUELLE
+      Crafts bleibt dokumentiert unbewertet).
+    - <res>Max → skip: Storage bewertet die Storage-Regel 11.3
+      (_storage_eval liest b["effects"] direkt).
+    - Skip-Liste _RATE_DELTA_SKIP: Energie (16.4), Pollution (eigener
+      Zeitkostenterm), Trade/Standing (Trade-EV 14.1), Festival (15.x)."""
+    effects = b.get("effects") or {}
+    tps = snap.get("meta", {}).get("ticksPerSecond", 5)
+    dr: dict[str, float] = {}
+
+    def _add(res: str, delta: float) -> None:
+        if abs(delta) > 1e-12 and A.resource(snap, res) is not None:
+            dr[res] = dr.get(res, 0.0) + delta
+
+    def _global_production(factor: float, craftable: bool) -> None:
+        for r in snap.get("resources", []):
+            if bool(r.get("craftable")) != craftable:
+                continue
+            rate = r.get("perSec", 0.0)
+            if rate > 0:
+                _add(r["name"], factor * rate)
+
+    mod = snap.get("calendar", {}).get("currentCatnipModifier", 1.0) or 1.0
+    for key in sorted(effects):
+        v = effects[key]
+        if not isinstance(v, (int, float)) or v == 0 or key in _RATE_DELTA_SKIP:
+            continue
+        if key.endswith("Max"):
+            continue                      # Storage → Regel 11.3
+        matched = False
+        for suffix in _PER_TICK_SUFFIXES:
+            if key.endswith(suffix):
+                res = key[: -len(suffix)]
+                season = mod if key == "catnipPerTickBase" else 1.0
+                _add(res, v * tps * season)
+                matched = True
+                break
+        if matched:
+            continue
+        if key.endswith("DemandRatio"):
+            res = key[: -len("DemandRatio")]
+            if res == "catnip":
+                demand = snap.get("derived", {}).get("food", {}).get("demandPerSec", 0.0)
+            else:
+                demand = max(0.0, -A.res_rate(snap, res))
+            _add(res, -v * demand)        # v ist negativ → Ersparnis positiv
+            continue
+        if key == "coalRatioGlobal":
+            if b.get("on", 0) == 0:
+                _add("coal", v * max(0.0, A.res_rate(snap, "coal")))
+            continue
+        if key == "magnetoRatio":
+            _global_production(v, craftable=False)
+            continue
+        if key == "happiness":
+            _global_production(v / 100.0, craftable=False)
+            continue
+        if key == "craftRatio":
+            _global_production(v, craftable=True)
+            continue
+        if key.endswith("Ratio"):
+            res = key[: -len("Ratio")]
+            _add(res, v * max(0.0, A.res_rate(snap, res)))
+            continue
+    return {res: val for res, val in dr.items() if abs(val) > 1e-12}
+
+
+# --------------------------------------------------------- Pollution (#35)
+
+# Pollution-Wirkung auf Kitten-Ankünfte (buildings.js
+# calculatePollutionEffects, Level-2-Regime — dort beginnt der Slowdown):
+#   pollutionArrivalSlowdown = 1 + 1.68e-8 · (cathPollution − POL_LBASE·100/2)
+# mit POL_LBASE = getPollutionLevelBase() = 1e7 → Schwelle 5e8. Höhere
+# Level (3/4) sind log10-basiert und steiler — die lineare Steigung ist
+# also eine KONSERVATIVE Untergrenze. village.js teilt kittensPerTick
+# durch den Slowdown (> 1).
+POLLUTION_SLOWDOWN_SLOPE = 1.68e-8
+POLLUTION_THRESHOLD = 1e7 * 100 / 2       # = 5e8
+
+
+def _pollution_cost_time(snap, effects: dict, horizon: float,
+                         lam_rate: dict | None) -> float:
+    """Zeitkosten der Pollution eines Gebäudekaufs in Ziel-Sekunden (#35).
+
+    Linearisierung um den aktuellen Zustand: das neue Exemplar emittiert
+    p = cathPollutionPerTickProd × TPS Pollution/s; oberhalb der Schwelle
+    wächst der Arrival-Slowdown linear (Steigung s. o.), die relative
+    Ankunftsrate sinkt ≈ um ΔSlowdown. Verlorene Ankünfte über den
+    Horizont: kps · slope · p · H²/2 (Pollution akkumuliert linear).
+    Wert je verlorenem Kitten: bester Job-Grenzwert × H (wie
+    _housing_eval). Ehrlich 0, wenn: Pollution unter der Schwelle (im
+    Spiel wirkungslos auf Ankünfte), keine pollution-Sektion im Snapshot,
+    keine Ankunftsrate oder keine λ-Daten."""
+    p_tick = effects.get("cathPollutionPerTickProd", 0.0)
+    if not p_tick or not lam_rate or not horizon:
+        return 0.0
+    pollution = snap.get("pollution", {}).get("cathPollution", 0.0)
+    if pollution < POLLUTION_THRESHOLD:
+        return 0.0
+    kps = float(snap.get("village", {}).get("kittensPerSec", 0.0) or 0.0)
+    if kps <= 0:
+        return 0.0
+    tps = snap.get("meta", {}).get("ticksPerSecond", 5)
+    best_js = max((shadow.job_score(snap, j, lam_rate) for j in JOB_ORDER
+                   if A.job_unlocked(snap, j)), default=0.0)
+    if best_js <= 0:
+        return 0.0
+    lost_kittens = kps * POLLUTION_SLOWDOWN_SLOPE * (p_tick * tps) * horizon ** 2 / 2.0
+    return lost_kittens * best_js * horizon
 
 
 def _apply_food_risk(snap, comp: dict, prices: list[dict]) -> None:
@@ -1264,9 +1443,9 @@ def _storage_relieves(snap, storage_name, cap_blocked_res) -> bool:
 
 
 # Cap-Zuwachs je Storage-Gebäude — REFERENZWERTE Kittens Game 1.5.0.2
-# (buildings.js effects "…Max"). Gekennzeichnete Konstanten: der Snapshot
-# liefert für Gebäude derzeit keine Cap-Effekte; sobald ein Snapshot ein
-# `effects`-Dict mit "…Max"-Einträgen mitbringt, hat das Vorrang
+# (buildings.js effects "…Max"). Seit #35 exportiert snapshot.js das
+# `effects`-Dict pro Gebäude — die echten "…Max"-Einträge haben Vorrang,
+# die Tabelle bleibt Fallback für Alt-Fixtures
 # (_storage_cap_gains liest zuerst den Snapshot).
 STORAGE_CAP_GAINS: dict[str, dict[str, float]] = {
     "barn": {"catnip": 5000, "wood": 200, "minerals": 250, "iron": 50},
@@ -1409,14 +1588,12 @@ ENERGY_VITAL_BUILDINGS = HOUSING_BUILDINGS | {"field", "pasture", "aqueduct"}
 ENERGY_REACTIVATE_MARGIN = 1.0
 
 
-def _energy_unit_value(snap, name: str, lam, horizon: float) -> float:
+def _energy_unit_value(snap, b: dict, lam, horizon: float) -> float:
     """λ-bewerteter Produktionsbeitrag EINER aktiven Einheit in Ziel-Sekunden
     (16.4 Schritt 2: marginale Output-Einbuße beim Abschalten)."""
-    produces = BUILDING_PRODUCES.get(name)
-    if not produces or not lam:
+    if not lam:
         return 0.0
-    return shadow.benefit_time(_building_rate_delta(snap, name, produces),
-                               lam, horizon)
+    return shadow.benefit_time(_building_rate_delta(snap, b), lam, horizon)
 
 
 def _energy_candidates(snap, cands, lam, horizon) -> None:
@@ -1441,7 +1618,7 @@ def _energy_candidates(snap, cands, lam, horizon) -> None:
             return
         # Kleinster Zielbeitrag je Energieeinheit zuerst; Tie-Break Name:
         b = min(active, key=lambda x: (
-            _energy_unit_value(snap, x["name"], lam, horizon)
+            _energy_unit_value(snap, x, lam, horizon)
             / x["energyConsumption"], x["name"]))
         comp = {"energyRelief": 1.5}
         cands.append(Candidate(
@@ -1457,7 +1634,7 @@ def _energy_candidates(snap, cands, lam, horizon) -> None:
     # Größter Zielbeitrag zuerst (Grenznutzen-Reihenfolge, 16.4 Schritt 5);
     # ohne λ-Daten sind alle Beiträge 0 → deterministisch nach Name.
     b = min(reactivatable, key=lambda x: (
-        -_energy_unit_value(snap, x["name"], lam, horizon), x["name"]))
+        -_energy_unit_value(snap, x, lam, horizon), x["name"]))
     comp = {"energyRelief": 1.0}
     cands.append(Candidate(
         actions.toggle_building(b["name"], b["label"], on=True),
@@ -2548,6 +2725,7 @@ REASON_TEMPLATES = {
     "craftPath": "{label}: Craft-Kaskade zum Ziel, Score aus NetValue/EffectiveCost (11.2).",
     "benefitTime": "{label} beschleunigt das Ziel (Benefit in Ziel-Sekunden).",
     "costTime": "{label} kostet Ziel-Sekunden (Schattenpreis-Bewertung).",
+    "pollutionCost": "{label} verlangsamt über Pollution die Kitten-Ankünfte (13.2, Zeitkosten).",
     "jobScore": "{label} maximiert den Zielzeitgewinn pro Kitten (JobScore 12.2).",
     "csValue": "{label}: Carryover-Sekundenwert der nächsten Chronosphere (CS-Suche 19.1).",
     "policy": "{label}: beste Policy des Kontexts, I-07 gegen alle Alternativen geprüft (13.4).",

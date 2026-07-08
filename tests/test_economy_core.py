@@ -133,6 +133,196 @@ def test_lambda_top_sorted_and_capped():
     assert all(r["lam"] > 0 for r in tactics.lambda_top(lam, lam_rate))
 
 
+# ================================================ Echte Gebäudeeffekte (#35)
+
+def _gen_with_target(snap, target, open_targets=None):
+    mv = _mview(active_target=target, open_targets=open_targets)
+    return tactics.generate(snap, mv, safety.check(snap))[0]
+
+
+def test_steamworks_gets_positive_netvalue_from_effects():
+    """Auftragstest (#35): Steamworks bekommt über manuscriptPerTickProd
+    einen echten positiven NetValue statt economy 0.6 (Ziel bepreist
+    Manuscripts, keine Kohle-Produktion → coalRatioGlobal wirkungslos)."""
+    snap = make_snap(
+        resources={"catnip": {"value": 5000, "max": 5000, "rate": 10},
+                   "wood": {"value": 100, "max": 1000, "rate": 0.5},
+                   "manuscript": {"value": 0, "max": 0, "rate": 0,
+                                  "craftable": True}},
+        buildings={"steamworks": {"val": 0, "prices": {"wood": 10},
+                                  "unlocked": True,
+                                  "effects": {"manuscriptPerTickProd": 0.002,
+                                              "coalRatioGlobal": -0.8,
+                                              "energyProduction": 1,
+                                              "cathPollutionPerTickProd": 1}}},
+        jobs={"woodcutter": 1}, kittens=1, max_kittens=2, catnip_field_base=40,
+    )
+    cands = _gen_with_target(snap, {"kind": "resource", "name": "manuscript",
+                                    "amount": 5})
+    sw = next(c for c in cands if c.action.id == "build:steamworks")
+    assert sw.feasible
+    assert sw.components.get("netValue", 0) > 0
+    assert sw.components.get("benefitTime", 0) > 0
+
+
+def test_steamworks_coal_malus_only_on_first_copy():
+    """coalRatioGlobal wird im Spiel NICHT mit der Gebäudezahl gestaffelt
+    (buildings.js getEffect: effect = effectValue) — nur das erste Exemplar
+    trägt den −80-%-Kohle-Malus; netto-negativer Nutzen wird transparent
+    per Payback abgelehnt (kein Crash)."""
+    def _snap(val, on):
+        return make_snap(
+            resources={"catnip": {"value": 5000, "max": 5000, "rate": 10},
+                       "wood": {"value": 100, "max": 1000, "rate": 0.5},
+                       "coal": {"value": 0, "max": 0, "rate": 10},
+                       "manuscript": {"value": 0, "max": 0, "rate": 0,
+                                      "craftable": True}},
+            buildings={"steamworks": {"val": val, "on": on,
+                                      "prices": {"wood": 10}, "unlocked": True,
+                                      "effects": {"manuscriptPerTickProd": 0.002,
+                                                  "coalRatioGlobal": -0.8}}},
+            jobs={"woodcutter": 1}, kittens=1, max_kittens=2,
+            catnip_field_base=40,
+        )
+
+    # Erstes Exemplar, Ziel bepreist Kohle → Malus dominiert; da der
+    # Kaufpreis (Kohle) selbst λ trägt, lehnt das Payback-Gate ab:
+    snap0 = _snap(0, 0)
+    for r in snap0["resources"]:
+        if r["name"] == "coal":
+            r["value"] = 100      # Preis bezahlbar, Ziel weiter offen
+    b0 = next(x for x in snap0["buildings"] if x["name"] == "steamworks")
+    b0["prices"] = [{"name": "coal", "val": 50}]
+    cands = _gen_with_target(snap0, {"kind": "resource", "name": "coal",
+                                     "amount": 10000})
+    sw = next(c for c in cands if c.action.id == "build:steamworks")
+    assert not sw.feasible and "Payback" in sw.reject_reason
+    assert sw.components.get("benefitTime", 0) < 0
+    # Zweites Exemplar (on == 1): kein Kohle-Malus mehr im ΔRate:
+    b = next(x for x in make_snap(
+        buildings={"steamworks": {"val": 1, "on": 1, "prices": {"wood": 10},
+                                  "unlocked": True,
+                                  "effects": {"manuscriptPerTickProd": 0.002,
+                                              "coalRatioGlobal": -0.8}}},
+        resources={"coal": {"value": 0, "max": 0, "rate": 10},
+                   "manuscript": {"value": 0, "max": 0, "rate": 0,
+                                  "craftable": True}},
+    )["buildings"] if x["name"] == "steamworks")
+    snap2 = _snap(1, 1)
+    delta = tactics._building_rate_delta(snap2, next(
+        x for x in snap2["buildings"] if x["name"] == "steamworks"))
+    assert "coal" not in delta
+    assert delta.get("manuscript", 0) > 0
+
+
+def test_mint_and_brewery_no_longer_skipped_by_whitelist():
+    """Mint/Brewery liefen bisher nie durch die Ökonomie (Whitelist-Skip);
+    jetzt echte Sekundenwerte: Mint mit Pelz-/Elfenbein-Ertrag positiv,
+    Brewery mit reinem Catnip-Verbrauch transparent per Payback abgelehnt."""
+    snap = make_snap(
+        resources={"catnip": {"value": 50000, "max": 60000, "rate": 20},
+                   "wood": {"value": 500, "max": 1000, "rate": 0.5},
+                   "furs": {"value": 0, "max": 0, "rate": 0},
+                   "ivory": {"value": 0, "max": 0, "rate": 0},
+                   "gold": {"value": 50, "max": 100, "rate": 0.1},
+                   "manpower": {"value": 100, "max": 1000, "rate": 0.3}},
+        buildings={"mint": {"val": 0, "prices": {"wood": 20}, "unlocked": True,
+                            "effects": {"goldPerTickCon": -0.005,
+                                        "manpowerPerTickCon": -0.75,
+                                        "fursPerTickProd": 0.00875,
+                                        "ivoryPerTickProd": 0.0021,
+                                        "goldMax": 100}},
+                   "brewery": {"val": 0, "prices": {"wood": 20}, "unlocked": True,
+                               "effects": {"catnipPerTickCon": -1,
+                                           "festivalRatio": 0.01}}},
+        jobs={"woodcutter": 1}, kittens=1, max_kittens=2, catnip_field_base=40,
+    )
+    # Pfad bepreist Furs (aktiv) sowie Catnip und Wood (offene Meilensteine)
+    # — damit tragen Brauerei-Verbrauch UND Holzpreis λ:
+    cands = _gen_with_target(
+        snap, {"kind": "resource", "name": "furs", "amount": 1000},
+        open_targets=[{"kind": "resource", "name": "catnip", "amount": 55000},
+                      {"kind": "resource", "name": "wood", "amount": 800}])
+    mint = next(c for c in cands if c.action.id == "build:mint")
+    assert mint.feasible and mint.components.get("netValue", 0) > 0
+    brewery = next(c for c in cands if c.action.id == "build:brewery")
+    assert not brewery.feasible and "Payback" in brewery.reject_reason
+    assert brewery.components.get("benefitTime", 0) < 0
+
+
+def test_rate_delta_from_effects_mapping_matrix():
+    """Effekt-Mapping (#35): PerTick-Klassen ×TPS, catnipPerTickBase
+    ×Saisonmodifikator, DemandRatio ×Bedarf, Ratio ×beobachtete Rate,
+    Max-/Skip-Effekte ohne ΔRate-Beitrag."""
+    snap = make_snap(
+        resources={"catnip": {"value": 1000, "max": 5000, "rate": 8},
+                   "wood": {"value": 10, "max": 1000, "rate": 2.0},
+                   "coal": {"value": 0, "max": 0, "rate": 1.0},
+                   "beam": {"value": 0, "max": 0, "rate": 0.5,
+                            "craftable": True}},
+        kittens=4, max_kittens=4, season="spring",
+    )
+    b = {"name": "testbld", "val": 0, "on": 0, "effects": {
+        "woodPerTickProd": 0.018,       # ×5 → +0.09
+        "catnipPerTickCon": -1,         # ×5 → −5
+        "catnipPerTickBase": 0.125,     # ×5×1.5 (Frühling) → +0.9375
+        "woodRatio": 0.1,               # ×2.0 → +0.2
+        "coalRatioGlobal": -0.8,        # on==0 → ×1.0 → −0.8
+        "craftRatio": 0.05,             # craftbare Rate 0.5 → beam +0.025
+        "goldMax": 100,                 # Storage → skip
+        "tradeRatio": 0.015,            # Trade-EV → skip
+        "energyProduction": 1,          # Energie-Regel → skip
+    }}
+    delta = tactics._building_rate_delta(snap, b)
+    assert delta["wood"] == pytest.approx(0.09 + 0.2)
+    assert delta["catnip"] == pytest.approx(-5 + 0.9375)
+    assert delta["coal"] == pytest.approx(-0.8)
+    assert delta["beam"] == pytest.approx(0.025)
+    assert "gold" not in delta
+    # Demand-Ratio gegen den echten Bedarf (derived.food.demandPerSec):
+    demand = snap["derived"]["food"]["demandPerSec"]
+    b2 = {"name": "pasture2", "val": 0, "on": 0,
+          "effects": {"catnipDemandRatio": -0.005}}
+    assert tactics._building_rate_delta(snap, b2)["catnip"] == pytest.approx(
+        0.005 * demand)
+    # Ohne effects-Key: Bestandsverhalten (beobachtete Rate / Anzahl):
+    snap_old = make_snap(
+        resources={"minerals": {"value": 10, "max": 500, "rate": 1.0}},
+        buildings={"mine": {"val": 2, "prices": {"wood": 50}}})
+    b_old = next(x for x in snap_old["buildings"] if x["name"] == "mine")
+    assert tactics._building_rate_delta(snap_old, b_old) == {"minerals": 0.5}
+
+
+def test_storage_cap_gains_prefer_snapshot_effects():
+    b = {"name": "barn", "effects": {"catnipMax": 7500, "woodMax": 300,
+                                     "energyConsumption": 1}}
+    assert tactics._storage_cap_gains(b) == {"catnip": 7500, "wood": 300}
+    assert tactics._storage_cap_gains({"name": "barn"}) == \
+        tactics.STORAGE_CAP_GAINS["barn"]
+
+
+def test_pollution_cost_zero_below_threshold_positive_above():
+    """Pollution-Zeitkosten (#35): unterhalb der Spiel-Schwelle (5e8,
+    buildings.js Level-2-Regime) ehrlich 0; darüber > 0 und wachsend."""
+    def _snap(cath):
+        return make_snap(
+            resources={"wood": {"value": 10, "max": 1000, "rate": 2.0}},
+            jobs={"woodcutter": 2}, kittens=2, max_kittens=4,
+            kittens_per_sec=0.05, pollution={"cathPollution": cath},
+        )
+    effects = {"cathPollutionPerTickProd": 1.0}
+    lam_rate = {"wood": 100.0}
+    below = tactics._pollution_cost_time(_snap(1e8), effects, 1800.0, lam_rate)
+    above = tactics._pollution_cost_time(_snap(6e8), effects, 1800.0, lam_rate)
+    assert below == 0.0
+    assert above > 0.0
+    # Fallbacks → 0: keine pollution-Sektion / keine Rate / kein λ:
+    snap_plain = make_snap(jobs={"woodcutter": 2}, kittens=2)
+    assert tactics._pollution_cost_time(snap_plain, effects, 1800.0, lam_rate) == 0.0
+    assert tactics._pollution_cost_time(_snap(6e8), effects, 1800.0, {}) == 0.0
+    assert tactics._pollution_cost_time(_snap(6e8), {}, 1800.0, lam_rate) == 0.0
+
+
 # ================================================== Wachsende Bevölkerung (#36/#41)
 
 def test_first_run_restzeit_shortens_with_kitten_arrivals():

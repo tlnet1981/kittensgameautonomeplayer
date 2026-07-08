@@ -141,9 +141,21 @@
             if (!meta.unlocked && !(bd.val > 0)) { continue; }
             let prices = [];
             try { prices = g.bld.getPrices(bd.name) || []; } catch (e) { /* stage-Sonderfälle */ }
-            // Energie-Effekte PRO EINHEIT (Spec 16.4), defensiv: die Effekte
-            // liegen je nach Gebäude in buildingsData bzw. den Stage-Metadaten.
+            // Effekte PRO EINHEIT (Spec 13.1/16.4), defensiv: die Effekte
+            // liegen je nach Gebäude in buildingsData bzw. den Stage-Metadaten
+            // (calculateEffects hält sie zur Laufzeit aktuell). Volles Dict
+            // für die Gebäudebewertung (#35): nur numerisch-endliche Werte
+            // ≠ 0 — Namenskonvention aus buildings.js: <res>PerTickProd/Con/
+            // Base, <res>Max, <res>Ratio/DemandRatio, happiness,
+            // cathPollutionPerTickProd. Aggregation im Spiel: effect =
+            // effectValue × bld.on (Max-Effekte × bld.val, coalRatioGlobal
+            // ungestaffelt — buildings.js getEffect).
             const effects = meta.effects || bd.effects || {};
+            const eff = {};
+            for (const k in effects) {
+                const v = effects[k];
+                if (typeof v === "number" && isFinite(v) && v !== 0) { eff[k] = v; }
+            }
             out.buildings.push({
                 name: bd.name,
                 label: meta.label || bd.name,
@@ -151,10 +163,24 @@
                 on: bd.on,
                 unlocked: !!meta.unlocked,
                 prices: prices.map(p => ({ name: p.name, val: p.val })),
+                effects: eff,
                 energyConsumption: +effects.energyConsumption || 0,
                 energyProduction: +effects.energyProduction || 0,
             });
         }
+    });
+
+    section("pollution", () => {
+        // Pollution-Zustand (#35): kumulierte cathPollution (buildings.js
+        // Feld cathPollution) und der aktuelle Arrival-Slowdown aus
+        // calculatePollutionEffects (buildings.js: ab Level 2 linear
+        // 1 + 1.68e-8·(pollution − POL_LBASE·100/2), höhere Level log10) —
+        // village.js teilt kittensPerTick durch den Slowdown (> 1).
+        out.pollution = {
+            cathPollution: (g.bld && +g.bld.cathPollution) || 0,
+            arrivalSlowdown: (g.bld && g.bld.pollutionEffects
+                && +g.bld.pollutionEffects.pollutionArrivalSlowdown) || 0,
+        };
     });
 
     section("science", () => {
@@ -355,14 +381,20 @@
                     buildings: (planet.buildings || [])
                         .filter(b => b.unlocked || b.val > 0)
                         .map(b => {
-                            // Energie-Effekte PRO EINHEIT (Spec 16.2/16.3),
+                            // Effekte PRO EINHEIT (Spec 16.2/16.3, #35),
                             // defensiv wie in der buildings-Sektion:
-                            const eff = b.effects || {};
+                            const effects = b.effects || {};
+                            const eff = {};
+                            for (const k in effects) {
+                                const v = effects[k];
+                                if (typeof v === "number" && isFinite(v) && v !== 0) { eff[k] = v; }
+                            }
                             return {
                                 name: b.name, label: b.label, val: b.val || 0,
                                 unlocked: !!b.unlocked,
-                                energyConsumption: +eff.energyConsumption || 0,
-                                energyProduction: +eff.energyProduction || 0,
+                                effects: eff,
+                                energyConsumption: +effects.energyConsumption || 0,
+                                energyProduction: +effects.energyProduction || 0,
                                 // Effektivpreise inkl. Price Ratio:
                                 prices: (b.prices || []).map(x => ({
                                     name: x.name,
