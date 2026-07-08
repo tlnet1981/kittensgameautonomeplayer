@@ -605,9 +605,12 @@ KAPPA_FATAL_S = 1_000_000.0
 MU_IRREVERSIBLE_LOSS = 0.1
 # Run-Typen, deren Ziel ein Reset ist (nur dort steht im Horizont ein
 # geplanter Reset an, der nicht-persistente Bestände verliert):
+# Run-Typen, deren Ziel in einer Reset-Transaktion endet (μ-Verlustterm
+# 6.2; seit #42 haben auch RELIGION/UNICORN eigene Reset-Trigger):
 RESET_ENDING_RUN_TYPES = frozenset({
     "FIRST_RUN", "PRICE_RATIO_RUN", "CORE_META_RUN", "PARAGON_RUN",
     "CHALLENGE_RUN", "SEED_RUN", "POSITIVE_CS_RUN",
+    "RELIGION_RUN", "UNICORN_RUN",
 })
 
 

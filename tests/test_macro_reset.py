@@ -160,10 +160,14 @@ def test_evaluate_exports_eta_seconds():
                               "unlocked": True, "perSec": 0})
     ev = reset.evaluate(snap, "FIRST_RUN", None, plan_restzeit_s=999.0)
     assert not ev["recommended"] and ev["etaSeconds"] is None
-    # Kein Reset-Ziel (else-Zweig) → None.
+    # Kein Reset-Ziel (else-Zweig; SHATTER_RUN endet nicht im Reset) → None.
     snap2 = make_snap(kittens=5)
-    ev = reset.evaluate(snap2, "SEED_RUN", None, plan_restzeit_s=999.0)
+    ev = reset.evaluate(snap2, "SHATTER_RUN", None, plan_restzeit_s=999.0)
     assert ev["etaSeconds"] is None
+    # SEED_RUN hat seit #42 ein Reset-Ziel: Restzeit wird durchgereicht,
+    # solange der Trigger (Seed-Basis) noch offen ist.
+    ev = reset.evaluate(snap2, "SEED_RUN", None, plan_restzeit_s=999.0)
+    assert not ev["recommended"] and ev["etaSeconds"] == 999.0
 
 
 def _payback_5h_snap():
@@ -210,6 +214,131 @@ def test_run_horizon_follows_reset_projection():
     assert not mint.feasible
     assert f"{shadow.HORIZON_PLANNED_MIN / 60:.0f}" in mint.reject_reason \
         or "Payback" in mint.reject_reason
+
+
+# ============================================ #42 Reset-Trigger je Run-Typ
+
+# Perk mit unbezahlbarem Preis: würde der Perk-Catch-all greifen, wäre
+# recommended False — ein empfohlener Reset beweist den Run-Typ-Zweig.
+_EXPENSIVE_PERK = {"name": "goldenRatio", "label": "Golden Ratio",
+                   "researched": False, "unlocked": True,
+                   "prices": [{"name": "paragon", "val": 100000}]}
+
+
+def _with_prestige(snap, paragon=0, perks=None):
+    snap["prestige"] = {"paragon": paragon, "burnedParagon": 0, "karma": 0,
+                        "perks": perks or []}
+    return snap
+
+
+def _rel_upgrades():
+    return [{"name": "apocripha", "label": "Apocrypha", "val": 1, "on": 1,
+             "unlocked": True, "noStackable": True, "prices": []},
+            {"name": "transcendence", "label": "Transcendence", "val": 1,
+             "on": 1, "unlocked": True, "noStackable": True, "prices": []}]
+
+
+def test_religion_run_reaches_reset_transaction(monkeypatch):
+    """Auftragstest (#42): RELIGION_RUN erreicht seine Reset-Transaktion —
+    TAP-Punkt erreicht → recommended (vor dem Perk-Catch-all), und
+    execute_reset führt TAP (Schritt 5) und den Reset (Schritt 11) aus."""
+    from tests.test_reset import _FakeBrowser, _run_execute, _steps
+
+    snap = _with_prestige(make_snap(
+        resources={"faith": {"value": 500, "max": 200000, "rate": 50.0},
+                   "catnip": {"value": 50000, "max": 60000, "rate": 20.0}},
+        jobs={"priest": 5}, kittens=110, max_kittens=110,
+        catnip_field_base=40,
+        religion={"worship": 10000, "epiphany": 0.1, "transcendenceTier": 0,
+                  "upgrades": _rel_upgrades()}))
+    ev = reset.evaluate(snap, "RELIGION_RUN", _EXPENSIVE_PERK,
+                        plan_restzeit_s=500.0)
+    assert ev["recommended"], ev["reason"]
+    assert "TAP-Punkt" in ev["reason"]          # Run-Typ-Zweig, nicht Perk
+    assert ev["tapPlan"] and ev["tapPlan"][0]["step"] == "transcend"
+    assert ev["etaSeconds"] == 0.0
+    ok, rt = _run_execute(snap, ev, monkeypatch, _FakeBrowser())
+    assert ok is True
+    by_step = dict(_steps(rt))
+    assert by_step[5] == "done"                 # TAP ausgeführt
+    assert by_step[11] == "done"                # Reset committed
+
+
+def test_unicorn_run_reset_trigger():
+    def _snap(unicorns):
+        return _with_prestige(make_snap(
+            resources={"unicorns": {"value": unicorns, "max": 0, "rate": 5.0},
+                       "catnip": {"value": 50000, "max": 60000, "rate": 20.0}},
+            buildings={"ziggurat": {"val": 1, "prices": {"megalith": 50}}},
+            kittens=110, max_kittens=110, catnip_field_base=40))
+    ev = reset.evaluate(_snap(3000), "UNICORN_RUN", _EXPENSIVE_PERK)
+    assert ev["recommended"] and "Unicorn-Ziel erreicht" in ev["reason"]
+    ev = reset.evaluate(_snap(100), "UNICORN_RUN", _EXPENSIVE_PERK)
+    assert not ev["recommended"] and "Unicorn-Ziel offen" in ev["reason"]
+
+
+def test_seed_run_reset_trigger():
+    def _snap(void):
+        return _with_prestige(make_snap(
+            resources={"void": {"value": void, "max": 0, "rate": 0.1},
+                       "catnip": {"value": 50000, "max": 60000, "rate": 20.0}},
+            buildings={"chronosphere": {"val": 2,
+                                        "prices": {"unobtainium": 100}}},
+            kittens=110, max_kittens=110, catnip_field_base=40))
+    # CS 2 → saveRatio 0.03: 40 Void → floor(1.2) = 1 Einheit überlebt.
+    ev = reset.evaluate(_snap(40), "SEED_RUN", _EXPENSIVE_PERK)
+    assert ev["recommended"] and "Seed-Basis erreicht" in ev["reason"]
+    ev = reset.evaluate(_snap(5), "SEED_RUN", _EXPENSIVE_PERK)
+    assert not ev["recommended"]
+
+
+def test_positive_cs_run_reset_trigger():
+    def _snap(uo):
+        return _with_prestige(make_snap(
+            resources={"unobtainium": {"value": uo, "max": 2 * uo + 1,
+                                       "rate": 1.0}},
+            buildings={"chronosphere": {"val": 2,
+                                        "prices": {"unobtainium": 100}}}))
+    # Carryover 300 > Wiederaufbau 144 → Dominanz (ohne Projektionsdaten
+    # wäre rv None → Trigger allein entscheidet, Fallback ohne Daten):
+    ev = reset.evaluate(_snap(10000), "POSITIVE_CS_RUN", _EXPENSIVE_PERK)
+    assert ev["recommended"] and "Positive CS-Schleife" in ev["reason"]
+    ev = reset.evaluate(_snap(1000), "POSITIVE_CS_RUN", _EXPENSIVE_PERK)
+    assert not ev["recommended"]
+
+
+# ============================================ #42 V(post) simuliert
+
+def test_reset_value_vpost_simulated_vs_ramp():
+    """Mit beobachteter Ankunftsrate simuliert V(post) den Neustart
+    (Kurzsimulation, vPostMode "simuliert"); ohne Rate bleibt die
+    lineare Rampe als Fallback (vPostMode "rampe")."""
+    grow = make_snap(kittens=110, max_kittens=150,
+                     resources={"catnip": {"value": 50000, "max": 60000,
+                                           "rate": 20.0}},
+                     catnip_field_base=40, kittens_per_sec=0.05)
+    ev = reset.evaluate(_with_prestige(grow), "FIRST_RUN", None)
+    assert ev["resetValue"]["vPostMode"] == "simuliert"
+    # Post-Run erreicht 70 Kitten nicht im Vergleichsfenster → Weiterlaufen:
+    assert not ev["recommended"]
+    frozen = make_snap(kittens=110, max_kittens=110,
+                       resources={"catnip": {"value": 50000, "max": 60000,
+                                             "rate": 20.0}},
+                       catnip_field_base=40)
+    ev = reset.evaluate(_with_prestige(frozen), "FIRST_RUN", None)
+    assert ev["resetValue"]["vPostMode"] == "rampe"
+    assert ev["recommended"]
+
+
+def test_paragon_production_ratio_matches_prestige_js():
+    """Portierte Formel gegen prestige.js:523-534 / game.js getLimitedDR:
+    100 Paragon → +100 % (unter der 75-%-Freigrenze des 2×-Limits);
+    300 Paragon → 1.875 (Diminishing Returns); burnedParagon Kappe 1×."""
+    assert reset.paragon_production_ratio(100) == pytest.approx(1.0)
+    assert reset.paragon_production_ratio(300) == pytest.approx(1.875)
+    assert reset.paragon_production_ratio(0, 50) == pytest.approx(0.5)
+    # burned 300 bei Kappe 1×: 0.75 frei + (1−0.25/2.5)·0.25 = 0.975:
+    assert reset.paragon_production_ratio(0, 300) == pytest.approx(0.975)
 
 
 def test_reward_seconds_mapping():
