@@ -116,5 +116,75 @@ Zustand; run_horizon folgt der Reset-Projektion; RELIGION_RUN erreicht
 seine Reset-Transaktion). Bewusst offene Restnäherungen stehen in den
 Tabellenzeilen.
 
-Danach als Paket 3 sinnvoll: #37 (Policy-Vollabdeckung) + #40 (Job-Raten
-mit echten Multiplikatoren) + #43 (irreversible TC-/CS-Käufe λ-basiert).
+## Empfohlenes nächstes Paket: „Politik, Jobs & irreversible Käufe ehrlich machen" (#37+#40+#43)
+
+Drei Stellen, an denen heute Referenztabellen bzw. -konstanten statt
+Rechnungen stehen: die Policy-Abdeckung (Governance-Entscheidungen sind
+irreversibel!), die Job-Marginalraten der Soll-Allokation (Mid-Game-
+Verzerrung) und die TC-/CS-Kaufsteuerung (irreversible Käufe).
+
+Fertiger Auftrag zum Kopieren für eine neue Claude-Code-Session:
+
+> Arbeite auf Branch `working` (nach Abschluss dorthin pushen; falls die
+> Session einen eigenen claude/-Branch anlegt, am Ende nach working
+> mergen). Lies zuerst docs/spec-gaps.md (Tabelle „Offene Lücken aus dem
+> Light-Audit") und docs/brain.md. Setze das Paket #37+#40+#43 um:
+>
+> 1. **Policy-Vollabdeckung + Kombinationsbewertung (#37, Spec 13.4):**
+>    `policy.POLICY_EFFECTS` deckt 23 von ~66 Policies ab — der Rest
+>    (u. a. alle Race-Relations-Policies, die Pacts-Policies,
+>    fullIndustrialization) wird NIE Kandidat. Vervollständige die
+>    Tabelle aus gamefiles/js/science.js (Abschnitt `policies`): jede
+>    Policy mit ihren `effects` (Fundstelle im Kommentar); Effekte, die
+>    sich nicht in eine Ratenänderung übersetzen lassen, ehrlich als
+>    nicht bewertbar markieren (dann entscheidet die I-07-Alternativen-
+>    Prüfung, nicht ein stiller Ausschluss). Kombinationsbewertung 13.4:
+>    Bei sich gegenseitig ausschließenden Zweigen (`blocks`/blocked-
+>    Beziehungen aus science.js) den ganzen Zweig über den Restplan
+>    (run_plan/Restzeit aus meta) bewerten, nicht nur die Einzel-Policy —
+>    eine jetzt schwächere Policy darf gewinnen, wenn ihr Zweig über den
+>    Rest des Runs mehr Sekunden spart. Deterministisch (Tie-Breaks C.2).
+> 2. **Job-Marginalraten mit echten Multiplikatoren (#40, Spec 12.2):**
+>    `shadow.JOB_BASE_RATES` ist statisch ×Happiness; `target_allocation`
+>    subtrahiert diese Basisraten von multiplikator-behafteten Ist-Raten
+>    (Restrate zu hoch) → Mid-Game-Verzerrung. Exportiere in
+>    player/driver/snapshot.js pro Job die EFFEKTIVE Pro-Kitten-
+>    Marginalrate aus dem Spiel (gamefiles/js/village.js: getResProduction
+>    bzw. job.modifiers × Skill/Happiness/Upgrade-Multiplikatoren;
+>    Fundstelle im Kommentar, defensiv wie die übrigen Sektionen).
+>    `shadow.job_score`/`target_allocation` nutzen diese beobachteten
+>    Marginalraten direkt; JOB_BASE_RATES bleibt nur Fallback ohne
+>    Snapshot-Daten. Damit entfällt auch der Baseline-Subtraktionsfehler
+>    (Ist-Rate minus statische Basisrate). Achtung: `node --check
+>    player/driver/snapshot.js` und der E2E-Test müssen grün bleiben.
+> 3. **Irreversible TC-/CS-Käufe λ-basiert (#43, Spec 17.2/17.5/19.1):**
+>    Ersetze die Steuerkonstanten `timecrystal.TC_VALUE_REF_S=600`,
+>    `timecrystal.PARAGON_VALUE_REF_S=900` und
+>    `chrono.REBUILD_DELAY_PER_CS_S=60`: TC-Wert = beste Verwendung laut
+>    aktuellem Plan (Shatter-Zeitgewinn via λ/Projektion aus
+>    simulate.project bzw. meta-Restzeit), Paragon-Wert = ΔProduktion aus
+>    dem echten Paragon-Bonus (portierte getParagonProductionRatio ist
+>    seit #42 im Repo) über den Planungshorizont, RebuildDelay = ETA der
+>    Wiederaufbaukosten aus beobachteten Raten (rebuild_cost_vector aus
+>    #38 existiert bereits). Die Konstanten bleiben NUR als dokumentierter
+>    Fallback, wenn keine Projektion möglich ist — irreversible Käufe
+>    dürfen im Zweifel eher unterbleiben (konservativ).
+>
+> Leitplanken wie im Repo etabliert: exakte Mechanik aus gamefiles/
+> (Fundstelle im Kommentar), Fallbacks ohne Daten, deterministisch
+> (Tie-Breaks C.2), Bestandstests grün oder minimal begründet angepasst,
+> neue Regressionstests auf make_snap-Fixtures (u. a.: eine bisher
+> unabgedeckte Policy wird Kandidat und gewinnt gegen eine schwächere
+> abgedeckte; Zweigbewertung kippt eine Einzel-Policy-Entscheidung;
+> target_allocation mit Upgrade-Multiplikatoren trifft die richtige
+> Zuteilung, wo die statische Tabelle sie verfehlt; TC-/CS-Kauf reagiert
+> auf den Zustand statt auf die Konstante). Verifikation:
+> python -m pytest tests/ -q, dann RUN_E2E=1
+> KGP_CHROMIUM_PATH=/opt/pw-browsers/chromium python -m pytest
+> tests/test_e2e.py -q. Danach docs/spec-gaps.md (#37/#40/#43 auf ✅ mit
+> Fundstellen) und docs/brain.md nachziehen. Commit-Stil wie git log;
+> pushen.
+
+Danach als Paket 4 sinnvoll: #44 (C(S) über alle 7 Dimensionen) + #45
+(Trade-Verdrängung/Jagd-Batch/Praise-Integral) + #46/#47 (Weckquellen,
+CVaR-Proxy) — die verbleibenden, kleineren Light-Reste.
