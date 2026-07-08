@@ -72,9 +72,12 @@ HORIZON_PLANNED_MIN = 600.0
 # Spielzeit-Konstanten (wie state/derived.py): 1 Tag = 2 s.
 SECONDS_PER_DAY = 2.0
 
-# Basisproduktion pro Job und Sekunde (Näherung! Werte aus village.js der
-# Referenzversion 1.5.0.2, pro Tick × 5 Ticks/s, VOR Gebäude-/Upgrade-
-# Multiplikatoren; skaliert nur mit Happiness — siehe job_score):
+# Basisproduktion pro Job und Sekunde — NUR NOCH FALLBACK (#40): die
+# maßgebliche Quelle sind die beobachteten Marginalraten `ratesPerKitten`
+# aus dem Snapshot (siehe job_marginal_rates). Diese Tabelle greift nur,
+# wenn der Snapshot das Feld nicht liefert (alter Driver, Sektion-Fehler).
+# Werte aus village.js der Referenzversion 1.5.0.2, pro Tick × 5 Ticks/s,
+# VOR Gebäude-/Upgrade-Multiplikatoren; skaliert dann nur mit Happiness:
 JOB_BASE_RATES: dict[str, dict[str, float]] = {
     "farmer": {"catnip": 5.0},          # 1 / Tick
     "woodcutter": {"wood": 0.09},       # 0.018 / Tick
@@ -84,6 +87,33 @@ JOB_BASE_RATES: dict[str, dict[str, float]] = {
     "geologist": {"coal": 0.075},       # 0.015 / Tick (Gold erst mit Upgrades)
     "priest": {"faith": 0.0075},        # 0.0015 / Tick
 }
+
+
+def job_marginal_rates(snap: dict, job_id: str) -> dict[str, float]:
+    """Effektive Marginalrate PRO KITTEN und Sekunde für einen Job (#40).
+
+    Maßgeblich ist das Snapshot-Feld `ratesPerKitten` (snapshot.js,
+    Nachbau von village.js updateResourceProduction × game.js
+    calcResourcePerTick für ein marginales Skill-0-Kitten) — es enthält
+    Happiness, Leader-Team-Boost und alle Produktions-Multiplikatoren
+    BEREITS. Ein vorhandenes, auch leeres Feld ist autoritativ (Jobs ohne
+    Tick-Produktion wie engineer liefern ehrlich {}). Nur wenn das Feld
+    fehlt (alter Driver / Sektion-Fehler), fällt die Bewertung auf
+    JOB_BASE_RATES × Happiness zurück — Aufrufer dürfen das Ergebnis
+    deshalb NICHT erneut mit Happiness multiplizieren."""
+    happiness = snap.get("village", {}).get("happiness", 1.0) or 1.0
+    for j in snap.get("village", {}).get("jobs", []):
+        if j.get("name") != job_id:
+            continue
+        observed = j.get("ratesPerKitten")
+        if isinstance(observed, dict):
+            return {res: float(rate) for res, rate in observed.items()
+                    if isinstance(rate, (int, float))}
+        break
+    base = JOB_BASE_RATES.get(job_id)
+    if not base:
+        return {}
+    return {res: rate * happiness for res, rate in base.items()}
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -358,16 +388,13 @@ def job_score(snap: dict, job_id: str, lam_rate: dict[str, float]) -> float:
     """JobScore(j) = Σ λ_rate_i · MarginalRate_i(j) (Spec 12.2) —
     Sekunden Zielzeitgewinn pro Sekunde Arbeit eines weiteren Kittens.
 
-    Näherung: Die Marginalrate je Job stammt aus der Basisraten-Tabelle
-    JOB_BASE_RATES (Snapshot liefert nur Netto-perSec, aus der sich der
-    Beitrag eines einzelnen Jobs nicht sauber isolieren lässt), skaliert
-    mit der Dorf-Happiness. Gebäude-/Upgrade-Multiplikatoren fehlen —
-    für den VERGLEICH zwischen Jobs ist das ausreichend genau.
+    Die Marginalrate je Job kommt aus job_marginal_rates (#40): beobachtete
+    ratesPerKitten aus dem Snapshot (inkl. Happiness, Leader-Boost und
+    Upgrade-/Gebäude-Multiplikatoren), Fallback JOB_BASE_RATES × Happiness.
     """
-    rates = JOB_BASE_RATES.get(job_id)
+    rates = job_marginal_rates(snap, job_id)
     if not rates or not lam_rate:
         return 0.0
-    happiness = snap.get("village", {}).get("happiness", 1.0) or 1.0
     total = 0.0
     for res, rate in rates.items():
         # Cap-Klausel (Spec 11.1): Produktion in eine VOLLE Ressource läuft
@@ -376,7 +403,7 @@ def job_score(snap: dict, job_id: str, lam_rate: dict[str, float]) -> float:
         cap = A.res_cap(snap, res)
         if cap > 0 and A.res_value(snap, res) >= cap * CAP_FULL_RATIO:
             continue
-        total += lam_rate.get(res, 0.0) * rate * happiness
+        total += lam_rate.get(res, 0.0) * rate
     return total
 
 
@@ -419,8 +446,11 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
        verteilt (Balance statt Leerlauf).
 
     Basisraten: beobachtete Raten MINUS aktuelle Kitten-Beiträge — die
-    Allokation plant, als wären alle Kitten neu verteilbar. Leeres
-    goal_prices → {} (Aufrufer nutzt den bisherigen Fallback)."""
+    Allokation plant, als wären alle Kitten neu verteilbar. Die Beiträge
+    kommen aus job_marginal_rates (#40): mit beobachteten ratesPerKitten
+    ist die Subtraktion exakt (früher wurden statische Basisraten von
+    multiplikator-behafteten Ist-Raten abgezogen — Phantom-Restrate).
+    Leeres goal_prices → {} (Aufrufer nutzt den bisherigen Fallback)."""
     village = snap.get("village", {})
     total = int(village.get("kittens", 0) or 0)
     if total <= 0 or not goal_prices:
@@ -428,7 +458,8 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
     jobs = [j for j in ALLOC_JOB_ORDER if A.job_unlocked(snap, j)]
     if not jobs:
         return {}
-    happiness = village.get("happiness", 1.0) or 1.0
+    # Marginalraten je Job EINMAL bestimmen (enthalten Happiness bereits):
+    jrates = {j: job_marginal_rates(snap, j) for j in jobs}
 
     amounts = {p["name"]: A.res_value(snap, p["name"]) for p in goal_prices}
     rates: dict[str, float] = {}
@@ -437,9 +468,9 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
     # Kitten-Beiträge herausrechnen (nur bekannte Job-Ressourcen):
     for j in jobs:
         count = A.job_count(snap, j)
-        for res, rate in JOB_BASE_RATES.get(j, {}).items():
+        for res, rate in jrates[j].items():
             if res in rates:
-                rates[res] -= count * rate * happiness
+                rates[res] -= count * rate
 
     def _capped(res: str) -> bool:
         cap = A.res_cap(snap, res)
@@ -451,9 +482,9 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
         take = min(min_farmers, remaining)
         alloc["farmer"] = take
         remaining -= take
-        for res, rate in JOB_BASE_RATES["farmer"].items():
+        for res, rate in jrates.get("farmer", {}).items():
             if res in rates:
-                rates[res] += take * rate * happiness
+                rates[res] += take * rate
 
     for _ in range(remaining):
         base = _alloc_eta(goal_prices, amounts, rates)
@@ -462,9 +493,9 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
             gain_d = gain_e = 0.0
             trial = dict(rates)
             touched = False
-            for res, rate in JOB_BASE_RATES.get(j, {}).items():
+            for res, rate in jrates.get(j, {}).items():
                 if res in trial and not _capped(res):
-                    trial[res] += rate * happiness
+                    trial[res] += rate
                     touched = True
             if not touched:
                 continue
@@ -475,9 +506,9 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
         if best_job is None:
             break   # kein positiver Grenzwert mehr → Rest per Round-Robin
         alloc[best_job] += 1
-        for res, rate in JOB_BASE_RATES.get(best_job, {}).items():
+        for res, rate in jrates.get(best_job, {}).items():
             if res in rates:
-                rates[res] += rate * happiness
+                rates[res] += rate
         remaining -= 1
 
     # Rest-Verteilung mit STICKINESS (Anti-Flattern, Nutzer-Fund): Kitten
@@ -486,7 +517,7 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
     # echter Überhang wird round-robin auf offene Jobs verteilt.
     if remaining > 0:
         open_jobs = [j for j in jobs
-                     if not all(_capped(r) for r in JOB_BASE_RATES.get(j, {}))]
+                     if not all(_capped(r) for r in jrates.get(j, {}))]
         for j in open_jobs:
             if remaining <= 0:
                 break

@@ -25,7 +25,7 @@ def make_snap(
     resources: dict[str, dict] | None = None,
     buildings: dict[str, dict] | None = None,
     techs: dict[str, dict] | None = None,
-    jobs: dict[str, int] | None = None,
+    jobs: dict[str, int | dict] | None = None,
     free_kittens: int = 0,
     kittens: int = 0,
     max_kittens: int = 0,
@@ -72,7 +72,19 @@ def make_snap(
             "unlocked": spec.get("unlocked", True),
             "prices": [{"name": k, "val": v} for k, v in spec.get("prices", {}).items()],
         })
-    job_list = [{"name": n, "title": n.capitalize(), "value": v} for n, v in (jobs or {}).items()]
+    # Jobs: int (alt, ohne ratesPerKitten → Python-Fallback JOB_BASE_RATES)
+    # oder dict {"value": n, "rates": {...}} → beobachtete Marginalraten
+    # ratesPerKitten wie aus snapshot.js (#40).
+    job_list = []
+    for n, v in (jobs or {}).items():
+        if isinstance(v, dict):
+            entry = {"name": n, "title": n.capitalize(),
+                     "value": v.get("value", 0)}
+            if "rates" in v:
+                entry["ratesPerKitten"] = dict(v["rates"])
+            job_list.append(entry)
+        else:
+            job_list.append({"name": n, "title": n.capitalize(), "value": v})
 
     season_mod = {"spring": 1.5, "summer": 1.0, "autumn": 1.0, "winter": 0.25}[season]
     snap = {

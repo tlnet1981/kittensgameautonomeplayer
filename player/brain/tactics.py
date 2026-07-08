@@ -594,8 +594,9 @@ def _min_farmers(snap, village) -> int:
     farmers_now = A.job_count(snap, "farmer")
     if not A.job_unlocked(snap, "farmer"):
         return 0
-    happiness = village.get("happiness", 1.0) or 1.0
-    rate = shadow.JOB_BASE_RATES["farmer"]["catnip"] * happiness
+    # Effektive Farmer-Rate (#40): beobachtete Marginalrate inkl. aller
+    # Multiplikatoren, Fallback Basisrate × Happiness.
+    rate = shadow.job_marginal_rates(snap, "farmer").get("catnip", 0.0)
     demand = snap.get("derived", {}).get("food", {}).get("demandPerSec", 0.0)
     warn_floor = max(150.0, 120.0 * demand)
     total = int(village.get("kittens", 0) or 0)
@@ -729,8 +730,7 @@ def _allocation_shift_candidate(snap, cands, village, food_tight,
 def _farmer_release_safe(snap, village) -> bool:
     """Hysterese-Band der Farmer-Freigabe: Projektion mit einem Farmer
     weniger muss die FARMER_RELEASE_MARGIN-fache Warnschwelle halten."""
-    happiness = village.get("happiness", 1.0) or 1.0
-    rate = shadow.JOB_BASE_RATES["farmer"]["catnip"] * happiness
+    rate = shadow.job_marginal_rates(snap, "farmer").get("catnip", 0.0)
     after = project_catnip(snap, demand_delta=rate)
     demand = snap.get("derived", {}).get("food", {}).get("demandPerSec", 0.0)
     warn_floor = max(150.0, 120.0 * demand)
@@ -789,8 +789,7 @@ def _farmer_release_candidate(snap, cands, village, food_tight,
                               lam_rate=None) -> None:
     if food_tight or A.job_count(snap, "farmer") <= 0:
         return
-    happiness = village.get("happiness", 1.0) or 1.0
-    farmer_rate = shadow.JOB_BASE_RATES["farmer"]["catnip"] * happiness
+    farmer_rate = shadow.job_marginal_rates(snap, "farmer").get("catnip", 0.0)
     # Was-wäre-wenn: ein Farmer weniger = weniger Catnip-Produktion
     # (als Mehrverbrauch modelliert, gleiche Projektionsmechanik wie I-01):
     after = project_catnip(snap, demand_delta=farmer_rate)
@@ -829,7 +828,7 @@ def _cap_rebalance_candidate(snap, cands, village, food_tight,
     donors = []
     for j in sorted(village.get("jobs", []), key=lambda j: j["name"]):
         name, count = j["name"], j["value"]
-        outputs = shadow.JOB_BASE_RATES.get(name)
+        outputs = shadow.job_marginal_rates(snap, name)
         if count <= 0 or not outputs:
             continue
         if name == "farmer" and food_tight:
@@ -843,7 +842,7 @@ def _cap_rebalance_candidate(snap, cands, village, food_tight,
     # in beiden Fällen keiner, dessen Ertrag selbst schon voll ist.
     targets = [t for t in JOB_ORDER
                if t != donor["name"] and A.job_unlocked(snap, t)
-               and not all(_capped(r) for r in shadow.JOB_BASE_RATES.get(t, {}))]
+               and not all(_capped(r) for r in shadow.job_marginal_rates(snap, t))]
     if not targets:
         return False
     if lam_rate:
@@ -1800,7 +1799,11 @@ def _upgrade_candidates(snap, cands, lam=None, lam_rate=None) -> None:
         job_ratio = UPGRADE_OPTION_JOB_RATIO.get(u["name"])
         if job_ratio is not None:
             job, res, ratio = job_ratio
-            base = shadow.JOB_BASE_RATES.get(job, {}).get(res, 0.0)
+            # Effektive Marginalrate statt statischer Basisrate (#40);
+            # leichte Überschätzung, wenn schon ein JobRatio-Upgrade
+            # aktiv ist (die Rate enthält dann bereits 1+JobRatio) —
+            # akzeptabel, es geht nur um den Optionswert-Vergleich.
+            base = shadow.job_marginal_rates(snap, job).get(res, 0.0)
             ov = _option_value(lam_rate,
                                {res: ratio * A.job_count(snap, job) * base})
             if ov > 1e-9:

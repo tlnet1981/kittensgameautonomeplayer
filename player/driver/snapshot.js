@@ -67,10 +67,105 @@
 
     section("village", () => {
         const v = g.village;
+
+        // Effektive Marginalraten PRO KITTEN und Sekunde je Job (#40,
+        // Spec 12.2): Nachbau von village.js updateResourceProduction
+        // (505-587) für EIN marginales Skill-0-Kitten (Skill < 100 →
+        // getValueModifierPerSkill = 0, village.js:1117-1145), multipliziert
+        // mit der calcResourcePerTick-Kette (game.js:3243-3331), soweit sie
+        // auf Villager-Produktion wirkt. Weather bewusst NICHT: der
+        // Saisonmodifikator wird im Spiel VOR der Villager-Addition
+        // multipliziert (game.js:3240 vs. 3255) und trifft Jobs nie.
+        // Verstärkte Happiness (village.js:510-511):
+        const ampHappiness = v.happiness + (v.happiness - 1)
+            * (g.getEffect("happinessKittenProductionRatio") || 0);
+        // Team-Boost des Leaders für Nicht-Leader (village.js:538-541);
+        // das marginale Kitten ist nie selbst Leader:
+        let teamBoost = 1;
+        if (v.leader && typeof v.getLeaderBonus === "function") {
+            teamBoost = 1 + (v.getLeaderBonus(v.leader.rank) - 1)
+                * (g.getEffect("boostFromLeader") || 0);
+        }
+        const hgScaling = (g.religion && typeof g.religion.getHGScalingBonus === "function")
+            ? (g.religion.getHGScalingBonus() || 1) : 1;
+        const marginalMult = (resName) => {
+            const res = g.resPool.get(resName);
+            if (!res) { return 1; }
+            // game.js:3249-3259: ×HolyGenocide, +resProduction×JobRatio:
+            let m = hgScaling * (1 + (g.getEffect(resName + "JobRatio") || 0));
+            // game.js:3262-3272: Global/Buildings/Religion/Super:
+            m *= 1 + (g.getEffect(resName + "GlobalRatio") || 0);
+            m *= 1 + (g.getEffect(resName + "Ratio") || 0);
+            m *= 1 + (g.getEffect(resName + "RatioReligion") || 0);
+            m *= 1 + (g.getEffect(resName + "SuperRatio") || 0);
+            // Steamworks-Coal-Hack (game.js:3274-3279):
+            const sw = g.bld.get("steamworks");
+            const swGlobal = sw && sw.effects && sw.effects[resName + "RatioGlobal"];
+            if (sw && sw.on > 0 && swGlobal) { m *= 1 + swGlobal; }
+            // Paragon (game.js:3281-3287; Winter-Challenge nullt catnip):
+            let paragonRatio = g.prestige.getParagonProductionRatio() || 0;
+            if (resName === "catnip" && g.challenges.isActive("winterIsComing")) {
+                paragonRatio = 0;
+            }
+            m *= 1 + paragonRatio;
+            // Pollution (game.js:3289-3292):
+            if (resName === "catnip") {
+                m *= 1 + ((g.bld.pollutionEffects || {})["catnipPollutionRatio"] || 0);
+            }
+            // Magnetos (game.js:3303-3310):
+            if (!res.transient && g.bld.get("magneto").on > 0
+                    && resName !== "catnip" && resName !== "oil") {
+                const swRatio = (sw && sw.on > 0)
+                    ? 1 + ((sw.effects || {})["magnetoBoostRatio"] || 0) * sw.on : 1;
+                m *= 1 + (g.getEffect("magnetoRatio") || 0) * swRatio;
+            }
+            // Reaktor (game.js:3317-3319):
+            if (!res.transient && resName !== "uranium" && resName !== "catnip") {
+                m *= 1 + (g.getEffect("productionRatio") || 0);
+            }
+            // Solar Revolution inkl. Pollution-Malus auf wood/catnip
+            // (game.js:3326):
+            m *= 1 + (g.religion.getSolarRevolutionRatio() || 0)
+                * (1 + ((resName === "wood" || resName === "catnip")
+                    ? ((g.bld.pollutionEffects || {})["solarRevolutionPollution"] || 0) : 0));
+            // Kosmische Strahlung (game.js:3329-3331):
+            if (!(g.opts && g.opts.disableCMBR) && resName !== "coal"
+                    && typeof g.getCMBRBonus === "function") {
+                m *= 1 + (g.getCMBRBonus() || 0);
+            }
+            return m;
+        };
+
         const jobs = [];
         for (const j of v.jobs) {
             if (!j.unlocked) { continue; }
-            jobs.push({ name: j.name, title: j.title, value: j.value });
+            const entry = { name: j.name, title: j.title, value: j.value };
+            try {
+                // modifiers sind bei scholar/geologist lazy (erst
+                // calculateEffects füllt sie, village.js:42/108).
+                // priest.calculateEffects NIE aufrufen — es entlässt bei
+                // Atheism alle Priester (village.js:87-98, Seiteneffekt!).
+                let mods = j.modifiers;
+                if ((!mods || Object.keys(mods).length === 0)
+                        && j.name !== "priest"
+                        && typeof j.calculateEffects === "function") {
+                    j.calculateEffects(j, g);
+                    mods = j.modifiers;
+                }
+                const rates = {};
+                for (const resName in (mods || {})) {
+                    const base = mods[resName];
+                    if (typeof base !== "number" || !isFinite(base)) { continue; }
+                    // village.js:530-543: diff = mod × (1 + skillMod)
+                    // [Skill 0 → ×1]; nur POSITIVE Produktion bekommt
+                    // TeamBoost und Happiness:
+                    let perTick = base;
+                    if (perTick > 0) { perTick *= teamBoost * ampHappiness; }
+                    rates[resName] = perTick * marginalMult(resName) * TPS;
+                }
+                entry.ratesPerKitten = rates;
+            } catch (e) { /* Feld weglassen → Python-Fallback JOB_BASE_RATES */ }
+            jobs.push(entry);
         }
         let leader = null;
         if (v.leader) {
