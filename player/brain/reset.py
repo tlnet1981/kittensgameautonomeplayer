@@ -30,6 +30,9 @@ from player.state import access as A
 from player.state.derived import derive
 
 from . import actions, challenge, chrono, religion, simulate
+# Re-Export (#43): die Ports leben jetzt in prestige.py (timecrystal
+# braucht sie ohne reset-Import); bestehende Aufrufer/Tests unverändert.
+from .prestige import _limited_dr, paragon_production_ratio  # noqa: F401
 
 FIRST_RESET_MIN_PARAGON = 35
 # Mindestprojektion für Folge-Resets — verhindert Mini-Runs:
@@ -74,14 +77,21 @@ APPLY_PENDING_CORE_JS = """
 
 
 def evaluate(snap: dict, run_type: str, next_perk: dict | None,
-             paragon_samples: list[tuple[float, int]] | None = None) -> dict[str, Any]:
-    """Bewertet, ob jetzt resettet werden soll. Liefert Gates fürs Cockpit."""
+             paragon_samples: list[tuple[float, int]] | None = None, *,
+             plan_restzeit_s: float | None = None) -> dict[str, Any]:
+    """Bewertet, ob jetzt resettet werden soll. Liefert Gates fürs Cockpit.
+
+    plan_restzeit_s (#39): erwartete Restlaufzeit des Makroplans bis zum
+    Run-Ziel (meta.determine_run_plan → run_plan["restzeitS"]) — sie IST
+    die erwartete Zeit bis zum geplanten Reset bzw. zur Perk-Finanzierung
+    und wird als "etaSeconds" exportiert (Payback-Horizont 10.4/6.4)."""
     projection = snap.get("derived", {}).get("resetParagon", 0)
     paragon_now = snap.get("prestige", {}).get("paragon", 0)
 
     recommended = False
     reason = ""
     reset_value: dict | None = None
+    has_reset_goal = True
     if run_type == "FIRST_RUN":
         # Schwelle bleibt notwendige Vorbedingung (Sanity-Grenze); erst dann
         # entscheidet ResetValue = V(post) − V(continue) (Spec 20.1):
@@ -109,6 +119,57 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
         # Zielbedingung wirklich erfüllt ist). Eine bloß prognostizierte
         # Erfüllung reicht nicht — kein ResetValue-Ersatzweg.
         recommended, reason = challenge.reset_gate(snap)
+    # --- Run-Typ-Trigger (#42, Spec 20.2) — VOR dem Perk-Catch-all, der
+    # diese Runs bisher verschluckte (sie erreichten ihre Reset-Transaktion
+    # nie). Jeweils Zieltrigger + ResetValue-Prüfung (_goal_reset_decision).
+    elif run_type == "RELIGION_RUN":
+        # TAP-Punkt erreicht: der Transcend lohnt JETZT (15.2) — die
+        # Pre-Reset-Transaktion führt ihn in Schritt 5 aus.
+        if religion.transcend_value(snap)["worth"] \
+                and projection >= MIN_PARAGON_GAIN:
+            recommended, reason, reset_value = _goal_reset_decision(
+                snap, projection,
+                "TAP-Punkt erreicht: Transcend lohnt (15.2/20.2)")
+        else:
+            reason = (f"TAP-Punkt noch nicht erreicht oder Projektion "
+                      f"{projection} < {MIN_PARAGON_GAIN} Paragon (15.2/20.2)")
+    elif run_type == "UNICORN_RUN":
+        # Ziel-Infrastruktur erreicht: Ziggurat steht und ein voller
+        # Opfer-Batch liegt bereit (2500 Unicorns, religion.js:3021) —
+        # Schritt 6 der Transaktion opfert ihn.
+        unicorns = A.res_value(snap, "unicorns")
+        if A.bld_val(snap, "ziggurat") >= 1 \
+                and unicorns >= religion.UNICORN_SAC_BATCH \
+                and projection >= MIN_PARAGON_GAIN:
+            recommended, reason, reset_value = _goal_reset_decision(
+                snap, projection,
+                f"Unicorn-Ziel erreicht: Ziggurat + {unicorns:.0f} Unicorns "
+                f"(Opfer-Batch, 15.3/20.2)")
+        else:
+            reason = (f"Unicorn-Ziel offen: Ziggurat/Opfer-Batch "
+                      f"({unicorns:.0f}/{religion.UNICORN_SAC_BATCH:.0f}) "
+                      f"oder Projektion {projection} < {MIN_PARAGON_GAIN}")
+    elif run_type == "SEED_RUN":
+        # Seed-Basis erreicht (chrono.seed_progress, 19.3): die erste
+        # GANZE Carryover-Einheit des Seed-Trägers überlebt den Reset.
+        seed = chrono.seed_progress(snap)
+        if chrono.seed_run_admissible(snap)[0] and seed["basisReached"] \
+                and projection >= MIN_PARAGON_GAIN:
+            recommended, reason, reset_value = _goal_reset_decision(
+                snap, projection, "Seed-Basis erreicht (19.3/20.2)")
+        else:
+            reason = seed["detail"].get("reason", "Seed-Basis offen (19.3)")
+    elif run_type == "POSITIVE_CS_RUN":
+        # Positive Schleife (19.2): Carryover dominiert den Wiederaufbau.
+        # KEIN Paragon-Mindestgewinn — die Schleife ist ressourcen-, nicht
+        # paragonmotiviert (Vektordominanz ist die Spec-Bedingung).
+        dominates, cs_detail = chrono.positive_cs_check(snap)
+        if dominates:
+            recommended, reason, reset_value = _goal_reset_decision(
+                snap, projection,
+                "Positive CS-Schleife: Carryover dominiert Wiederaufbau (19.2)")
+        else:
+            reason = cs_detail.get("reason", "Keine CS-Dominanz (19.2)")
     elif next_perk is not None:
         price = next((p["val"] for p in next_perk.get("prices", []) if p["name"] == "paragon"), 0)
         funds_after_reset = paragon_now + projection
@@ -124,6 +185,7 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
                 reason += "; " + _reset_value_text(reset_value)
     else:
         reason = "Kein Reset-Ziel im aktuellen Run"
+        has_reset_goal = False
 
     # TC-Schutz (Invariante I-02 / Spec 9.1): Reset mit relevantem
     # Time-Crystal-Bestand nur mit Anachronomancy (TC überleben sonst nicht).
@@ -133,6 +195,17 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
     tc_safe = tc < 3 or anachronomancy
     if not tc_safe:
         recommended = False
+
+    # Erwartete Restlaufzeit bis zum GEPLANTEN Reset (#39, Spec 10.4/6.4):
+    # 0 wenn der Reset jetzt empfohlen ist; sonst die Makroplan-Restzeit;
+    # None, wenn kein Reset geplant ist (TC-Schutz blockiert / kein Ziel)
+    # — der Aufrufer fällt dann auf die run_horizon-Heuristik zurück.
+    if not tc_safe or not has_reset_goal:
+        eta_seconds: float | None = None
+    elif recommended:
+        eta_seconds = 0.0
+    else:
+        eta_seconds = plan_restzeit_s
 
     gates = [
         {"name": "Paragon-Projektion", "pass": projection > 0,
@@ -162,6 +235,7 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
         "projection": projection,
         "paragonNow": paragon_now,
         "reason": reason,
+        "etaSeconds": eta_seconds,
         "gates": gates,
         "nextPerk": next_perk["label"] if next_perk else None,
         "resetValue": reset_value,
@@ -174,7 +248,79 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
     }
 
 
+def _goal_reset_decision(snap: dict, projection: float,
+                         goal_text: str) -> tuple[bool, str, dict | None]:
+    """Gemeinsame ResetValue-Prüfung der Run-Typ-Trigger (#42, wie beim
+    FIRST_RUN): Zieltrigger erfüllt → recommended nur bei positivem
+    ResetValue; ohne Simulationsdaten (rv None) recommended (Fallback
+    ohne Daten — der Trigger selbst ist die harte Bedingung)."""
+    rv = _reset_value(snap, projection)
+    if rv is None:
+        return True, goal_text, None
+    rec = rv["resetValue"] > 0
+    reason = (goal_text + "; " + _reset_value_text(rv)
+              + ("" if rec else " — Weiterlaufen dominiert"))
+    return rec, reason, rv
+
+
+# ------------------------------------------------- Permanente Boni (Ports)
+# Seit #43 in prestige.py; Re-Export siehe Modulkopf.
+
+
 # ---------------------------------------------------------------- ResetValue
+
+def _post_reset_paragon(snap: dict, projection: float,
+                        t_cmp: float) -> float | None:
+    """Paragon-Zuwachs eines Neustarts JETZT über t_cmp Sekunden — echte
+    Kurzsimulation statt Rampe (#42, Spec 20.1).
+
+    Synthetischer Post-Reset-Snapshot:
+    - Ressourcen = chrono.carryover_vector (game.js _resetInternal) mit
+      Raten 0 — ein frischer Run produziert erst, wenn Kitten arbeiten
+      (ehrlich konservativ; die Bestände zählen als Startkapital).
+    - Kalender Jahr 0/Frühling/Tag 0 (game.js resetAutomatic).
+    - village: kittens 0; maxKittens = HEUTIGE Kittenzahl (dokumentierte
+      Annahme: die nachweislich aufgebaute Housing-Kapazität wird im
+      Folgerun mindestens wieder erreicht); kittensPerSec = beobachtete
+      Ankunftsrate × (1+ratio_neu)/(1+ratio_alt) — der Paragon-
+      Produktionsbonus (prestige.js getParagonProductionRatio, wirkt
+      multiplikativ auf jede Produktion, game.js:3282-3287) skaliert den
+      Wiederaufbau und damit die Ankünfte des Folgeruns.
+    None ohne beobachtete Ankunftsrate (Alt-Fixtures) — der Aufrufer
+    fällt auf die lineare Rampe zurück."""
+    village = snap.get("village", {})
+    kps = float(village.get("kittensPerSec", 0.0) or 0.0)
+    kittens_now = float(village.get("kittens", 0) or 0)
+    if kps <= 0 or kittens_now <= 0:
+        return None
+    prestige = snap.get("prestige", {})
+    paragon_now = float(prestige.get("paragon", 0) or 0)
+    burned = float(prestige.get("burnedParagon", 0) or 0)
+    ratio_old = paragon_production_ratio(paragon_now, burned)
+    ratio_new = paragon_production_ratio(paragon_now + projection, burned)
+    carry = chrono.carryover_vector(snap)
+    cal = snap.get("calendar", {})
+    post = {
+        "meta": {"ticksPerSecond": snap.get("meta", {}).get("ticksPerSecond", 5)},
+        "calendar": {
+            "year": 0, "season": 0, "day": 0,
+            "daysPerSeason": cal.get("daysPerSeason", 100),
+            "seasonCatnipModifiers": cal.get("seasonCatnipModifiers"),
+        },
+        "effects": {"catnipPerTickBase": 0.0},   # Felder überleben nicht
+        "village": {
+            "kittens": 0,
+            "maxKittens": kittens_now,
+            "kittensPerSec": kps * (1.0 + ratio_new) / (1.0 + ratio_old),
+        },
+        "resources": [{"name": name, "title": name, "value": value,
+                       "maxValue": 0, "craftable": False, "unlocked": True,
+                       "perSec": 0.0}
+                      for name, value in sorted(carry.items())],
+    }
+    proj = simulate.project(post, t_cmp)
+    return proj.paragon_projection(t_cmp)
+
 
 def _reset_value(snap: dict, projection: float) -> dict | None:
     """ResetValue = V(post) − V(continue) in Paragon bei gleicher Realzeit T
@@ -182,12 +328,13 @@ def _reset_value(snap: dict, projection: float) -> dict | None:
 
     V(continue): Paragon-Stand, wenn der Run noch T Sekunden weiterläuft und
     DANN resettet wird — Projektion + Kitten-/Jahreszuwachs aus simulate.
-    V(post): Paragon-Stand eines Neustarts JETZT nach T Sekunden — die
-    Projektion wird sofort gebankt, der neue Run fährt eine konservativ
-    LINEARE Rampe von 0 auf die historische Ø-Paragonrate des aktuellen
-    Runs (Fläche = avg_rate·T/2; der Neustart braucht Anlaufzeit, erreicht
-    aber dank permanenter Boni mindestens die alte Ø-Rate — dokumentierte
-    Näherung statt voller Neustart-Simulation)."""
+    V(post): Paragon-Stand eines Neustarts JETZT nach T Sekunden — seit #42
+    eine echte Kurzsimulation des Neustarts (_post_reset_paragon:
+    Carryover-Startkapital, Kitten wachsen mit der bonus-skalierten
+    Ankunftsrate gegen die heutige Kapazität). Ohne beobachtete
+    Ankunftsrate bleibt die bisherige LINEARE Rampe der Fallback
+    (Fläche = avg_rate·T/2, dokumentierte Näherung); das Feld
+    "vPostMode" macht den benutzten Pfad transparent."""
     if not simulate.has_projection_data(snap):
         return None
     elapsed = simulate.run_elapsed_seconds(snap)
@@ -195,12 +342,19 @@ def _reset_value(snap: dict, projection: float) -> dict | None:
     proj = simulate.project(snap, t_cmp)
     delta_continue = proj.paragon_projection(t_cmp) - proj.paragon_projection(0.0)
     v_continue = projection + delta_continue
-    avg_rate = projection / max(elapsed, 1.0)
-    v_post = projection + avg_rate * t_cmp / 2.0
+    post_gain = _post_reset_paragon(snap, projection, t_cmp)
+    if post_gain is not None:
+        v_post = projection + post_gain
+        v_post_mode = "simuliert"
+    else:
+        avg_rate = projection / max(elapsed, 1.0)
+        v_post = projection + avg_rate * t_cmp / 2.0
+        v_post_mode = "rampe"
     return {
         "resetValue": round(v_post - v_continue, 2),
         "vContinue": round(v_continue, 2),
         "vPost": round(v_post, 2),
+        "vPostMode": v_post_mode,
         "horizonS": round(t_cmp, 1),
     }
 

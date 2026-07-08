@@ -17,7 +17,10 @@ def _generate(snap, target=None):
 
 
 def _clear_target(mview):
+    # Seit #34 speist auch open_targets den Pfad-λ — für „keine λ-Daten"
+    # müssen beide Quellen weg (der Fallback bleibt so testbar).
     mview.active = None
+    mview.open_targets = None
     return mview
 
 

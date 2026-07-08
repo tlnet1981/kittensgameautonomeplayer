@@ -25,7 +25,7 @@ def make_snap(
     resources: dict[str, dict] | None = None,
     buildings: dict[str, dict] | None = None,
     techs: dict[str, dict] | None = None,
-    jobs: dict[str, int] | None = None,
+    jobs: dict[str, int | dict] | None = None,
     free_kittens: int = 0,
     kittens: int = 0,
     max_kittens: int = 0,
@@ -39,6 +39,8 @@ def make_snap(
     challenges: list[dict] | None = None,
     religion: dict | None = None,
     pacts: dict | None = None,
+    kittens_per_sec: float = 0.0,
+    pollution: dict | None = None,
 ) -> dict[str, Any]:
     """Erzeugt einen Snapshot im Format von driver/snapshot.js (inkl. derived)."""
     res_list = []
@@ -51,12 +53,17 @@ def make_snap(
         })
     bld_list = []
     for name, spec in (buildings or {}).items():
-        bld_list.append({
+        entry = {
             "name": name, "label": spec.get("label", name.capitalize()),
-            "val": spec.get("val", 0), "on": spec.get("val", 0),
+            "val": spec.get("val", 0), "on": spec.get("on", spec.get("val", 0)),
             "unlocked": spec.get("unlocked", True),
             "prices": [{"name": k, "val": v} for k, v in spec.get("prices", {}).items()],
-        })
+        }
+        # Effekt-Dict wie snapshot.js (#35): nur setzen, wenn der Test es
+        # übergibt — ohne Key greift der Beobachtungs-Fallback (Alt-Tests).
+        if spec.get("effects") is not None:
+            entry["effects"] = dict(spec["effects"])
+        bld_list.append(entry)
     tech_list = []
     for name, spec in (techs or {}).items():
         tech_list.append({
@@ -65,7 +72,19 @@ def make_snap(
             "unlocked": spec.get("unlocked", True),
             "prices": [{"name": k, "val": v} for k, v in spec.get("prices", {}).items()],
         })
-    job_list = [{"name": n, "title": n.capitalize(), "value": v} for n, v in (jobs or {}).items()]
+    # Jobs: int (alt, ohne ratesPerKitten → Python-Fallback JOB_BASE_RATES)
+    # oder dict {"value": n, "rates": {...}} → beobachtete Marginalraten
+    # ratesPerKitten wie aus snapshot.js (#40).
+    job_list = []
+    for n, v in (jobs or {}).items():
+        if isinstance(v, dict):
+            entry = {"name": n, "title": n.capitalize(),
+                     "value": v.get("value", 0)}
+            if "rates" in v:
+                entry["ratesPerKitten"] = dict(v["rates"])
+            job_list.append(entry)
+        else:
+            job_list.append({"name": n, "title": n.capitalize(), "value": v})
 
     season_mod = {"spring": 1.5, "summer": 1.0, "autumn": 1.0, "winter": 0.25}[season]
     snap = {
@@ -84,6 +103,9 @@ def make_snap(
             "kittens": kittens, "maxKittens": max_kittens, "freeKittens": free_kittens,
             "happiness": 1.0, "jobs": job_list, "leader": None,
             "catnipDemandPerSec": kittens * 0.85,
+            # Kitten-Ankunftsrate (#36, Format wie snapshot.js): Default 0
+            # hält Alt-Tests bitidentisch (keine Ankünfte, keine Mehrlast).
+            "kittensPerSec": kittens_per_sec,
         },
         "buildings": bld_list,
         "science": {"techs": tech_list},
@@ -144,6 +166,13 @@ def make_snap(
             "siphoning": pacts.get("siphoning", False),
             "fractured": pacts.get("fractured", False),
             "deficitPenaltyRatio": pacts.get("deficitPenaltyRatio", 1.0),
+        }
+    # Optionale Pollution-Daten (Format wie snapshot.js `pollution`, #35):
+    # Default = Key fehlt komplett (Pollution-Term inaktiv, Fallback 0).
+    if pollution is not None:
+        snap["pollution"] = {
+            "cathPollution": pollution.get("cathPollution", 0.0),
+            "arrivalSlowdown": pollution.get("arrivalSlowdown", 0.0),
         }
     # Optionale Challenge-Daten (Format wie snapshot.js `challenges`):
     if challenges is not None:

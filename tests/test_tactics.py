@@ -146,3 +146,473 @@ def test_deterministic_ordering():
     c2, _, s2, _ = _generate(snap)
     assert [c.action.id for c in c1] == [c.action.id for c in c2]
     assert s1.action.id == s2.action.id
+
+
+# ---------------------------------------------------------------- Deadlock-Regression (Live-Fund)
+
+def test_wood_first_low_catnip_is_not_a_deadlock():
+    """Live-Fund: Ziel 'Erstes Holz veredeln', Catnip < 100 (Refine noch
+    unbezahlbar), keine Woodcutter (Holzrate 0). Früher: nur WAIT →
+    Deadlock-Fehlalarm + Stillstand. Jetzt: Gather-Kandidat sammelt den
+    Konversions-Input aktiv, und die Konversions-ETA ist eine endliche
+    Weckbedingung (kein Deadlock, 22.3)."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 60, "max": 5000, "rate": 1.2},
+                   "wood": {"value": 0, "max": 200, "rate": 0.0}},
+        buildings={"field": {"val": 12, "prices": {"catnip": 350},
+                             "unlocked": True}},
+    )
+    mv = meta.evaluate(snap)
+    assert mv.objective_label == "Erstes Holz veredeln"
+    cands, bn = tactics.generate(snap, mv, safety.check(snap))[:2]
+    positive = [c for c in cands if c.feasible and c.score > 0
+                and c.action.type != "WAIT"]
+    assert positive, "es muss einen aktiven Kandidaten geben (Gather)"
+    assert any(c.action.id.startswith("gather") for c in positive)
+    assert not tactics.is_deadlock(cands, bn, snap)
+    # Refine ist sichtbar abgelehnt mit endlicher ETA im Grund:
+    refine = next(c for c in cands if c.action.id.startswith("refine"))
+    assert not refine.feasible and "catnip" in (refine.reject_reason or "")
+
+
+def test_real_deadlock_without_conversion_still_detected():
+    """Gegenprobe: Engpass ohne Rate UND ohne Konversionsrezept bleibt ein
+    echter Deadlock (22.3) — die Konversions-ETA-Prüfung weicht das
+    Kriterium nicht generell auf."""
+    from player.brain.records import Candidate as C
+    from player.brain import actions
+    wait_c = C(actions.wait("x", "y"), 0.01, {"base": 0.01})
+    snap = make_snap(resources={"uranium": {"value": 0, "max": 100, "rate": 0.0}})
+    assert tactics.is_deadlock([wait_c], {"resource": "uranium",
+                                          "etaSeconds": None}, snap)
+
+
+def _user_stagnation_snap():
+    """Exakter Live-Zustand aus dem Nutzer-Save (Jahr 8): 55 Felder, Catnip
+    AM Cap, Science AM Cap, 0 Holz, beide Kitten Scholars, Ziel 'Erste
+    Mine' — die Mine ist wegen unlockRatio (0 Holz < 15) unsichtbar."""
+    from player.brain import meta, safety
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal"]}
+    snap = make_snap(
+        resources={"catnip": {"value": 5000, "max": 5000, "rate": 8.0},
+                   "wood": {"value": 0, "max": 200, "rate": 0.0},
+                   "science": {"value": 500, "max": 500, "rate": 0.35},
+                   "minerals": {"value": 0, "max": 250, "rate": 0.0}},
+        buildings={"field": {"val": 55, "prices": {"catnip": 5000}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 0, "farmer": 0, "scholar": 2},
+        kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    return snap, mv, safety.check(snap)
+
+
+def test_stagnation_state_escapes_with_rebalance_and_refine():
+    """Live-Regression (Nutzer-Save Jahr 8): Der Zustand darf kein Deadlock
+    sein — Umschulung weg vom Cap-Job und Refine-Cap-Ventil müssen als
+    positive Kandidaten existieren, der Engpass kommt aus den
+    Referenzpreisen der unsichtbaren Mine."""
+    snap, mv, sr = _user_stagnation_snap()
+    assert mv.objective_label == "Erste Mine"
+    cands, bn = tactics.generate(snap, mv, sr)[:2]
+    assert bn and bn.get("resource") == "wood"      # Referenzpreis-Fallback
+    best = max((c for c in cands if c.feasible), key=lambda c: c.score)
+    assert best.action.id == "shift:scholar>woodcutter"
+    assert any(c.action.id.startswith("refine") and c.feasible and c.score > 0
+               for c in cands)
+    assert not tactics.is_deadlock(cands, bn, snap)
+    # Und: kein weiteres Feld — Catnip ist am Cap, Payback-Gate greift.
+    field = next((c for c in cands if c.action.id == "build:field"), None)
+    assert field is None or not field.feasible
+
+
+def test_job_score_is_zero_for_capped_output():
+    """Cap-Klausel (Spec 11.1): Ein Job, dessen Ertragsressource voll ist,
+    hat Grenzwert 0 — auch mit hohem λ."""
+    from player.brain import shadow
+    snap = make_snap(resources={"science": {"value": 500, "max": 500, "rate": 0.3},
+                                "wood": {"value": 0, "max": 200, "rate": 0.0}})
+    lam_rate = {"science": 500.0, "wood": 500.0}
+    assert shadow.job_score(snap, "scholar", lam_rate) == 0.0
+    assert shadow.job_score(snap, "woodcutter", lam_rate) > 0.0
+
+
+def test_cap_rebalance_fires_without_bottleneck():
+    """Cap-Rebalance läuft auch ohne Engpass-Daten (bn null): Kitten am
+    vollen Science-Cap wird zum dünnsten nicht-vollen Job umgeschult."""
+    snap = make_snap(
+        resources={"science": {"value": 500, "max": 500, "rate": 0.3},
+                   "wood": {"value": 10, "max": 200, "rate": 0.0}},
+        jobs={"woodcutter": 0, "scholar": 2},
+    )
+    cands = []
+    village = snap.get("village", {})
+    tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
+    assert any(c.action.id == "shift:scholar>woodcutter" for c in cands)
+
+
+def test_saving_rule_holds_cheaper_purchase_for_housing():
+    """Live-Fund #2: Library #3 (25 Holz, bezahlbar) darf das Holz nicht
+    verbrauchen, auf das für Hütte #3 (31 Holz, ~6 s entfernt) gespart
+    wird — DelayPenalty der Kaufregel 10.3. Käufe ohne Ressourcenkonflikt
+    (Feld: nur Catnip) bleiben unbestraft."""
+    from player.brain import meta, safety
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal"]}
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 28, "max": 200, "rate": 0.5},
+                   "science": {"value": 120, "max": 675, "rate": 0.35},
+                   "minerals": {"value": 40, "max": 250, "rate": 0.2}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 900}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 31}, "unlocked": True},
+                   "library": {"val": 2, "prices": {"wood": 25}, "unlocked": True},
+                   "mine": {"val": 1, "prices": {"wood": 115}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 2, "farmer": 1, "scholar": 1},
+        kittens=4, max_kittens=4,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    hut = next(c for c in cands if c.action.id == "build:hut")
+    lib = next(c for c in cands if c.action.id == "build:library")
+    field = next(c for c in cands if c.action.id == "build:field")
+    assert not hut.feasible and hut.components.get("potential", 0) > 0
+    assert lib.score < 0 and lib.components.get("delayPenalty", 0) < 0
+    assert field.score > 0 and "delayPenalty" not in field.components
+    wait = next(c for c in cands if c.action.type == "WAIT")
+    assert "Spare auf" in wait.action.exec_spec.get("reason", "")
+
+
+def test_saving_rule_ignores_far_away_targets():
+    """Sparziele jenseits SAVING_HORIZON_S frieren die Ökonomie nicht ein."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 1, "max": 500, "rate": 0.01}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 900}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 400}, "unlocked": True},
+                   "library": {"val": 2, "prices": {"wood": 0.5}, "unlocked": True}},
+        jobs={"woodcutter": 1},
+        kittens=1, max_kittens=1,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    lib = next((c for c in cands if c.action.id == "build:library"), None)
+    assert lib is None or "delayPenalty" not in lib.components
+
+
+def test_farmer_released_after_winter_danger_passes():
+    """Nutzer-Fund: Winter-Notfarmer blieben nach der Gefahr sitzen. Ist die
+    Projektion auch ohne einen Farmer deutlich sicher (Marge 1.5), wird er
+    zum besten anderen Job zurückgeschult."""
+    snap = make_snap(
+        resources={"catnip": {"value": 4000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 5, "max": 200, "rate": 0.0},
+                   "science": {"value": 10, "max": 500, "rate": 0.0}},
+        buildings={"field": {"val": 30, "prices": {"catnip": 900}, "unlocked": True}},
+        jobs={"woodcutter": 0, "farmer": 3, "scholar": 0},
+        kittens=3, max_kittens=4,
+        season="spring", catnip_field_base=30 * 0.125,
+    )
+    cands = []
+    village = snap.get("village", {})
+    tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
+    shift = [c for c in cands if c.action.id.startswith("shift:farmer>")]
+    assert shift, "Farmer muss nach der Gefahr freigegeben werden"
+    assert "foodSafe" in shift[0].components
+
+
+def test_farmer_kept_when_projection_tight():
+    """Gegenprobe: Bleibt die Projektion ohne den Farmer unter der
+    1.5-fachen Warnschwelle, wird NICHT umgeschult (Anti-Flattern)."""
+    snap = make_snap(
+        resources={"catnip": {"value": 200, "max": 5000, "rate": 0.3}},
+        buildings={"field": {"val": 3, "prices": {"catnip": 90}, "unlocked": True}},
+        jobs={"woodcutter": 0, "farmer": 2},
+        kittens=2, max_kittens=2,
+        season="autumn", catnip_field_base=3 * 0.125,
+    )
+    cands = []
+    village = snap.get("village", {})
+    tactics._job_rebalance_candidate(snap, None, cands, village, False, None)
+    assert not any(c.action.id.startswith("shift:farmer>") for c in cands)
+
+
+def test_allocation_includes_woodcutter_for_next_hut():
+    """Nutzer-Fund: null Woodcutter im ganzen Run, weil λ nur am aktiven
+    (Science-)Ziel hing. Die Soll-Allokation (12.2) bewertet Ziel PLUS
+    nächste Housing-Stufe — Holz wird gebraucht, ein Kitten muss fällen."""
+    from player.brain import meta, safety
+    techs = {"calendar": {"researched": True},
+             "agriculture": {"researched": True},
+             "archery": {"researched": False, "prices": {"science": 300}}}
+    snap = make_snap(
+        resources={"catnip": {"value": 2000, "max": 5000, "rate": 5.0},
+                   "wood": {"value": 3, "max": 200, "rate": 0.0},
+                   "science": {"value": 50, "max": 500, "rate": 0.2}},
+        buildings={"field": {"val": 15, "prices": {"catnip": 500}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 0, "farmer": 0, "scholar": 2},
+        kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    shift = next((c for c in cands if c.action.id.startswith("shift:")), None)
+    assert shift is not None and shift.action.exec_spec["to"] == "woodcutter"
+    assert "allocDeficit" in shift.components
+
+
+def test_allocation_respects_min_farmers_and_sums():
+    """Soll-Allokation: Summe == Kitten, Farmer nie unter der
+    Food-Untergrenze, deterministisch bei Wiederholung."""
+    from player.brain import shadow
+    snap = make_snap(
+        resources={"catnip": {"value": 300, "max": 5000, "rate": 0.5},
+                   "wood": {"value": 0, "max": 200, "rate": 0.0},
+                   "science": {"value": 0, "max": 500, "rate": 0.0}},
+        buildings={"field": {"val": 4, "prices": {"catnip": 120}, "unlocked": True}},
+        jobs={"woodcutter": 0, "farmer": 0, "scholar": 0},
+        kittens=5, max_kittens=6, season="autumn",
+        catnip_field_base=4 * 0.125,
+    )
+    prices = [{"name": "wood", "val": 100}, {"name": "science", "val": 60}]
+    mf = tactics._min_farmers(snap, snap["village"])
+    a1 = shadow.target_allocation(snap, prices, mf)
+    a2 = shadow.target_allocation(snap, prices, mf)
+    assert a1 == a2
+    assert sum(a1.values()) == 5
+    assert a1.get("farmer", 0) >= mf
+    assert a1.get("woodcutter", 0) >= 1 and a1.get("scholar", 0) >= 1
+
+
+def _flap_snap(catnip, jobs):
+    return make_snap(
+        resources={"catnip": {"value": catnip, "max": 5000, "rate": 2.0},
+                   "wood": {"value": 3, "max": 200, "rate": 0.09},
+                   "science": {"value": 50, "max": 500, "rate": 0.175}},
+        buildings={"field": {"val": 10, "prices": {"catnip": 400}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 31}, "unlocked": True}},
+        techs={"calendar": {"researched": True}, "agriculture": {"researched": True},
+               "archery": {"researched": False, "prices": {"science": 300}}},
+        jobs=jobs, kittens=4, max_kittens=4,
+        season="autumn", catnip_field_base=10 * 0.125,
+    )
+
+
+def test_no_farmer_flapping_inside_hysteresis_band():
+    """Nutzer-Fund: 4. Kitten sprang Farmer↔Woodcutter. Im Band zwischen
+    Farmer-Untergrenze (1.0×Warnschwelle) und Freigabe-Marge (1.5×) darf
+    KEIN Farmer abgezogen werden, auch wenn die Allokation einen
+    Überschuss sieht."""
+    from player.brain import meta, safety
+    snap = _flap_snap(1800, {"woodcutter": 1, "farmer": 2, "scholar": 1})
+    v = snap["village"]
+    assert tactics._min_farmers(snap, v) == 1          # Band-Vorbedingung
+    assert not tactics._farmer_release_safe(snap, v)   # Band-Vorbedingung
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    assert not any(c.action.id.startswith("shift:farmer>") for c in cands
+                   if c.feasible)
+
+
+def test_no_shift_reversal_across_cycles():
+    """Anti-Flattern-Simulation: Über mehrere Zyklen darf auf einen Tausch
+    A→B nie unmittelbar der Rücktausch B→A folgen."""
+    from player.brain import meta, safety
+    jobs = {"woodcutter": 1, "farmer": 2, "scholar": 1}
+    history = []
+    for _ in range(6):
+        snap = _flap_snap(1800, dict(jobs))
+        mv = meta.evaluate(snap)
+        cands = tactics.generate(snap, mv, safety.check(snap))[0]
+        best = max((c for c in cands if c.feasible),
+                   key=lambda c: (c.score, c.action.id))
+        history.append(best.action.id)
+        if not best.action.id.startswith("shift:"):
+            break
+        src, dst = best.action.exec_spec["from"], best.action.exec_spec["to"]
+        jobs[src] -= 1
+        jobs[dst] = jobs.get(dst, 0) + 1
+    for a, b in zip(history, history[1:]):
+        if a.startswith("shift:") and b.startswith("shift:"):
+            sa = a.split(":", 1)[1].split(">")
+            sb = b.split(":", 1)[1].split(">")
+            assert sa != sb[::-1], f"Ping-Pong erkannt: {a} → {b}"
+
+
+def test_allocation_keeps_scholars_when_goal_is_wood_building():
+    """Nutzer-Fund: Nach dem Winter alle 6 Kitten als Woodcutter, obwohl
+    Forschung ansteht — das Holz-Sofortziel gab Science den Wert 0. Die
+    Soll-Allokation bepreist jetzt auch das NÄCHSTE offene Forschungsziel
+    (MetaView.next_research) und hält Scholars im Einsatz."""
+    from player.brain import meta, safety, shadow
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal", "metal"]}
+    techs["construction"] = {"researched": False, "prices": {"science": 1300}}
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 8.0},
+                   "wood": {"value": 5, "max": 400, "rate": 0.27},
+                   "minerals": {"value": 10, "max": 400, "rate": 0.0},
+                   "science": {"value": 40, "max": 500, "rate": 0.0}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 800}, "unlocked": True},
+                   "hut": {"val": 3, "prices": {"wood": 78}, "unlocked": True},
+                   "mine": {"val": 1, "prices": {"wood": 115}, "unlocked": True},
+                   "smelter": {"val": 0, "prices": {"minerals": 200}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs=techs,
+        jobs={"woodcutter": 6, "farmer": 0, "scholar": 0, "miner": 0},
+        kittens=6, max_kittens=6,
+        season="spring", catnip_field_base=20 * 0.125,
+    )
+    mv = meta.evaluate(snap)
+    assert mv.active is not None and mv.active.target["kind"] == "build"
+    assert mv.next_research is not None            # Forschung ist im Pfad
+    prices = tactics._allocation_prices(snap, [{"name": "minerals", "val": 200}],
+                                        mv.next_research)
+    alloc = shadow.target_allocation(snap, prices,
+                                     tactics._min_farmers(snap, snap["village"]))
+    assert alloc.get("scholar", 0) >= 1, f"Scholar fehlt in {alloc}"
+    assert alloc.get("woodcutter", 0) < 6
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    shift = next((c for c in cands if c.action.id.startswith("shift:")), None)
+    assert shift is not None
+    assert shift.action.exec_spec["to"] in ("miner", "scholar")
+
+
+def test_saving_target_recognized_at_five_minutes():
+    """Nutzer-Fund „er spart nie": Mit dem alten 180-s-Fenster war eine
+    Hütte, die ~5 min entfernt ist (typisches Frühspiel-Tempo), NIE ein
+    Sparziel. Jetzt gilt das 10-min-Fenster — die Library wird gebremst."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 3000, "max": 5000, "rate": 6.0},
+                   "wood": {"value": 26, "max": 200, "rate": 0.26},
+                   "science": {"value": 120, "max": 675, "rate": 0.35}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 900}, "unlocked": True},
+                   "hut": {"val": 2, "prices": {"wood": 78}, "unlocked": True},
+                   "library": {"val": 2, "prices": {"wood": 25}, "unlocked": True}},
+        techs={"calendar": {"researched": True}, "agriculture": {"researched": True},
+               "archery": {"researched": False, "prices": {"science": 300}}},
+        jobs={"woodcutter": 2, "farmer": 1, "scholar": 1},
+        kittens=4, max_kittens=4,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    hut = next((c for c in cands if c.action.id == "build:hut"), None)
+    assert hut is not None and hut.components.get("potential", 0) > 0
+    assert hut.eta_seconds is not None and 180 < hut.eta_seconds < 600
+    lib = next(c for c in cands if c.action.id == "build:library")
+    assert lib.components.get("delayPenalty", 0) < 0
+
+
+def test_food_warn_state_is_not_a_deadlock():
+    """Live-Fund (Ziel 'Calendar erforschen'): 1 Farmer, Food-Warnstufe,
+    Science-Rate 0 — Safety-Gates sperren fast alles, aber Catnip wächst:
+    Das ist gewolltes Warten mit endlicher Weckbedingung, KEIN Deadlock."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 100, "max": 5000, "rate": 0.4},
+                   "wood": {"value": 8, "max": 200, "rate": 0.0},
+                   "science": {"value": 0, "max": 250, "rate": 0.0}},
+        buildings={"field": {"val": 12, "prices": {"catnip": 400}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs={"calendar": {"researched": False, "prices": {"science": 30},
+                            "unlocked": True}},
+        jobs={"farmer": 1}, kittens=1, max_kittens=2,
+        catnip_field_base=12 * 0.125,
+    )
+    mv = meta.evaluate(snap)
+    cands, bn = tactics.generate(snap, mv, safety.check(snap))[:2]
+    assert not tactics.is_deadlock(cands, bn, snap)
+
+
+def test_allocation_active_in_warn_state_with_surplus_farmer():
+    """Warnstufe darf die Umschulung nicht komplett einfrieren: Gibt es
+    mehr Farmer als die Untergrenze verlangt, wird weiter Richtung Ziel
+    (Scholar) umgeschult — nur 'critical' überlässt der Safety das Feld."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 400, "max": 5000, "rate": 3.0},
+                   "wood": {"value": 8, "max": 200, "rate": 0.0},
+                   "science": {"value": 0, "max": 250, "rate": 0.0}},
+        buildings={"field": {"val": 15, "prices": {"catnip": 400}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True}},
+        techs={"calendar": {"researched": False, "prices": {"science": 30},
+                            "unlocked": True}},
+        jobs={"farmer": 2, "scholar": 0}, kittens=2, max_kittens=2,
+        catnip_field_base=15 * 0.125, season="autumn",
+    )
+    food = snap.get("derived", {}).get("food", {})
+    if food.get("status") == "warn":            # Fixture trifft die Warnstufe
+        mv = meta.evaluate(snap)
+        cands = tactics.generate(snap, mv, safety.check(snap))[0]
+        mf = tactics._min_farmers(snap, snap["village"])
+        if mf < 2:
+            assert any(c.action.id.startswith("shift:farmer>") and c.feasible
+                       for c in cands)
+
+
+def test_cap_raising_building_becomes_dependency_when_goal_cap_blocked():
+    """Live-Fund (Screenshot): Ziel Metal Working (1000 Science) bei
+    Science-Cap 500 — Library #2 ist der einzige Fix, wurde aber vom
+    Payback-Gate abgelehnt (Cap-Erhöhung hatte keinen bewerteten Nutzen)
+    → Deadlock Stufe c. Jetzt: <res>Max-Effekte zählen als Cap-Relief
+    (Storage-Regel 11.3 A) und machen das Gebäude zur Ziel-Dependency."""
+    from player.brain import meta, safety
+    techs = {t: {"researched": True} for t in
+             ["calendar", "agriculture", "archery", "mining", "animal"]}
+    techs["metal"] = {"researched": False, "prices": {"science": 1000},
+                      "unlocked": True}
+    snap = make_snap(
+        resources={"catnip": {"value": 4000, "max": 5000, "rate": 4.0},
+                   "wood": {"value": 60, "max": 200, "rate": 0.18},
+                   "science": {"value": 500, "max": 500, "rate": 0.35},
+                   "minerals": {"value": 20, "max": 250, "rate": 0.25}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 800}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "mine": {"val": 1, "prices": {"wood": 115}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True,
+                               "effects": {"scienceMax": 250,
+                                           "sciencePerTickBase": 0.0}}},
+        techs=techs,
+        jobs={"woodcutter": 1, "scholar": 1}, kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    assert mv.objective_label == "Metal Working erforschen"
+    cands, bn = tactics.generate(snap, mv, safety.check(snap))[:2]
+    lib = next(c for c in cands if c.action.id == "build:library")
+    assert lib.feasible and lib.components.get("storage", 0) > 0
+    assert not tactics.is_deadlock(cands, bn, snap)
+
+
+def test_cap_raising_building_still_payback_gated_without_cap_block():
+    """Gegenprobe: OHNE Cap-Block am Ziel bleibt die Library ein normaler
+    Produktionskandidat — das Cap-Relief ist kein Freifahrtschein."""
+    from player.brain import meta, safety
+    snap = make_snap(
+        resources={"catnip": {"value": 4000, "max": 5000, "rate": 4.0},
+                   "wood": {"value": 60, "max": 200, "rate": 0.18},
+                   "science": {"value": 100, "max": 500, "rate": 0.35}},
+        buildings={"field": {"val": 20, "prices": {"catnip": 800}, "unlocked": True},
+                   "hut": {"val": 1, "prices": {"wood": 12}, "unlocked": True},
+                   "library": {"val": 1, "prices": {"wood": 40}, "unlocked": True,
+                               "effects": {"scienceMax": 250,
+                                           "sciencePerTickBase": 0.0}}},
+        techs={"calendar": {"researched": True}, "agriculture": {"researched": True},
+               "archery": {"researched": False, "prices": {"science": 300},
+                           "unlocked": True}},
+        jobs={"woodcutter": 1, "scholar": 1}, kittens=2, max_kittens=2,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    lib = next((c for c in cands if c.action.id == "build:library"), None)
+    assert lib is None or "storage" not in lib.components

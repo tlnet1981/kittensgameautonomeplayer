@@ -11,11 +11,15 @@ Ereignispunkte der stückweisen Integration (Spec 5.3, reduziert):
 - Saisonwechsel (Konstanten wie state/derived.py: 5 Ticks/s, 1 Tag = 2 s,
   100 Tage/Saison, 4 Saisons/Jahr) — betrifft die Catnip-Feldproduktion.
 - Erwartete Kitten-Ankünfte: NUR wenn der Snapshot eine Ankunftsrate
-  (village.kittensPerSec) UND eine bekannte Housing-Kapazität (maxKittens)
-  liefert; der Standard-Snapshot (driver/snapshot.js) enthält keine
-  Ankunftsrate → dann werden Ankünfte konservativ ignoriert (Kittenzahl
-  bleibt konstant, keine geschätzte Mehrlast, keine geschenkte Paragonrate).
-  Ankommende Kitten erhöhen die Catnip-Mehrlast (0,85/Tick × 5 Ticks/s).
+  (village.kittensPerSec, seit #36 vom Driver exportiert — village.js
+  calculateKittensPerTick × TPS) UND eine bekannte Housing-Kapazität
+  (maxKittens) liefert; ohne Rate (Alt-Fixtures) werden Ankünfte
+  konservativ ignoriert (Kittenzahl bleibt konstant, keine geschätzte
+  Mehrlast, keine geschenkte Paragonrate). Ankommende Kitten erhöhen die
+  Catnip-Mehrlast (0,85/Tick × 5 Ticks/s). Dokumentierte Lücke: den
+  Wachstumsstopp bei Hunger (village.js update: sim.update(0) bei
+  resDiff < 0) modelliert die Projektion nicht — die Katastrophe selbst
+  deckt food_fatal ab.
 
 policy = {"invest": 0..1} ist der leichte Hebel für Makro-Varianten
 (Spec 8.3 a/b/c): der Anteil f der laufenden Produktion, der rechnerisch

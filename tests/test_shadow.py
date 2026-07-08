@@ -145,7 +145,10 @@ def test_free_kitten_goes_to_highest_job_score():
     cands, bn = _generate(snap, {"kind": "research", "name": "calendar"})
     job = next(c for c in cands if c.action.exec_spec.get("kind") == "assign_job")
     assert job.action.exec_spec["job"] == "scholar"
-    assert job.components.get("jobScore", 0) > 0
+    # Seit der Soll-Allokation (12.2) kann die Wahl über das
+    # Allokations-Defizit statt über den Einzel-JobScore laufen:
+    assert (job.components.get("jobScore", 0) > 0
+            or "allocDeficit" in job.components)
 
 
 def test_job_fallback_without_lambda_data():
@@ -178,7 +181,8 @@ def test_rebalance_gate_requires_job_score_gain():
     cands, bn = _generate(snap, {"kind": "research", "name": "calendar"})
     shift = next(c for c in cands if c.action.id.startswith("shift:"))
     assert shift.action.exec_spec["to"] == "scholar"
-    assert shift.components.get("jobScore", 0) > tactics.REBALANCE_GAIN_MIN
+    assert (shift.components.get("jobScore", 0) > tactics.REBALANCE_GAIN_MIN
+            or "allocDeficit" in shift.components)
 
 
 # ================================================================ Payback-Gate
@@ -218,7 +222,13 @@ def test_payback_gate_spares_unlocks_and_bottleneck_solvers():
     assert workshop.components.get("unlock", 0) > 0
     mill = next(c for c in cands if c.action.id == "build:lumberMill")
     assert mill.feasible                          # löst den Engpass
-    assert mill.components.get("netValue", 0) > 0
+    # Seit dem Pfad-λ (#34) sind die 50 Minerals der Mühle nicht mehr
+    # gratis: der Smelter-Meilenstein braucht sie später und nichts
+    # produziert sie (λ = Clamp) → netValue ehrlich negativ. Der Kern
+    # dieses Tests bleibt: der Engpasslöser ist vom Payback-Gate (10.4)
+    # ausgenommen und gewinnt über den Bottleneck-Bonus.
+    assert "Payback" not in (mill.reject_reason or "")
+    assert mill.components.get("bottleneck", 0) > 0
     assert mill.score > 0
 
 

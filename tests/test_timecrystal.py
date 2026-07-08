@@ -62,7 +62,9 @@ def test_tc_balance_leviathans_and_negative():
 def test_rr_value_formula():
     # Marginal je Shatter-Jahr: 5/s ÷ 5 Ticks/s × 4000 Ticks × 0.01 = 40
     # Einheiten × λ 2.0 = 80 s. ExpectedShatters = 2000 − 1000 − 5 = 995.
-    # RRValue = 80·995 − 1000·0.5 = 79 100 s.
+    # TC-Preis zum OPPORTUNITÄTSWERT (#43): Shatter-Jahresertrag bei RR 1
+    # = 80 s/TC (> λ_TC 0.5 — das Mini-λ unterschätzte die 1000 durch den
+    # RR-Kauf verschossenen Shatter). RRValue = 80·995 − 1000·80 = −400 s.
     snap = make_snap(resources={
         "unobtainium": {"value": 0, "max": 0, "rate": 5.0},
         "timeCrystal": {"value": 2000, "max": 0, "rate": 0}})
@@ -71,7 +73,9 @@ def test_rr_value_formula():
     rrv = timecrystal.rr_value(snap, lam)
     assert rrv["marginalPerShatterS"] == pytest.approx(80.0)
     assert rrv["expectedShatters"] == pytest.approx(995.0)
-    assert rrv["rrValueS"] == pytest.approx(79100.0)
+    assert rrv["tcValueMode"] == "shatterYield"
+    assert rrv["tcValueS"] == pytest.approx(80.0)
+    assert rrv["rrValueS"] == pytest.approx(-400.0)
 
 
 def test_rr_value_negative_without_production_and_none_without_entry():
@@ -193,6 +197,28 @@ def test_shatter_rule_d_paragon_boundary():
     assert timecrystal.shatter_decision(snap, {"timeCrystal": 0.5}) is None
 
 
+def test_shatter_rule_d_reacts_to_state():
+    """Pflichttest #43: Regel D bewertet Paragon und TC aus dem Zustand —
+    paragon_value_s = Δratio/(1+ratio) × Σλ·rate × H = 0.01 × (2.0·5.0)
+    × 600 = 60 s statt der Konstante 900."""
+    snap = make_snap(resources={
+        "science": {"value": 0, "max": 0, "rate": 5.0},
+        "timeCrystal": {"value": 20, "max": 0, "rate": 0}})
+    snap["time"] = _time_section(rr=0, heat=0, heat_max=100)
+    snap["calendar"]["year"] = 995
+    # TC-Kosten 5 Jahre × λ_TC 20 = 100 s > 60 s Paragon-Wert → KEIN
+    # Shatter (mit PARAGON_VALUE_REF_S 900 hätte die Regel gefeuert):
+    assert timecrystal.shatter_decision(
+        snap, {"science": 2.0, "timeCrystal": 20.0}, horizon=600) is None
+    # Billigere TC (λ_TC 2.0 → Kosten 10 s < 60 s): Regel D feuert.
+    batch, rule, detail = timecrystal.shatter_decision(
+        snap, {"science": 2.0, "timeCrystal": 2.0}, horizon=600)
+    assert (rule, batch) == ("D", 5)
+    assert detail["paragonValueS"] == pytest.approx(60.0)
+    assert detail["valueS"] == pytest.approx(50.0)
+    assert detail["tcValueMode"] == "lambda"
+
+
 def test_shatter_decision_fallbacks_without_data():
     snap = make_snap(resources={"timeCrystal": {"value": 100, "max": 0, "rate": 0}})
     assert timecrystal.shatter_decision(snap, {"timeCrystal": 0.5}) is None
@@ -223,9 +249,12 @@ def test_rr_candidate_rejected_on_negative_rr_value():
 
 
 def test_rr_candidate_positive_and_shatter_engine_batch():
+    # TC 5000: RRValue = 80·(5000−1000−5) − 1000·80 = +239 600 s — seit
+    # #43 kostet der RR-Kauf den TC-Opportunitätswert (80 s/TC), positiv
+    # wird er erst, wenn die künftigen Shatter die 1000 TC überkompensieren.
     snap = make_snap(resources={
         "unobtainium": {"value": 0, "max": 0, "rate": 5.0},
-        "timeCrystal": {"value": 2000, "max": 0, "rate": 0}})
+        "timeCrystal": {"value": 5000, "max": 0, "rate": 0}})
     snap["time"] = _time_section(rr=1, heat=0, heat_max=100)
     cands = []
     lam = {"unobtainium": 2.0, "timeCrystal": 0.5}
@@ -354,6 +383,30 @@ def test_carryover_vector_follows_reset_rules():
     assert carry["plate"] == pytest.approx(60.0)
 
 
+def test_chronosphere_rebuild_delay_from_observed_rates():
+    """Pflichttest #43: RebuildDelay aus beobachteten Raten (ETA) statt
+    der Konstante 60 s/CS; ohne Rate greift ehrlich der Fallback."""
+    def _rebuild_snap(rate):
+        return make_snap(
+            resources={"unobtainium": {"value": 1000, "max": 5000,
+                                       "rate": rate}},
+            buildings={"chronosphere": {"val": 1,
+                                        "prices": {"unobtainium": 100}}})
+    # Rate 0: keine ETA möglich → Fallback-Modus, RebuildDelay = 60·k
+    # (UOCost 0, solange der Bestand die Einheiten deckt; Carryover 0
+    # ohne positive Rate):
+    _, detail = chrono.optimal_chronosphere_count(_rebuild_snap(0.0))
+    assert detail["rebuildMode"] == "fallback"
+    assert detail["csValues"][2] == pytest.approx(-120.0)
+    # Rate 50/s: RebuildETA(k) = 80·Σ_{j<k}1.25^j / 50 (Basis 100/1.25).
+    # k=1: 0.3 − 0 − 1.6 = −1.3; k=2: 0.6 − 2.0 − 3.6 = −5.0 — Sekunden
+    # statt Minuten, der Zustand entscheidet:
+    _, detail = chrono.optimal_chronosphere_count(_rebuild_snap(50.0))
+    assert detail["rebuildMode"] == "eta"
+    assert detail["csValues"][1] == pytest.approx(-1.3)
+    assert detail["csValues"][2] == pytest.approx(-5.0)
+
+
 def test_seed_run_admissible_conservative():
     ok, _ = chrono.seed_run_admissible(make_snap())
     assert not ok
@@ -420,7 +473,9 @@ def test_shatter_run_restzeit_zero_when_stocked():
     assert meta._plan_restzeit(snap, "SHATTER_RUN", proj, 600) == 0.0
     snap["resources"][0]["value"] = 10.0     # unter dem Ziel → Rate zählt
     rz = meta._plan_restzeit(snap, "SHATTER_RUN", proj, 600)
-    assert rz == pytest.approx((meta.SHATTER_RUN_TC_TARGET - 10.0) / 0.5)
+    # Seit #38 ist das TC-Ziel zustandsabhängig (Reserve + Heat-gedeckelter
+    # Batch, hier heatMax 100/10 → 5+10 = 15) statt der Konstante Reserve+15:
+    assert rz == pytest.approx((meta._shatter_tc_target(snap) - 10.0) / 0.5)
     snap["resources"][0]["perSec"] = 0.0
     assert math.isinf(meta._plan_restzeit(snap, "SHATTER_RUN", proj, 600))
 

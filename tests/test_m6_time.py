@@ -36,11 +36,14 @@ def test_shatter_requires_rr_and_heat_headroom():
     cands, _ = _generate(snap)
     assert not any(c.action.id == "time:shatter" for c in cands)
 
-    # Mit RR und Heat-Spielraum: Shatter mit begrenztem Batch
+    # Mit RR und Heat-Spielraum: Shatter mit Heat-begrenztem Batch.
+    # Seit dem Pfad-λ (#34) liefert der Zyklus fast immer λ-Daten → die
+    # λ-Regel B wählt den Batch bis zur Heat-Grenze (100/10 = 10) statt
+    # der konservativen Regel C (≤ 5 ohne λ).
     snap["time"] = _time(rr=2, heat=0, heat_max=100)
     cands, _ = _generate(snap)
     sh = next(c for c in cands if c.action.id == "time:shatter")
-    assert 1 <= sh.action.batch <= 5
+    assert 1 <= sh.action.batch <= 10
 
     # Heat voll: kein Shatter
     snap["time"] = _time(rr=2, heat=95, heat_max=100)

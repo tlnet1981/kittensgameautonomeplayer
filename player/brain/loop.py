@@ -126,6 +126,7 @@ class Brain:
         self.last_meta: meta.MetaView | None = None
         self.last_bottleneck: dict | None = None
         self.last_reset_eval: dict | None = None
+        self.last_lambda_top: list[dict] = []   # λ-Topliste (#34, Cockpit)
         self.force_reset = False   # Debug-Control aus dem Cockpit
         # Verlauf der Paragon-Projektion für die Speedrun-Regel (Spec 20.4):
         self.paragon_samples: list[tuple[float, int]] = []
@@ -231,8 +232,13 @@ class Brain:
         self.paragon_samples.append((time.time(), snap["derived"]["resetParagon"]))
         if len(self.paragon_samples) > 4000:
             del self.paragon_samples[:2000]
-        reset_eval = reset.evaluate(snap, meta_view.run_type, meta_view.next_perk,
-                                    self.paragon_samples)
+        # Die Makroplan-Restzeit (#39) ist die erwartete Restlaufzeit bis
+        # zum Run-Ziel — reset.evaluate exportiert sie als etaSeconds
+        # (geplanter Reset-Horizont für die Payback-Regel 10.4/6.4):
+        reset_eval = reset.evaluate(
+            snap, meta_view.run_type, meta_view.next_perk,
+            self.paragon_samples,
+            plan_restzeit_s=(meta_view.run_plan or {}).get("restzeitS"))
         self.last_reset_eval = reset_eval
         if (reset_eval["recommended"] or self.force_reset) and mode != "ACTIVE":
             # G-02: Reset ist irreversibel — im MODEL_MISMATCH/SAFE_STOP gesperrt.
@@ -262,7 +268,9 @@ class Brain:
         # Schutzaktionen sind seit dem Schleifen-Bugfix ABGESTUFTE Kandidaten
         # (Leitplanke statt Monopol, G-04): food-neutrale Fortschritte wie
         # Forschung konkurrieren normal weiter.
-        candidates, bottleneck = tactics.generate(snap, meta_view, safety_result)
+        candidates, bottleneck = tactics.generate(
+            snap, meta_view, safety_result,
+            run_horizon_s=reset_eval.get("etaSeconds"))
         if safety_result.critical and safety_result.candidates:
             candidates.extend(safety_result.candidates)
             candidates.sort(key=lambda c: (-c.score, c.action.id))
@@ -278,9 +286,10 @@ class Brain:
         # Nur im ACTIVE-Modus (im MISMATCH/SAFE_STOP ist Nichtstun gewollt);
         # Sicherheitsinvarianten werden nie gelockert (22.3 Satz 2).
         if mode == "ACTIVE" and selected.action.type == "WAIT" \
-                and tactics.is_deadlock(candidates, bottleneck):
+                and tactics.is_deadlock(candidates, bottleneck, snap):
             candidates, bottleneck, dl = tactics.resolve_deadlock(
-                snap, meta_view, safety_result)
+                snap, meta_view, safety_result,
+                run_horizon_s=reset_eval.get("etaSeconds"))
             apply_mode_gate(candidates, mode)
             selected = next((c for c in candidates if c.feasible and c.score > 0),
                             next(c for c in candidates if c.action.type == "WAIT"))
@@ -327,7 +336,12 @@ class Brain:
         )
         self.last_record = record
         bus.publish("decision.committed", record.to_dict())
-        bus.publish("plan.updated", self._plan_payload(meta_view, bottleneck))
+        # λ-Topliste fürs Cockpit (#34): bewusst billige Doppelrechnung des
+        # Pfad-λ (deterministisch, 2 ETA-Auswertungen je Preisposition) —
+        # generate() kapselt seinen λ-Satz, der Payload braucht nur die Top-N.
+        lam, lam_rate = tactics.path_lambdas(snap, meta_view)
+        bus.publish("plan.updated", self._plan_payload(
+            meta_view, bottleneck, tactics.lambda_top(lam, lam_rate)))
         self.narrator.track_bottleneck((bottleneck or {}).get("resource"),
                                        meta_view.objective_label)
 
@@ -446,10 +460,16 @@ class Brain:
         })
         self.decisions_made = 0
 
-    def _plan_payload(self, meta_view: meta.MetaView, bottleneck: dict | None) -> dict:
+    def _plan_payload(self, meta_view: meta.MetaView, bottleneck: dict | None,
+                      lambda_top: list[dict] | None = None) -> dict:
         payload = meta_view.to_dict()
         payload["bottleneck"] = bottleneck
         payload["reset"] = self.last_reset_eval
+        # λ-Topliste (#34): frisch aus dem Zyklus oder der letzte Stand
+        # (Status-Payload außerhalb des Zyklus, runtime.status_payload).
+        if lambda_top is not None:
+            self.last_lambda_top = lambda_top
+        payload["lambdaTop"] = self.last_lambda_top
         return payload
 
 

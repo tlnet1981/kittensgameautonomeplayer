@@ -20,11 +20,177 @@
     document.getElementById("mission-live").classList.toggle("hidden", !live);
     if (!live) return;
 
+    renderFocus(store);
     renderHero(store);
     renderChain(store);
     renderSafety(store);
     renderMilestones(store);
     renderBottleneck(store);
+  }
+
+  // ================== Fokus-Panel (Gewichtung · Sparziel · Warum jetzt?) ==================
+  // Datenquelle: decision.committed / status.currentDecision (DecisionRecord.to_dict)
+  // + plan.updated (MetaView). Rendert deterministisch: nur bei neuer decisionId.
+
+  // Reine Sekundenwert-Anzeigen der Score-Zerlegung (Spiegel von
+  // SHADOW_INFO_KEYS in player/brain/tactics.py) — Darstellung mit „s"-Suffix,
+  // sie zählen nicht additiv zum Score:
+  const SECONDS_KEYS = new Set(["costTime", "benefitTime", "netValue", "optionValue",
+    "jobScore", "csValue", "pollutionCost", "tradeValue", "huntValue", "praiseValue",
+    "storageB", "storageC", "leaderValue", "policyValue", "tapValue", "pactValue",
+    "rrValue", "furnaceValue", "shatterValue", "voidValue", "tfValue",
+    "potential", "savingFor"]);
+  // Sparhorizont wie brain/tactics.py SAVING_HORIZON_S:
+  const SAVING_HORIZON_S = 180;
+
+  let focusRenderedId = null;
+
+  function renderFocus(store) {
+    const d = store.currentDecision;
+    const panel = document.getElementById("focus-panel");
+    if (!panel) return;
+    if (!d || !d.selected) { panel.classList.add("hidden"); return; }
+    panel.classList.remove("hidden");
+    if (d.decisionId === focusRenderedId) return;   // kein Flackern
+    focusRenderedId = d.decisionId;
+
+    panel.innerHTML =
+      "<h3>Fokus <span class='muted small'>Gewichtung · Sparziel · Warum jetzt?</span></h3>" +
+      focusHead(d, store.plan) + focusSaving(d) + focusBars(d) + focusWhy(d);
+    // Tap/Klick klappt die Komponenten-Zerlegung eines Balkens fest auf:
+    panel.querySelectorAll(".fb-row").forEach(row => {
+      row.onclick = () => row.classList.toggle("open");
+    });
+  }
+
+  // 1. Kopfzeile: Run-Typ · Phase · aktives Ziel + Engpass-Fortschritt mit ETA.
+  function focusHead(d, plan) {
+    const variant = plan && plan.runVariant ? " (" + plan.runVariant + ")" : "";
+    let html = "<div class='focus-context'>" +
+      escapeHtml((d.runType || "?") + variant + " · " + (d.phase || "?") + " · " +
+        (d.objective || "?")) + "</div>";
+    const bn = d.bottleneck;
+    if (bn && bn.resource) {
+      // missing-Einträge: {name, missing, need} (state/access.py missing_for)
+      const m = (bn.missing || []).find(x => x.name === bn.resource) || (bn.missing || [])[0];
+      let pct = 0, detail = "";
+      if (m && m.need > 0) {
+        pct = Math.max(0, Math.min(100, (m.need - m.missing) / m.need * 100));
+        detail = Math.floor(m.need - m.missing) + " / " + Math.ceil(m.need) + " " + m.name;
+      }
+      html += "<div class='focus-bn'>" +
+        "<span class='small'>Engpass <strong class='warn-text'>" + escapeHtml(bn.resource) +
+        "</strong></span>" +
+        "<div class='fillbar focus-bn-bar'><div style='width:" + pct.toFixed(1) + "%'></div></div>" +
+        "<span class='small muted'>" + escapeHtml(detail) + (detail ? " · " : "") + "ETA " +
+        (bn.etaSeconds === null || bn.etaSeconds === undefined
+          ? "∞ (Produktion nötig)" : "~" + fmtDuration(bn.etaSeconds)) + "</span></div>";
+    } else if (bn && bn.affordable) {
+      html += "<div class='focus-bn small muted'>kein Engpass — Ziel ist bezahlbar</div>";
+    }
+    return html;
+  }
+
+  // Sparziel wie brain/tactics.py _apply_saving_rule: unbezahlbarer Kandidat
+  // mit potential > 0 (bzw. unbezahlbares Meilensteinziel) und endlicher ETA
+  // innerhalb des Sparhorizonts; bester zuerst (potential, dann ETA, dann id).
+  function savingTarget(d) {
+    const targets = [];
+    for (const c of d.candidates || []) {
+      if (c.feasible || c.etaSeconds === null || c.etaSeconds === undefined
+          || !isFinite(c.etaSeconds)) continue;
+      const comp = c.components || {};
+      let pot = comp.potential || 0;
+      if (pot <= 0 && comp.milestone) pot = 3.0;   // Meilensteinziel ist immer Sparziel
+      if (pot > 0 && c.etaSeconds <= SAVING_HORIZON_S) targets.push([pot, c]);
+    }
+    if (!targets.length) return null;
+    targets.sort((a, b) => (b[0] - a[0]) || (a[1].etaSeconds - b[1].etaSeconds) ||
+      (a[1].action.id < b[1].action.id ? -1 : 1));
+    return targets[0][1];
+  }
+
+  // 2. Sparziel-Karte: worauf gespart wird + welche Käufe dafür zurückstehen.
+  function focusSaving(d) {
+    const target = savingTarget(d);
+    const held = (d.candidates || [])
+      .filter(c => ((c.components || {}).delayPenalty || 0) < 0);
+    if (!target && !held.length) return "";
+    let html = "<div class='focus-saving'>";
+    html += "<div class='fs-target'>💰 Spart auf: <strong>" +
+      escapeHtml(target ? target.action.label : "(Sparlogik aktiv)") + "</strong>" +
+      (target ? " — noch ~" + fmtDuration(target.etaSeconds) : "") + "</div>";
+    if (held.length) {
+      html += "<div class='small muted'>Dafür zurückgehalten: " + held.map(c =>
+        escapeHtml(c.action.label) + " (" + c.components.delayPenalty.toFixed(2) + ")")
+        .join(" · ") + "</div>";
+    }
+    return html + "</div>";
+  }
+
+  // 3. Gewichtungs-Balken: Top-6-Kandidaten, Score-normiert; Gewinner cyan,
+  // unmachbare grau-gestreift; negative additive Komponenten als roter Anteil.
+  function focusBars(d) {
+    const top = (d.candidates || []).slice(0, 6);
+    if (!top.length) return "";
+    let scale = 1e-4;
+    const rows = top.map(c => {
+      let neg = 0;
+      for (const [k, v] of Object.entries(c.components || {})) {
+        if (v < 0 && !SECONDS_KEYS.has(k)) neg += -v;   // delayPenalty, foodRisk, opportunity …
+      }
+      const pos = Math.max(c.score, 0);
+      scale = Math.max(scale, pos + neg);
+      return { c, pos, neg };
+    });
+    let html = "<div class='focus-bars'>";
+    for (const r of rows) {
+      const c = r.c;
+      const cls = "fb-row" + (c.selected ? " winner" : "") + (c.feasible ? "" : " infeasible");
+      const posW = r.pos / scale * 100, negW = r.neg / scale * 100;
+      html += "<div class='" + cls + "'>" +
+        "<div class='fb-line'><span class='fb-label'>" +
+        (c.selected ? "✓ " : c.feasible ? "" : "🔒 ") + escapeHtml(c.action.label) +
+        "</span><span class='fb-score mono'>" + c.score.toFixed(2) + "</span></div>" +
+        "<div class='fb-bar'><div class='fb-pos' style='width:" + posW.toFixed(1) + "%'></div>" +
+        (negW > 0.5 ? "<div class='fb-neg' style='width:" + negW.toFixed(1) +
+          "%' title='negative Komponenten (Abzug " + r.neg.toFixed(2) + ")'></div>" : "") +
+        "</div>" +
+        (!c.feasible && c.rejectReason ? "<div class='fb-reject small muted'>" +
+          escapeHtml(shortText(c.rejectReason, 80)) + "</div>" : "") +
+        "<div class='fb-chips'>" + componentChips(c.components) + "</div>" +
+        "</div>";
+    }
+    return html + "</div>";
+  }
+
+  function shortText(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+
+  // Komponenten-Chips wie im Decision Inspector; Sekundenwerte mit „s"-Suffix.
+  function componentChips(components) {
+    const entries = Object.entries(components || {});
+    if (!entries.length) return "<span class='muted small'>keine Zerlegung</span>";
+    return entries.map(([k, v]) => {
+      const val = SECONDS_KEYS.has(k)
+        ? (v >= 0 ? "+" : "-") + (Math.abs(v) >= 100 ? Math.abs(v).toFixed(0)
+          : Math.abs(v).toFixed(1)) + "s"
+        : (v >= 0 ? "+" : "") + v.toFixed(2);
+      return "<span class='score-chip " + (v < 0 ? "neg-chip" : "") + "' title='" +
+        escapeHtml(k) + "'>" + escapeHtml(k) + " " + val + "</span>";
+    }).join(" ");
+  }
+
+  // 4. „Warum jetzt?": reason-Satz + replanReason-Quelle als Badge.
+  function focusWhy(d) {
+    let html = "<div class='focus-why'><span class='fw-label'>Warum jetzt?</span>" +
+      escapeHtml(d.reason || "–");
+    const rr = d.replanReason;
+    if (rr && rr.source) {
+      html += " <span class='replan-badge" + (rr.type === "hard" ? " hard" : "") +
+        "' title='" + escapeHtml(rr.detail || "") + "'>" +
+        escapeHtml(rr.source) + "</span>";
+    }
+    return html + "</div>";
   }
 
   function renderHero(store) {

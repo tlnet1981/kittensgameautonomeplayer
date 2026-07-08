@@ -142,6 +142,8 @@ def test_chronosphere_search_yields_target_in_window():
     assert detail["nTarget"] == n_target
     assert n_target > 1                  # billiges UO + hoher Carryover → ausbauen
     assert detail["csValueNext"] > 0
+    # RebuildDelay aus beobachteten Raten (#43): UO-Rate 50/s liefert die ETA.
+    assert detail["rebuildMode"] == "eta"
 
 
 def test_chronosphere_search_fallback_without_data():

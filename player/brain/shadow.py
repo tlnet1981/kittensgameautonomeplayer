@@ -39,6 +39,10 @@ RATE_PROBE_EPS = 1e-3    # ε für die numerische Raten-Ableitung
 LAMBDA_MAX = 3600.0             # s pro Einheit
 LAMBDA_RATE_MAX = 4 * 3600.0    # s pro (Einheit/s)
 
+# Ab diesem Füllstand gilt eine Ressource als „voll": weitere Produktion
+# läuft ins Cap und ist wertlos (Spec 11.1, Cap-Klausel im JobScore).
+CAP_FULL_RATIO = 0.975
+
 # Craft-Kaskade (wie tactics._craft_toward): maximale Rekursionstiefe.
 CASCADE_MAX_DEPTH = 4
 
@@ -56,13 +60,24 @@ REFINE_RECIPES: dict[str, list[dict]] = {
 # Catnip-Bank fürs erste Housing massiv verlangsamt (E2E-Smoke-Fund).
 HORIZON_MIN = 1800.0
 HORIZON_MAX = 4 * 3600.0
+# Untergrenze des GEPLANTEN Reset-Horizonts (#39, Spec 10.4/6.4): steht ein
+# Reset unmittelbar bevor (etaSeconds ≈ 0), darf der Payback-Horizont nicht
+# auf null kollabieren (jeder Kauf würde abgelehnt → Deadlock-Gefahr) —
+# Anti-Deadlock-Floor analog reset.RESET_VALUE_T_MIN. Nach OBEN ist die
+# echte Projektion bewusst UNGEKLEMMT: „Horizont mindestens ein voller
+# Run" (6.4) heißt, lange Runs planen lang — die 4-h-Klemme gilt nur für
+# die Heuristik run_horizon (Fallback ohne Projektion).
+HORIZON_PLANNED_MIN = 600.0
 
 # Spielzeit-Konstanten (wie state/derived.py): 1 Tag = 2 s.
 SECONDS_PER_DAY = 2.0
 
-# Basisproduktion pro Job und Sekunde (Näherung! Werte aus village.js der
-# Referenzversion 1.5.0.2, pro Tick × 5 Ticks/s, VOR Gebäude-/Upgrade-
-# Multiplikatoren; skaliert nur mit Happiness — siehe job_score):
+# Basisproduktion pro Job und Sekunde — NUR NOCH FALLBACK (#40): die
+# maßgebliche Quelle sind die beobachteten Marginalraten `ratesPerKitten`
+# aus dem Snapshot (siehe job_marginal_rates). Diese Tabelle greift nur,
+# wenn der Snapshot das Feld nicht liefert (alter Driver, Sektion-Fehler).
+# Werte aus village.js der Referenzversion 1.5.0.2, pro Tick × 5 Ticks/s,
+# VOR Gebäude-/Upgrade-Multiplikatoren; skaliert dann nur mit Happiness:
 JOB_BASE_RATES: dict[str, dict[str, float]] = {
     "farmer": {"catnip": 5.0},          # 1 / Tick
     "woodcutter": {"wood": 0.09},       # 0.018 / Tick
@@ -72,6 +87,33 @@ JOB_BASE_RATES: dict[str, dict[str, float]] = {
     "geologist": {"coal": 0.075},       # 0.015 / Tick (Gold erst mit Upgrades)
     "priest": {"faith": 0.0075},        # 0.0015 / Tick
 }
+
+
+def job_marginal_rates(snap: dict, job_id: str) -> dict[str, float]:
+    """Effektive Marginalrate PRO KITTEN und Sekunde für einen Job (#40).
+
+    Maßgeblich ist das Snapshot-Feld `ratesPerKitten` (snapshot.js,
+    Nachbau von village.js updateResourceProduction × game.js
+    calcResourcePerTick für ein marginales Skill-0-Kitten) — es enthält
+    Happiness, Leader-Team-Boost und alle Produktions-Multiplikatoren
+    BEREITS. Ein vorhandenes, auch leeres Feld ist autoritativ (Jobs ohne
+    Tick-Produktion wie engineer liefern ehrlich {}). Nur wenn das Feld
+    fehlt (alter Driver / Sektion-Fehler), fällt die Bewertung auf
+    JOB_BASE_RATES × Happiness zurück — Aufrufer dürfen das Ergebnis
+    deshalb NICHT erneut mit Happiness multiplizieren."""
+    happiness = snap.get("village", {}).get("happiness", 1.0) or 1.0
+    for j in snap.get("village", {}).get("jobs", []):
+        if j.get("name") != job_id:
+            continue
+        observed = j.get("ratesPerKitten")
+        if isinstance(observed, dict):
+            return {res: float(rate) for res, rate in observed.items()
+                    if isinstance(rate, (int, float))}
+        break
+    base = JOB_BASE_RATES.get(job_id)
+    if not base:
+        return {}
+    return {res: rate * happiness for res, rate in base.items()}
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -105,6 +147,46 @@ def _eta(snap: dict, prices: list[dict],
     return worst
 
 
+# ================================================================ λ (Kern)
+
+def _single_lambda(snap: dict, prices: list[dict], *, rate: bool) -> dict[str, float]:
+    """λ-Vektor EINES Preisvektors, ohne Kaskade (Kern von shadow_prices/
+    rate_shadow_prices — bitidentisches Verhalten, nur faktorisiert für
+    die Pfad-Kombination). rate=False: Mengen-λ (s/Einheit, Störterm
+    +1 Einheit); rate=True: Raten-λ (s pro Einheit/s, Störterm +ε Rate).
+    Sonderfälle wie dokumentiert: gedeckt→0, Cap-Block→0, Rate≈0→Clamp,
+    fremdblockierte Position→0."""
+    lam: dict[str, float] = {}
+    lam_max = LAMBDA_RATE_MAX if rate else LAMBDA_MAX
+    base = _eta(snap, prices)
+    for p in prices:
+        name = p["name"]
+        if A.res_value(snap, name) + EPS >= p["val"]:
+            lam[name] = 0.0
+            continue
+        cap = A.res_cap(snap, name)
+        if 0 < cap < p["val"]:
+            lam[name] = 0.0
+            continue
+        if A.res_rate(snap, name) <= RATE_EPS:
+            # Nichts produziert die Ressource — jede Einheit/Produktion ist
+            # maximal wertvoll, endlich geklemmt:
+            lam[name] = lam_max
+            continue
+        if not math.isfinite(base):
+            # Eine ANDERE Position blockiert das Ziel — diese hier ist
+            # (noch) nicht der Engpass:
+            lam[name] = 0.0
+            continue
+        if rate:
+            delta = base - _eta(snap, prices, extra_rate={name: RATE_PROBE_EPS})
+            lam[name] = _clamp(delta / RATE_PROBE_EPS, 0.0, lam_max)
+        else:
+            delta = base - _eta(snap, prices, extra_amount={name: 1.0})
+            lam[name] = _clamp(delta, 0.0, lam_max)
+    return lam
+
+
 # ================================================================ λ (Menge)
 
 def shadow_prices(snap: dict, goal_prices: list[dict] | None) -> dict[str, float]:
@@ -120,27 +202,7 @@ def shadow_prices(snap: dict, goal_prices: list[dict] | None) -> dict[str, float
     """
     if not goal_prices:
         return {}
-    lam: dict[str, float] = {}
-    base = _eta(snap, goal_prices)
-    for p in goal_prices:
-        name = p["name"]
-        if A.res_value(snap, name) + EPS >= p["val"]:
-            lam[name] = 0.0
-            continue
-        cap = A.res_cap(snap, name)
-        if 0 < cap < p["val"]:
-            lam[name] = 0.0
-            continue
-        if A.res_rate(snap, name) <= RATE_EPS:
-            lam[name] = LAMBDA_MAX
-            continue
-        if not math.isfinite(base):
-            # Eine ANDERE Position blockiert das Ziel — diese hier ist
-            # (noch) nicht der Engpass:
-            lam[name] = 0.0
-            continue
-        delta = base - _eta(snap, goal_prices, extra_amount={name: 1.0})
-        lam[name] = _clamp(delta, 0.0, LAMBDA_MAX)
+    lam = _single_lambda(snap, goal_prices, rate=False)
     _propagate_cascade(snap, lam)
     return lam
 
@@ -156,27 +218,7 @@ def rate_shadow_prices(snap: dict, goal_prices: list[dict] | None) -> dict[str, 
     """
     if not goal_prices:
         return {}
-    lam_rate: dict[str, float] = {}
-    base = _eta(snap, goal_prices)
-    for p in goal_prices:
-        name = p["name"]
-        if A.res_value(snap, name) + EPS >= p["val"]:
-            lam_rate[name] = 0.0
-            continue
-        cap = A.res_cap(snap, name)
-        if 0 < cap < p["val"]:
-            lam_rate[name] = 0.0
-            continue
-        if A.res_rate(snap, name) <= RATE_EPS:
-            # Nichts produziert die Ressource — jede Produktion ist maximal
-            # wertvoll, endlich geklemmt:
-            lam_rate[name] = LAMBDA_RATE_MAX
-            continue
-        if not math.isfinite(base):
-            lam_rate[name] = 0.0
-            continue
-        delta = base - _eta(snap, goal_prices, extra_rate={name: RATE_PROBE_EPS})
-        lam_rate[name] = _clamp(delta / RATE_PROBE_EPS, 0.0, LAMBDA_RATE_MAX)
+    lam_rate = _single_lambda(snap, goal_prices, rate=True)
     _propagate_cascade(snap, lam_rate)
     return lam_rate
 
@@ -185,6 +227,66 @@ def shadow_price_of_rate(snap: dict, goal_prices: list[dict] | None,
                          res_id: str) -> float:
     """Raten-Schattenpreis einer einzelnen Ressource (inkl. Kaskade)."""
     return rate_shadow_prices(snap, goal_prices).get(res_id, 0.0)
+
+
+# ================================================================ λ (Pfad)
+
+def path_weight(rank: int) -> float:
+    """Rang-Diskont des Pfad-Preisvektors: w_k = 1/(1+k) (Spec 10.2/11.1,
+    „nähere Ziele wiegen mehr").
+
+    Wahl dokumentiert (#34): ETA-basierte Diskontierung wäre endogen
+    (λ steuert das Verhalten, das Verhalten ändert die ETA → Rückkopplung/
+    Flattern) und für noch unsichtbare Ziele gar nicht definiert. Die
+    Meilenstein-Reihenfolge ist dagegen ein deterministischer, snapshot-
+    stabiler Zeit-Proxy. Harmonisch (1/(1+k)) statt geometrisch, damit
+    Ressourcen weit hinten im Pfad nicht auf ≈0 fallen — Totalentwertung
+    von Pfadressourcen ist genau die Fehlerklasse der Live-Funde
+    (Null-Woodcutter, Monokultur)."""
+    return 1.0 / (1.0 + max(0, rank))
+
+
+def _path_lambda(snap: dict, path_targets: list[dict], *, rate: bool) -> dict[str, float]:
+    """Kombinierter Pfad-λ-Vektor: λ_i = max_k(w_k · λ_i^(k)).
+
+    Diskontiertes MAXIMUM statt Summe (Wahl dokumentiert, #34): λ ist die
+    marginale ETA-Verkürzung EINES Ziels durch +1 Einheit; die Meilensteine
+    sind sequenziell — dieselbe marginale Einheit wird von genau einem Ziel
+    verbraucht. Eine Summe würde sie allen ~20 Zielen gleichzeitig
+    gutschreiben (Science würde absurd aufgebläht) und das LAMBDA_MAX-Clamp
+    sprengen; das Maximum bleibt automatisch in [0, Clamp]. Die Kaskade
+    läuft EINMAL über das kombinierte Maximum (billiger, und Craft-Inputs
+    erben so den besten Pfadwert)."""
+    combined: dict[str, float] = {}
+    for entry in path_targets:
+        prices = entry.get("prices")
+        if not prices:
+            continue
+        w = float(entry.get("weight", 1.0))
+        if w <= 0:
+            continue
+        lam_k = _single_lambda(snap, prices, rate=rate)
+        for name, val in lam_k.items():
+            weighted = w * val
+            if weighted > combined.get(name, 0.0):
+                combined[name] = weighted
+    _propagate_cascade(snap, combined)
+    return combined
+
+
+def path_shadow_prices(snap: dict, path_targets: list[dict]) -> dict[str, float]:
+    """Mengen-λ über den PFAD (aktives Ziel + offene Meilensteine + Housing,
+    Spec 10.2/11.1 — Lücke #34): Einträge {"prices": [...], "weight": w}."""
+    if not path_targets:
+        return {}
+    return _path_lambda(snap, path_targets, rate=False)
+
+
+def path_rate_shadow_prices(snap: dict, path_targets: list[dict]) -> dict[str, float]:
+    """Raten-λ über den PFAD (Gegenstück zu path_shadow_prices)."""
+    if not path_targets:
+        return {}
+    return _path_lambda(snap, path_targets, rate=True)
 
 
 # ================================================================ Kaskade
@@ -286,15 +388,145 @@ def job_score(snap: dict, job_id: str, lam_rate: dict[str, float]) -> float:
     """JobScore(j) = Σ λ_rate_i · MarginalRate_i(j) (Spec 12.2) —
     Sekunden Zielzeitgewinn pro Sekunde Arbeit eines weiteren Kittens.
 
-    Näherung: Die Marginalrate je Job stammt aus der Basisraten-Tabelle
-    JOB_BASE_RATES (Snapshot liefert nur Netto-perSec, aus der sich der
-    Beitrag eines einzelnen Jobs nicht sauber isolieren lässt), skaliert
-    mit der Dorf-Happiness. Gebäude-/Upgrade-Multiplikatoren fehlen —
-    für den VERGLEICH zwischen Jobs ist das ausreichend genau.
+    Die Marginalrate je Job kommt aus job_marginal_rates (#40): beobachtete
+    ratesPerKitten aus dem Snapshot (inkl. Happiness, Leader-Boost und
+    Upgrade-/Gebäude-Multiplikatoren), Fallback JOB_BASE_RATES × Happiness.
     """
-    rates = JOB_BASE_RATES.get(job_id)
+    rates = job_marginal_rates(snap, job_id)
     if not rates or not lam_rate:
         return 0.0
-    happiness = snap.get("village", {}).get("happiness", 1.0) or 1.0
-    return sum(lam_rate.get(res, 0.0) * rate * happiness
-               for res, rate in rates.items())
+    total = 0.0
+    for res, rate in rates.items():
+        # Cap-Klausel (Spec 11.1): Produktion in eine VOLLE Ressource läuft
+        # ins Cap und ist wertlos — Grenzwert 0 (Live-Fund: beide Kitten
+        # Scholars bei Science am Cap).
+        cap = A.res_cap(snap, res)
+        if cap > 0 and A.res_value(snap, res) >= cap * CAP_FULL_RATIO:
+            continue
+        total += lam_rate.get(res, 0.0) * rate
+    return total
+
+
+# ================================================================ Soll-Allokation (12.2)
+
+# Deterministische Job-Reihenfolge der Allokation (Tie-Break):
+ALLOC_JOB_ORDER = ("farmer", "woodcutter", "scholar", "miner",
+                   "hunter", "geologist", "priest")
+
+
+def _alloc_eta(prices: list[dict], amounts: dict, rates: dict) -> tuple[int, float]:
+    """(Anzahl Ressourcen ohne Rate, max. ETA) — lexikografisch vergleichbar:
+    erst zählt, wie viele Zielressourcen GAR NICHT produziert werden, dann
+    die Engpass-ETA. So ist „eine tote Ressource zum Leben erwecken" immer
+    wertvoller als jede ETA-Verkürzung."""
+    dead = 0
+    worst = 0.0
+    for p in prices:
+        missing = p["val"] - amounts.get(p["name"], 0.0)
+        if missing <= 0:
+            continue
+        r = rates.get(p["name"], 0.0)
+        if r <= RATE_EPS:
+            dead += 1
+        else:
+            worst = max(worst, missing / r)
+    return dead, worst
+
+
+def target_allocation(snap: dict, goal_prices: list[dict] | None,
+                      min_farmers: int = 0) -> dict[str, int]:
+    """Soll-Jobverteilung nach Spec 12.2 (iterativ, deterministisch):
+
+    1. min_farmers (Food-Invariante I-01) werden vorab reserviert.
+    2. Jedes weitere Kitten geht an den Job mit dem größten marginalen
+       Zielzeitgewinn; nach jeder Zuweisung werden die angenommenen Raten
+       aktualisiert (dadurch fallende Grenzwerte — kein Alle-auf-einen-Job).
+    3. Bleibt kein positiver Grenzwert (Ziel bezahlbar/gedeckt), werden
+       restliche Kitten round-robin auf Jobs ohne volle Ertragsressource
+       verteilt (Balance statt Leerlauf).
+
+    Basisraten: beobachtete Raten MINUS aktuelle Kitten-Beiträge — die
+    Allokation plant, als wären alle Kitten neu verteilbar. Die Beiträge
+    kommen aus job_marginal_rates (#40): mit beobachteten ratesPerKitten
+    ist die Subtraktion exakt (früher wurden statische Basisraten von
+    multiplikator-behafteten Ist-Raten abgezogen — Phantom-Restrate).
+    Leeres goal_prices → {} (Aufrufer nutzt den bisherigen Fallback)."""
+    village = snap.get("village", {})
+    total = int(village.get("kittens", 0) or 0)
+    if total <= 0 or not goal_prices:
+        return {}
+    jobs = [j for j in ALLOC_JOB_ORDER if A.job_unlocked(snap, j)]
+    if not jobs:
+        return {}
+    # Marginalraten je Job EINMAL bestimmen (enthalten Happiness bereits):
+    jrates = {j: job_marginal_rates(snap, j) for j in jobs}
+
+    amounts = {p["name"]: A.res_value(snap, p["name"]) for p in goal_prices}
+    rates: dict[str, float] = {}
+    for p in goal_prices:
+        rates[p["name"]] = A.res_rate(snap, p["name"])
+    # Kitten-Beiträge herausrechnen (nur bekannte Job-Ressourcen):
+    for j in jobs:
+        count = A.job_count(snap, j)
+        for res, rate in jrates[j].items():
+            if res in rates:
+                rates[res] -= count * rate
+
+    def _capped(res: str) -> bool:
+        cap = A.res_cap(snap, res)
+        return cap > 0 and A.res_value(snap, res) >= cap * CAP_FULL_RATIO
+
+    alloc = {j: 0 for j in jobs}
+    remaining = total
+    if "farmer" in alloc and min_farmers > 0:
+        take = min(min_farmers, remaining)
+        alloc["farmer"] = take
+        remaining -= take
+        for res, rate in jrates.get("farmer", {}).items():
+            if res in rates:
+                rates[res] += take * rate
+
+    for _ in range(remaining):
+        base = _alloc_eta(goal_prices, amounts, rates)
+        best_job, best_gain = None, (0, 0.0)
+        for j in jobs:
+            gain_d = gain_e = 0.0
+            trial = dict(rates)
+            touched = False
+            for res, rate in jrates.get(j, {}).items():
+                if res in trial and not _capped(res):
+                    trial[res] += rate
+                    touched = True
+            if not touched:
+                continue
+            with_j = _alloc_eta(goal_prices, amounts, trial)
+            gain = (base[0] - with_j[0], base[1] - with_j[1])
+            if gain > best_gain:
+                best_gain, best_job = gain, j
+        if best_job is None:
+            break   # kein positiver Grenzwert mehr → Rest per Round-Robin
+        alloc[best_job] += 1
+        for res, rate in jrates.get(best_job, {}).items():
+            if res in rates:
+                rates[res] += rate
+        remaining -= 1
+
+    # Rest-Verteilung mit STICKINESS (Anti-Flattern, Nutzer-Fund): Kitten
+    # ohne positiven Grenzwert bleiben bevorzugt in ihren AKTUELLEN Jobs
+    # (minimale Bewegung), solange deren Ertrag nicht voll ist; nur ein
+    # echter Überhang wird round-robin auf offene Jobs verteilt.
+    if remaining > 0:
+        open_jobs = [j for j in jobs
+                     if not all(_capped(r) for r in jrates.get(j, {}))]
+        for j in open_jobs:
+            if remaining <= 0:
+                break
+            keep = min(remaining, max(0, A.job_count(snap, j) - alloc[j]))
+            alloc[j] += keep
+            remaining -= keep
+        i = 0
+        while remaining > 0 and open_jobs:
+            alloc[open_jobs[i % len(open_jobs)]] += 1
+            i += 1
+            remaining -= 1
+    return alloc

@@ -1,6 +1,6 @@
-/* Economy-Tab: Ressourcen-Matrix (Cockpit-Spec Kap. 8, M0-Ausbaustufe).
-   Zeigt Bestand/Cap, Füllgrad, Nettofluss und Zeit bis Cap/Leerstand.
-   Shadow Prices & Bottleneck Ladder kommen mit M1 (Brain). */
+/* Economy-Tab: Ressourcen-Matrix (Cockpit-Spec Kap. 8).
+   Zeigt Bestand/Cap, Füllgrad, Nettofluss, Zeit bis Cap/Leerstand und
+   die λ-Topliste der Pfad-Schattenpreise (#34, plan.lambdaTop). */
 
 (() => {
   const { fmtNum, fmtRate, fmtDuration } = KGP;
@@ -60,6 +60,21 @@
         pop.freeKittens + " frei) · Happiness <strong>" + Math.round(pop.happiness * 100) + "%</strong>" +
         "<br><span class='muted'>" + jobs + "</span>" +
         (pop.leader ? "<br><span class='muted'>Leader: " + pop.leader.name + "</span>" : "");
+    }
+
+    // --- λ-Topliste (#34): Pfad-Schattenpreise aus dem Plan-Payload ---
+    const lambdaBox = document.getElementById("eco-lambda");
+    if (lambdaBox) {
+      const rows = (store.plan && store.plan.lambdaTop) || [];
+      if (!rows.length) {
+        lambdaBox.textContent = "–";
+      } else {
+        lambdaBox.innerHTML = rows.map(r =>
+          '<span class="score-chip" title="λ: Zielsekunden je Einheit · λ̇: je Einheit/s">' +
+          "<strong>" + r.name + "</strong> λ " + fmtNum(r.lam) +
+          "s · λ̇ " + fmtNum(r.lamRate) + "s</span>"
+        ).join(" ");
+      }
     }
   }
 

@@ -170,6 +170,60 @@ td.neg { color: #ff8a8a; }
 
 .bn-res { font-size: 20px; font-weight: 700; color: var(--warning); text-transform: capitalize; }
 
+/* ---------- Fokus-Panel (Gewichtung · Sparziel · Warum jetzt?) ---------- */
+.card.focus { border-left: 3px solid var(--violet); }
+.focus-context { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+.focus-bn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.focus-bn-bar { flex: 1; min-width: 120px; max-width: 320px; }
+.focus-bn-bar > div { background: var(--warning); }
+
+.focus-saving {
+  background: #2e2610; border: 1px solid #6b5312; border-radius: 6px;
+  padding: 8px 12px; margin-bottom: 10px;
+}
+.fs-target { color: var(--warning); font-weight: 600; }
+
+.focus-bars { display: flex; flex-direction: column; gap: 7px; margin-bottom: 10px; }
+.fb-row { cursor: pointer; }
+.fb-line { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+.fb-label { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-row.winner .fb-label { color: var(--cyan); font-weight: 700; }
+.fb-row.infeasible .fb-label { color: var(--text-muted); }
+.fb-score { color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fb-bar {
+  display: flex; height: 8px; margin-top: 2px;
+  background: var(--surface-2); border-radius: 4px; overflow: hidden;
+}
+.fb-pos { background: var(--blue); border-radius: 4px 0 0 4px; }
+.fb-row.winner .fb-pos { background: var(--cyan); }
+.fb-row.infeasible .fb-pos {
+  background: repeating-linear-gradient(45deg, #4a4a44 0 6px, #33332f 6px 12px);
+}
+/* Gesperrte Kandidaten bleiben auch bei Score 0 als gestreifte Spur sichtbar: */
+.fb-row.infeasible .fb-bar {
+  background: repeating-linear-gradient(45deg, var(--surface-2) 0 6px, #2b2b29 6px 12px);
+}
+.fb-neg { background: var(--critical); }
+.fb-reject { margin-top: 1px; }
+.fb-chips { display: none; padding: 4px 0 2px; }
+.fb-row:hover .fb-chips, .fb-row.open .fb-chips { display: block; }
+
+.focus-why {
+  border-top: 1px solid var(--border); padding-top: 8px;
+  font-size: 13.5px; color: var(--text-secondary);
+}
+.fw-label {
+  text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em;
+  color: var(--text-muted); margin-right: 8px;
+}
+.replan-badge {
+  display: inline-block; font-family: var(--mono); font-size: 10px;
+  background: var(--surface-2); color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 1px 6px; margin-left: 4px; vertical-align: 1px;
+}
+.replan-badge.hard { color: var(--warning); border-color: #6b5312; }
+
 /* ---------- Decision Inspector ---------- */
 tr.clickable { cursor: pointer; }
 tr.selected-row td { background: #14293d !important; }
