@@ -261,9 +261,13 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
 ## Governance-Kern (Spec G-02/G-06/G-10, Kap. 21–23)
 
 - **AgentMode:** ACTIVE / MODEL_MISMATCH / SAFE_STOP. Versionsprüfung läuft
-  periodisch; bei Abweichung sind nur READ_ONLY-Aktionen und das Abschalten
-  von Verbrauchern zulässig (`loop.apply_mode_gate`), Reset ist gesperrt.
-  Freigabe über das Cockpit (`acknowledge_mismatch`).
+  periodisch. **Betreiberentscheidung (bewusste G-02-Abweichung):** Eine
+  reine VERSIONSabweichung wird standardmäßig nur gemeldet (Badge +
+  `model.version_mismatch`-Event), der Agent spielt weiter — der harte
+  Stopp (nur READ_ONLY + Verbraucher-Abschalten, Reset gesperrt, Freigabe
+  via `acknowledge_mismatch`) gilt erst mit `KGP_VERSION_GUARD_HARD=1`.
+  Der Prognose-Streak-Stopp (nächster Punkt) bleibt davon unberührt
+  immer hart — er zeigt echte Modellabweichung im Betrieb.
 - **Prognose-Abgleich (G-10):** Aktionen tragen ein `predicted`-Dict;
   nach Ausführung wird die beobachtete Änderung mit Toleranz verglichen
   (`loop.check_prediction`), drei harte Abweichungen in Folge führen in

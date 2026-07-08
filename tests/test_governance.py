@@ -112,6 +112,7 @@ def test_manipulated_version_gates_full_candidate_set(tmp_path):
     """End-to-End des Gates: manipulierte Version ⇒ MODEL_MISMATCH ⇒ in der
     echten Kandidatenliste ist nur noch WAIT (bzw. toggle-off) machbar."""
     rt = _runtime(tmp_path)
+    rt.config.version_guard_hard = True   # Spec-Verhalten (opt-in seit Soft-Default)
     snap = make_snap(resources={"catnip": {"value": 100, "max": 5000, "rate": 1}},
                      buildings={"field": {"val": 0, "prices": {"catnip": 10}}})
     snap["meta"]["version"] = "9999"     # Abweichung von der Referenz
@@ -139,8 +140,21 @@ def test_version_guard_match_stays_active(tmp_path):
     assert rt.version_guard["match"] is True
 
 
+def test_version_mismatch_soft_default_only_warns(tmp_path):
+    """Betreiberentscheidung (bewusste G-02-Abweichung): Standard ist der
+    WEICHE Guard — Abweichung wird gemeldet (Badge/match=False), aber der
+    Agent bleibt ACTIVE und spielt weiter. Kein acknowledge nötig."""
+    rt = _runtime(tmp_path)
+    snap = make_snap()
+    snap["meta"]["version"] = "9999"
+    rt.apply_version_guard(snap)
+    assert rt.agent_mode == "ACTIVE"
+    assert rt.version_guard["match"] is False
+
+
 def test_acknowledge_resets_and_prevents_retrigger(tmp_path):
     rt = _runtime(tmp_path)
+    rt.config.version_guard_hard = True   # Spec-Verhalten (opt-in)
     snap = make_snap()
     snap["meta"]["version"] = "9999"
     rt.apply_version_guard(snap)

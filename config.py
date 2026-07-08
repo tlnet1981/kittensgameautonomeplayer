@@ -65,9 +65,18 @@ class Config:
         # Save-Export-Intervall (Sekunden); 0 = deaktiviert.
         self.save_export_interval: float = float(os.environ.get("KGP_SAVE_EXPORT_INTERVAL", "300"))
 
-        # --- Referenzversion (Spec: Version Guard, weich) ---
+        # --- Referenzversion (Spec: Version Guard) ---
         self.reference_version: str = "1.5.0.2"
         self.reference_build_revision: int = 3
+        # Betreiberentscheidung (bewusste Abweichung von G-02): Bei
+        # Versionsabweichung standardmäßig NUR melden (Badge + Event) und
+        # weiterspielen — der harte MODEL_MISMATCH-Stopp nervt im privaten
+        # Betrieb gegen neuere Builds (jedes Mal acknowledge nötig).
+        # KGP_VERSION_GUARD_HARD=1 stellt das Spec-Verhalten wieder her.
+        # Der Prognose-Streak-Stopp (G-10, echte Modellabweichung im
+        # Betrieb) bleibt davon unberührt IMMER hart.
+        self.version_guard_hard: bool = os.environ.get(
+            "KGP_VERSION_GUARD_HARD", "0") == "1"
 
     @property
     def effective_game_url(self) -> str:

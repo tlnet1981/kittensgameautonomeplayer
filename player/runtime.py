@@ -270,9 +270,12 @@ class PlayerRuntime:
         self.apply_version_guard(await read_snapshot(self.browser))
 
     def apply_version_guard(self, snap: dict) -> None:
-        """Version Guard (G-02, hart): bei Abweichung von der Referenzversion
-        → AgentMode MODEL_MISMATCH (nur lesende/sichernde Aktionen). Eine per
-        acknowledge_mismatch quittierte Version retriggert nicht erneut."""
+        """Version Guard (G-02): bei Abweichung von der Referenzversion wird
+        gewarnt (Badge + model.version_mismatch-Event). HART (AgentMode
+        MODEL_MISMATCH, nur lesende/sichernde Aktionen) nur mit
+        KGP_VERSION_GUARD_HARD=1 — Betreiberentscheidung, dokumentiert in
+        config.py; der Prognose-Streak-Stopp (G-10) bleibt immer hart. Eine
+        per acknowledge_mismatch quittierte Version retriggert nicht."""
         meta = snap.get("meta", {})
         version = meta.get("version")
         build = meta.get("buildRevision")
@@ -296,6 +299,8 @@ class PlayerRuntime:
         # Warn-Event nur bei Änderung/Erstprüfung (kein Sekundentakt-Spam):
         if first_check or changed:
             self.bus.publish("model.version_mismatch", self.version_guard)
+        if not self.config.version_guard_hard:
+            return   # weicher Guard: melden, weiterspielen (siehe Docstring)
         if f"{version}|{build}" != self._ack_version_key:
             self.enter_model_mismatch(
                 f"Versionsabweichung: v{version} r{build} ≠ Referenz "

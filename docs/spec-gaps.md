@@ -51,7 +51,7 @@ Legende: ✅ umgesetzt/spec-nah · 🟠 lohnendste offene Lücken · 🟡 offen,
 
 | # | Spec | Mechanik | Ist-Zustand | Status |
 |---|---|---|---|---|
-| 26 | G-02 / 22.2 | **Harter MODEL_MISMATCH-Stop** (nur lesende/sichernde Aktionen bei Versions-/Modellabweichung) | AgentMode ACTIVE/MODEL_MISMATCH/SAFE_STOP (`runtime.apply_version_guard`, periodisch im Telemetrie-Loop); Gate im Loop (`loop.apply_mode_gate`, nur READ_ONLY + Verbraucher-Abschalten), Reset gesperrt; manuelle Freigabe `acknowledge_mismatch` (Cockpit-Control, quittierte Version retriggert nicht) | ✅ |
+| 26 | G-02 / 22.2 | **Harter MODEL_MISMATCH-Stop** (nur lesende/sichernde Aktionen bei Versions-/Modellabweichung) | AgentMode-Gate + acknowledge vorhanden; **Betreiberentscheidung (8. Juli, bewusste G-02-Abweichung):** Bei reiner VERSIONSabweichung meldet der Guard nur noch (Badge + Event) und spielt weiter — hart erst mit `KGP_VERSION_GUARD_HARD=1` (`config.version_guard_hard`, `runtime.apply_version_guard`). Der Prognose-Streak-Stopp (G-10, echte Modellabweichung im Betrieb) bleibt IMMER hart | ✅ |
 | 27 | G-10 / 22.2 | **Prognose-vs-Beobachtung-Distanzprüfung** mit Toleranz und Stop | `predicted`-Dict an Aktionen (Käufe/Craft/Refine/Gather exakt, Trade/Jagd als EV); `loop.check_prediction` (15 % + Puffer + Produktionsdrift; stochastisch nur Vorzeichen/Größenordnung); erst 3 harte Abweichungen in Folge → MODEL_MISMATCH (`mismatch_streak`) | ✅ |
 | 28 | 21.1–21.3 / 5.3 | **Ereignisgetriebenes Replanning** (harte/weiche Trigger, Ereigniswarteschlange, Commit-Grenze) | `brain/scheduler.py`: `next_wakeup` (Saison/½-Cap/10 %-ETA/30-s-Kontrollpunkt, Klemme [decision_interval, 30 s]) steuert den Loop-Schlaf; harte Trigger per Vorzyklus-Signatur (`classify_hard_trigger`); Commit-Grenze für IRREVERSIBLE (`loop.commit_guard`: Re-Read + Precondition, Abbruch ohne Retry) | ✅ |
 | 29 | 5.4 / 6.2 | **Risikoterme** (CVaR, κ·P(fatal), μ·irreversible Verluste) | Makro-Score = −Restzeit − κ·P(fatal) − μ·E[Verlust] (`meta._score_plans`): P(fatal) über `Projection.food_fatal`, Verlustproxy über die Carryover-Fallliste — dokumentiert als deterministische Proxys, kein CVaR (bräuchte Verteilungen) | ✅ |
@@ -98,3 +98,55 @@ Steamworks-NetValue, λ_furs über die Craft-Kaskade, FIRST_RUN-Restzeit mit
 Ankunftsrate). Bewusst offen gebliebene Restnäherungen stehen ehrlich in
 den Tabellenzeilen (craftRatio nur Autocraft, tradeRatio via Trade-EV,
 Pollution nur Arrival-Slowdown, Kaufsequenz-Simulation der Varianten).
+
+## Empfohlenes nächstes Paket: „Makro & Reset ehrlich machen" (#38+#39+#42)
+
+Die strategische Rückgrat-Schicht: Run-Typ-Wahl und Reset-Timing rechnen
+heute teils auf Konstanten. Ein zusammenhängender Umbau in
+`meta.py`/`reset.py`/`simulate.py`/`challenge.py`/`shadow.py`.
+
+Fertiger Auftrag zum Kopieren für eine neue Claude-Code-Session:
+
+> Arbeite auf Branch `working` (nach Abschluss dorthin pushen; falls die
+> Session einen eigenen claude/-Branch anlegt, am Ende nach working
+> mergen). Lies zuerst docs/spec-gaps.md (Tabelle „Offene Lücken aus dem
+> Light-Audit") und docs/brain.md. Setze das Paket #38+#39+#42 um:
+>
+> 1. **Restzeiten simuliert statt Konstanten (#38, Spec 8.3/18.2):**
+>    Ersetze in meta._plan_restzeit die Konstanten-Restzeiten (SEED 6 h,
+>    CHALLENGE-Konstante, POSITIVE_CS 60 s×n, SHATTER Reserve+15) durch
+>    Projektionen über simulate.project (Zeit bis Zielbedingung im
+>    aktuellen Zustand; wo eine Bedingung nicht projizierbar ist, ehrlich
+>    math.inf statt Konstante). challenge.challenge_value: ΔE[T_F] über
+>    die Projektion MIT dem Belohnungseffekt (Referenz-Effekt aus
+>    gamefiles/js/challenges.js) statt fester Zähler; Completion-Zeit über
+>    die Projektion der Zielbedingung statt fester Nenner.
+> 2. **Payback gegen den geplanten Reset (#39, Spec 10.4/6.4):**
+>    shadow.run_horizon bekommt die echte Reset-Projektion: loop reicht
+>    reset.evaluate-Ergebnis (erwartete Restlaufzeit bis zum empfohlenen
+>    Reset bzw. Perk-Finanzierung) in generate() durch; Fallback bleibt
+>    die heutige Heuristik. Die 4-h-/2-h-Klemmen fallen, wo eine echte
+>    Projektion vorliegt (6.4: Horizont mindestens ein voller Run).
+> 3. **Reset-Pfade je Run-Typ + V(post) (#42, Spec 20.1/20.2):**
+>    reset.evaluate bekommt Trigger für RELIGION_RUN (nach optimalem
+>    TAP-Punkt, religion.tap_plan), UNICORN_RUN (Ziel-Infrastruktur
+>    erreicht), SEED_RUN (Seed-Basis erreicht), POSITIVE_CS_RUN
+>    (chrono.positive_cs_check dominiert) — jeweils ResetValue-geprüft.
+>    V(post) über eine echte Kurz-Simulation des Neustarts (simulate mit
+>    Post-Reset-Startzustand aus chrono.carryover_vector + permanente
+>    Boni) statt linearer Dreiecksrampe; die Rampe bleibt Fallback.
+>
+> Leitplanken wie im Repo etabliert: exakte Mechanik aus gamefiles/
+> (Fundstelle im Kommentar), Fallbacks ohne Daten, deterministisch
+> (Tie-Breaks C.2), Bestandstests grün oder minimal begründet angepasst,
+> neue Regressionstests auf make_snap-Fixtures (u. a.: SEED-Restzeit
+> reagiert auf den Zustand; run_horizon folgt der Reset-Projektion;
+> RELIGION_RUN erreicht seine Reset-Transaktion). Verifikation:
+> python -m pytest tests/ -q, dann RUN_E2E=1
+> KGP_CHROMIUM_PATH=/opt/pw-browsers/chromium python -m pytest
+> tests/test_e2e.py -q. Danach docs/spec-gaps.md (#38/#39/#42 auf ✅ mit
+> Fundstellen) und docs/brain.md nachziehen. Commit-Stil wie git log;
+> pushen.
+
+Danach als Paket 3 sinnvoll: #37 (Policy-Vollabdeckung) + #40 (Job-Raten
+mit echten Multiplikatoren) + #43 (irreversible TC-/CS-Käufe λ-basiert).
