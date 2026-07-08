@@ -114,3 +114,28 @@ def test_capped_and_unproducible_entries_do_not_paralyze_allocation():
     # Kitten arbeiten an den beeinflussbaren Posten (Wood/Catnip):
     assert sum(alloc.values()) == 5
     assert alloc.get("woodcutter", 0) >= 1
+
+
+def test_large_science_goal_still_attracts_scholars():
+    """Live-Fund (Jahr 4, 8/8 Farmer): Beim 2200er-Science-Ziel liegt die
+    ETA selbst MIT Scholar über der Totzeit-Referenz — ein harter
+    min(ETA, Totzeit)-Deckel machte den Zuweisungsgewinn exakt 0 und kein
+    Scholar wurde je besetzt. Die Sättigungskurve hält den Gewinn streng
+    monoton."""
+    snap = make_snap(
+        resources={"catnip": {"value": 2944, "max": 10000, "rate": 12.78},
+                   "wood": {"value": 200, "max": 400, "rate": 0.5},
+                   "science": {"value": 258, "max": 2750, "rate": 0.0}},
+        buildings={"field": {"val": 14, "prices": {"catnip": 500}},
+                   "hut": {"val": 4, "prices": {"wood": 60}},
+                   "library": {"val": 3, "prices": {"wood": 80}}},
+        techs={"currency": {"researched": False, "unlocked": True,
+                            "prices": {"science": 2200}}},
+        jobs={"farmer": 8, "woodcutter": 0, "scholar": 0},
+        kittens=8, max_kittens=8, season="winter",
+        catnip_field_base=10,
+    )
+    prices = [{"name": "science", "val": 2200, "weight": 1.0},
+              {"name": "wood", "val": 100, "weight": 0.5}]
+    alloc = shadow.target_allocation(snap, prices, min_farmers=4)
+    assert alloc.get("scholar", 0) >= 2

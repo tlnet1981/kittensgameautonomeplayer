@@ -415,10 +415,10 @@ ALLOC_JOB_ORDER = ("farmer", "woodcutter", "scholar", "miner",
 
 
 # Totzeit-Referenz der Allokation: eine Zielressource ohne jede Produktion
-# zählt wie eine Stunde Engpass — teuer genug, dass das erste Kitten für
-# eine tote NAHE Ressource fast immer die beste Zuweisung ist, aber
-# gedeckelt, damit hoffnungslose Posten (ETA > 1 h selbst MIT Kitten) die
-# Summe nicht dauerhaft dominieren und niemand ihnen nachjagt.
+# zählt wie eine Stunde Engpass. Die Sättigung in _alloc_eta hält jeden
+# Posten unterhalb dieser Schranke — hoffnungslose Einträge können die
+# Summe nie dominieren, geben aber (streng monoton) weiterhin einen
+# kleinen Gewinn je zusätzlichem Kitten ab.
 ALLOC_DEAD_ETA_S = 3600.0
 
 # Mindestgewinn (Sekundensumme) für eine Greedy-Zuweisung — filtert
@@ -428,25 +428,34 @@ ALLOC_GAIN_EPS = 1.0
 
 
 def _alloc_eta(prices: list[dict], amounts: dict, rates: dict) -> float:
-    """Gewichtete Engpass-Zeitsumme Σ wᵢ·min(ETAᵢ, Totzeit) der Allokation.
+    """Gewichtete Engpass-Zeitsumme Σ wᵢ·sat(ETAᵢ) der Allokation, mit
+    Sättigung sat(η) = Totzeit·η/(η+Totzeit).
 
     SUMME statt Maximum, damit kein einzelner (z. B. unbeeinflussbarer)
     Posten alle übrigen Verbesserungen maskiert — der Greedy in
     target_allocation vergibt jedes Kitten an die größte Senkung dieser
-    Summe. Tote Ressourcen (keine Rate) zählen als ALLOC_DEAD_ETA_S:
-    „zum Leben erwecken" ist damit die wertvollste Einzelbewegung, außer
-    die Ressource bleibt auch MIT Kitten jenseits der Totzeit (dann Gewinn
-    0 → niemand jagt Hoffnungslosem nach). Optionales "weight" je Eintrag
-    (Pfadziele, tactics._allocation_prices) diskontiert ferne Ziele wie
-    beim Pfad-λ."""
+    Summe. Die Sättigung statt eines harten min(η, Totzeit): nahe Ziele
+    zählen praktisch als ihre ETA (η ≪ Totzeit → sat ≈ η), tote
+    Ressourcen (keine Rate, η = ∞) als volle Totzeit, und GROSSE Ziele
+    (η > Totzeit selbst MIT Kitten — Live-Fund: 2750er-Science-Ziel)
+    geben weiterhin einen streng monotonen Gewinn je weiterem Kitten ab;
+    ein harter Deckel machte diesen Gewinn exakt 0 und kein Scholar wurde
+    je zugeteilt. Hoffnungslose Posten bleiben durch die Schranke klein
+    und werden zusätzlich von ALLOC_GAIN_EPS gefiltert. Optionales
+    "weight" je Eintrag (Pfadziele, tactics._allocation_prices)
+    diskontiert ferne Ziele wie beim Pfad-λ."""
     total = 0.0
     for p in prices:
         missing = p["val"] - amounts.get(p["name"], 0.0)
         if missing <= 0:
             continue
         r = rates.get(p["name"], 0.0)
-        eta = missing / r if r > RATE_EPS else ALLOC_DEAD_ETA_S
-        total += p.get("weight", 1.0) * min(eta, ALLOC_DEAD_ETA_S)
+        if r > RATE_EPS:
+            eta = missing / r
+            sat = ALLOC_DEAD_ETA_S * eta / (eta + ALLOC_DEAD_ETA_S)
+        else:
+            sat = ALLOC_DEAD_ETA_S
+        total += p.get("weight", 1.0) * sat
     return total
 
 
