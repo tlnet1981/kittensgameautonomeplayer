@@ -781,6 +781,10 @@ class MetaView:
     # Nächstes offenes Forschungsziel hinter dem aktiven Meilenstein
     # (für die Soll-Allokation 12.2; None wenn aktiv schon Forschung ist):
     next_research: dict | None = None
+    # Alle offenen (active+pending) Meilenstein-Targets in Listenreihenfolge
+    # — Basis des Pfad-Preisvektors (Spec 10.2/11.1, tactics.path_targets).
+    # None bei manuell konstruierten Test-MetaViews (Fallback: nur aktives Ziel).
+    open_targets: list[dict] | None = None
 
     @property
     def objective_label(self) -> str:
@@ -856,6 +860,7 @@ def evaluate(snap: dict) -> MetaView:
     active: Milestone | None = None
     next_research: dict | None = None
     rows: list[dict] = []
+    open_targets: list[dict] = []
     for m in milestones:
         if m.done(snap):
             state = "done"
@@ -871,6 +876,10 @@ def evaluate(snap: dict) -> MetaView:
             if (next_research is None and m.target
                     and m.target.get("kind") == "research"):
                 next_research = m.target
+        if state in ("active", "pending") and m.target:
+            # Offene Targets NICHT verwerfen: sie bilden den Pfad-Preisvektor
+            # (Spec 10.2/11.1) — nähere Ziele wiegen dort mehr (Rang-Diskont).
+            open_targets.append(m.target)
         rows.append({"id": m.id, "label": m.label, "state": state})
     if active is not None and active.target \
             and active.target.get("kind") == "research":
@@ -878,4 +887,4 @@ def evaluate(snap: dict) -> MetaView:
     return MetaView(phase=phase, run_type=run_type, active=active,
                     milestones=rows, next_perk=next_perk,
                     run_variant=run_variant, run_plan=run_plan,
-                    next_research=next_research)
+                    next_research=next_research, open_targets=open_targets)

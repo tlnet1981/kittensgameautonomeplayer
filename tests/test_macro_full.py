@@ -25,10 +25,15 @@ def _perks(names, researched=True):
 
 
 def _generate(snap, target=None):
-    """Kandidaten mit injiziertem Ziel (target=None → kein aktives Ziel)."""
+    """Kandidaten mit injiziertem Ziel (target=None → kein aktives Ziel).
+    Seit dem Pfad-Preisvektor (#34) reicht active=None nicht mehr für
+    λ-Leere — auch die offenen Meilenstein-Targets müssen weg, damit die
+    λ-losen Fallback-Pfade (Sicherheitsnetz) testbar bleiben."""
     mview = meta.evaluate(snap)
     mview.active = (Milestone("test", "Testziel", lambda s: False, target)
                     if target else None)
+    if target is None:
+        mview.open_targets = None
     return tactics.generate(snap, mview, safety.check(snap))
 
 

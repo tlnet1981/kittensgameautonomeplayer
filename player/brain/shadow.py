@@ -109,6 +109,46 @@ def _eta(snap: dict, prices: list[dict],
     return worst
 
 
+# ================================================================ λ (Kern)
+
+def _single_lambda(snap: dict, prices: list[dict], *, rate: bool) -> dict[str, float]:
+    """λ-Vektor EINES Preisvektors, ohne Kaskade (Kern von shadow_prices/
+    rate_shadow_prices — bitidentisches Verhalten, nur faktorisiert für
+    die Pfad-Kombination). rate=False: Mengen-λ (s/Einheit, Störterm
+    +1 Einheit); rate=True: Raten-λ (s pro Einheit/s, Störterm +ε Rate).
+    Sonderfälle wie dokumentiert: gedeckt→0, Cap-Block→0, Rate≈0→Clamp,
+    fremdblockierte Position→0."""
+    lam: dict[str, float] = {}
+    lam_max = LAMBDA_RATE_MAX if rate else LAMBDA_MAX
+    base = _eta(snap, prices)
+    for p in prices:
+        name = p["name"]
+        if A.res_value(snap, name) + EPS >= p["val"]:
+            lam[name] = 0.0
+            continue
+        cap = A.res_cap(snap, name)
+        if 0 < cap < p["val"]:
+            lam[name] = 0.0
+            continue
+        if A.res_rate(snap, name) <= RATE_EPS:
+            # Nichts produziert die Ressource — jede Einheit/Produktion ist
+            # maximal wertvoll, endlich geklemmt:
+            lam[name] = lam_max
+            continue
+        if not math.isfinite(base):
+            # Eine ANDERE Position blockiert das Ziel — diese hier ist
+            # (noch) nicht der Engpass:
+            lam[name] = 0.0
+            continue
+        if rate:
+            delta = base - _eta(snap, prices, extra_rate={name: RATE_PROBE_EPS})
+            lam[name] = _clamp(delta / RATE_PROBE_EPS, 0.0, lam_max)
+        else:
+            delta = base - _eta(snap, prices, extra_amount={name: 1.0})
+            lam[name] = _clamp(delta, 0.0, lam_max)
+    return lam
+
+
 # ================================================================ λ (Menge)
 
 def shadow_prices(snap: dict, goal_prices: list[dict] | None) -> dict[str, float]:
@@ -124,27 +164,7 @@ def shadow_prices(snap: dict, goal_prices: list[dict] | None) -> dict[str, float
     """
     if not goal_prices:
         return {}
-    lam: dict[str, float] = {}
-    base = _eta(snap, goal_prices)
-    for p in goal_prices:
-        name = p["name"]
-        if A.res_value(snap, name) + EPS >= p["val"]:
-            lam[name] = 0.0
-            continue
-        cap = A.res_cap(snap, name)
-        if 0 < cap < p["val"]:
-            lam[name] = 0.0
-            continue
-        if A.res_rate(snap, name) <= RATE_EPS:
-            lam[name] = LAMBDA_MAX
-            continue
-        if not math.isfinite(base):
-            # Eine ANDERE Position blockiert das Ziel — diese hier ist
-            # (noch) nicht der Engpass:
-            lam[name] = 0.0
-            continue
-        delta = base - _eta(snap, goal_prices, extra_amount={name: 1.0})
-        lam[name] = _clamp(delta, 0.0, LAMBDA_MAX)
+    lam = _single_lambda(snap, goal_prices, rate=False)
     _propagate_cascade(snap, lam)
     return lam
 
@@ -160,27 +180,7 @@ def rate_shadow_prices(snap: dict, goal_prices: list[dict] | None) -> dict[str, 
     """
     if not goal_prices:
         return {}
-    lam_rate: dict[str, float] = {}
-    base = _eta(snap, goal_prices)
-    for p in goal_prices:
-        name = p["name"]
-        if A.res_value(snap, name) + EPS >= p["val"]:
-            lam_rate[name] = 0.0
-            continue
-        cap = A.res_cap(snap, name)
-        if 0 < cap < p["val"]:
-            lam_rate[name] = 0.0
-            continue
-        if A.res_rate(snap, name) <= RATE_EPS:
-            # Nichts produziert die Ressource — jede Produktion ist maximal
-            # wertvoll, endlich geklemmt:
-            lam_rate[name] = LAMBDA_RATE_MAX
-            continue
-        if not math.isfinite(base):
-            lam_rate[name] = 0.0
-            continue
-        delta = base - _eta(snap, goal_prices, extra_rate={name: RATE_PROBE_EPS})
-        lam_rate[name] = _clamp(delta / RATE_PROBE_EPS, 0.0, LAMBDA_RATE_MAX)
+    lam_rate = _single_lambda(snap, goal_prices, rate=True)
     _propagate_cascade(snap, lam_rate)
     return lam_rate
 
@@ -189,6 +189,66 @@ def shadow_price_of_rate(snap: dict, goal_prices: list[dict] | None,
                          res_id: str) -> float:
     """Raten-Schattenpreis einer einzelnen Ressource (inkl. Kaskade)."""
     return rate_shadow_prices(snap, goal_prices).get(res_id, 0.0)
+
+
+# ================================================================ λ (Pfad)
+
+def path_weight(rank: int) -> float:
+    """Rang-Diskont des Pfad-Preisvektors: w_k = 1/(1+k) (Spec 10.2/11.1,
+    „nähere Ziele wiegen mehr").
+
+    Wahl dokumentiert (#34): ETA-basierte Diskontierung wäre endogen
+    (λ steuert das Verhalten, das Verhalten ändert die ETA → Rückkopplung/
+    Flattern) und für noch unsichtbare Ziele gar nicht definiert. Die
+    Meilenstein-Reihenfolge ist dagegen ein deterministischer, snapshot-
+    stabiler Zeit-Proxy. Harmonisch (1/(1+k)) statt geometrisch, damit
+    Ressourcen weit hinten im Pfad nicht auf ≈0 fallen — Totalentwertung
+    von Pfadressourcen ist genau die Fehlerklasse der Live-Funde
+    (Null-Woodcutter, Monokultur)."""
+    return 1.0 / (1.0 + max(0, rank))
+
+
+def _path_lambda(snap: dict, path_targets: list[dict], *, rate: bool) -> dict[str, float]:
+    """Kombinierter Pfad-λ-Vektor: λ_i = max_k(w_k · λ_i^(k)).
+
+    Diskontiertes MAXIMUM statt Summe (Wahl dokumentiert, #34): λ ist die
+    marginale ETA-Verkürzung EINES Ziels durch +1 Einheit; die Meilensteine
+    sind sequenziell — dieselbe marginale Einheit wird von genau einem Ziel
+    verbraucht. Eine Summe würde sie allen ~20 Zielen gleichzeitig
+    gutschreiben (Science würde absurd aufgebläht) und das LAMBDA_MAX-Clamp
+    sprengen; das Maximum bleibt automatisch in [0, Clamp]. Die Kaskade
+    läuft EINMAL über das kombinierte Maximum (billiger, und Craft-Inputs
+    erben so den besten Pfadwert)."""
+    combined: dict[str, float] = {}
+    for entry in path_targets:
+        prices = entry.get("prices")
+        if not prices:
+            continue
+        w = float(entry.get("weight", 1.0))
+        if w <= 0:
+            continue
+        lam_k = _single_lambda(snap, prices, rate=rate)
+        for name, val in lam_k.items():
+            weighted = w * val
+            if weighted > combined.get(name, 0.0):
+                combined[name] = weighted
+    _propagate_cascade(snap, combined)
+    return combined
+
+
+def path_shadow_prices(snap: dict, path_targets: list[dict]) -> dict[str, float]:
+    """Mengen-λ über den PFAD (aktives Ziel + offene Meilensteine + Housing,
+    Spec 10.2/11.1 — Lücke #34): Einträge {"prices": [...], "weight": w}."""
+    if not path_targets:
+        return {}
+    return _path_lambda(snap, path_targets, rate=False)
+
+
+def path_rate_shadow_prices(snap: dict, path_targets: list[dict]) -> dict[str, float]:
+    """Raten-λ über den PFAD (Gegenstück zu path_shadow_prices)."""
+    if not path_targets:
+        return {}
+    return _path_lambda(snap, path_targets, rate=True)
 
 
 # ================================================================ Kaskade

@@ -222,7 +222,13 @@ def test_payback_gate_spares_unlocks_and_bottleneck_solvers():
     assert workshop.components.get("unlock", 0) > 0
     mill = next(c for c in cands if c.action.id == "build:lumberMill")
     assert mill.feasible                          # löst den Engpass
-    assert mill.components.get("netValue", 0) > 0
+    # Seit dem Pfad-λ (#34) sind die 50 Minerals der Mühle nicht mehr
+    # gratis: der Smelter-Meilenstein braucht sie später und nichts
+    # produziert sie (λ = Clamp) → netValue ehrlich negativ. Der Kern
+    # dieses Tests bleibt: der Engpasslöser ist vom Payback-Gate (10.4)
+    # ausgenommen und gewinnt über den Bottleneck-Bonus.
+    assert "Payback" not in (mill.reject_reason or "")
+    assert mill.components.get("bottleneck", 0) > 0
     assert mill.score > 0
 
 

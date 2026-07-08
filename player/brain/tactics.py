@@ -246,11 +246,13 @@ def generate(snap: dict, meta_view, safety_result, *,
     banking = _kitten_banking_mode(snap, bn)
     reserved = _reserved_resource(snap, bn, banking)
 
-    # Schattenpreise EINMAL pro Zyklus am aktiven Meilenstein-Ziel (10.2);
-    # ohne Preisvektor bleiben die Dicts leer → überall Fallback-Heuristik.
+    # Schattenpreise EINMAL pro Zyklus über den PFAD-Preisvektor (#34,
+    # Spec 10.2/11.1): aktives Ziel + Housing + offene Meilensteine,
+    # rang-diskontiert. goal_prices bleibt der Sofortziel-Vektor für
+    # Bottleneck/Sparlogik. Ohne Pfad bleiben die Dicts leer → die
+    # Schwellen-Fallbacks der Kandidaten greifen (Sicherheitsnetz).
     goal_prices = _target_prices(snap, target)
-    lam = shadow.shadow_prices(snap, goal_prices) if goal_prices else {}
-    lam_rate = shadow.rate_shadow_prices(snap, goal_prices) if goal_prices else {}
+    lam, lam_rate = path_lambdas(snap, meta_view)
     horizon = shadow.run_horizon(snap) * max(1.0, horizon_scale)
 
     _milestone_candidate(snap, target, bn, cands, blocked)
@@ -336,8 +338,18 @@ def _apply_saving_rule(snap: dict, cands: list[Candidate]) -> None:
             delay = max(delay, (-v) / rate if rate > 0
                         else NET_VALUE_CLAMP * NET_VALUE_SCALE)
         if delay > 0:
-            c.components["delayPenalty"] = -min(NET_VALUE_CLAMP,
-                                                delay / NET_VALUE_SCALE)
+            # Ein Kauf, der das Sparziel verzögert, darf seinen Score nicht
+            # aus dem eigenen netValue finanzieren: das Sparziel ist die
+            # priorisierte Verwendung der Ressource (10.3). Ohne diese
+            # Neutralisierung würde jeder Pfad-netValue am +Clamp (#34)
+            # die DelayPenalty (−Clamp) strukturell überstimmen und der
+            # Agent spart nie (genau der Live-Fund „Library #3 vom Sparholz").
+            nv_bonus = max(0.0, min(NET_VALUE_CLAMP,
+                                    c.components.get("netValue", 0.0)
+                                    / NET_VALUE_SCALE))
+            c.components["delayPenalty"] = -(min(NET_VALUE_CLAMP,
+                                                 delay / NET_VALUE_SCALE)
+                                             + nv_bonus)
             c.components["savingFor"] = 0.0   # Anzeige-Marker (Sparziel aktiv)
             c.score = _score(c.components)
     # WAIT nennt das Sparziel (Weckbedingung fürs Cockpit):
@@ -451,6 +463,87 @@ def _milestone_candidate(snap, target, bn, cands, blocked) -> None:
                                reject_reason=reason, eta_seconds=eta))
 
 
+# ---------------------------------------------------------- Pfad-λ (#34)
+
+# Kappung des Pfad-Preisvektors: ab Rang 12 ist das Rang-Gewicht
+# 1/(1+k) ≤ 1/13 ≈ 8 % — vernachlässigbar gegen die vorderen Ziele, und
+# die λ-Rechnung bleibt billig (2 ETA-Auswertungen je Preisposition).
+PATH_MAX_TARGETS = 12
+
+
+def path_targets(snap, meta_view) -> list[dict]:
+    """Pfad-Preisvektor (#34, Spec 10.2/11.1): Liste von
+    {"prices": [...], "weight": shadow.path_weight(rang), "label": ...}.
+
+    Rangordnung (deterministisch, Diskontwahl in shadow.path_weight
+    dokumentiert):
+    - Rang 0: aktives Meilensteinziel (w = 1).
+    - Rang 1: nächste Housing-Stufe, sofern die Kapazität voll ist —
+      Kitten sind die Dauerressource des GANZEN Pfads, darum immer „nah"
+      (gleiche Logik wie _allocation_prices; der Pfadvektor ist deren
+      Obermenge).
+    - Rang 2…: alle offenen Meilensteine des Runs (meta_view.open_targets)
+      in Listenreihenfolge. Unauflösbare Targets (unsichtbar) werden
+      übersprungen; für das ERSTE unauflösbare Forschungsziel greift der
+      REFERENCE_RESEARCH_SCIENCE-Fallback (gleiche Falle wie 12.2: Science
+      darf nie den Wert 0 haben, solange Forschung ansteht).
+    Kappung bei PATH_MAX_TARGETS aufgelösten Einträgen."""
+    out: list[dict] = []
+    active_target = meta_view.active.target if meta_view.active else None
+    active_prices = _target_prices(snap, active_target)
+    if active_prices:
+        out.append({"prices": active_prices, "weight": shadow.path_weight(0),
+                    "label": "active"})
+    village = snap.get("village", {})
+    if village.get("maxKittens", 0) <= village.get("kittens", 0):
+        for name in sorted(HOUSING_BUILDINGS):
+            b = A.building(snap, name)
+            if b and b.get("unlocked") and b.get("prices"):
+                if not (active_target and active_target.get("kind") == "build"
+                        and active_target.get("name") == name):
+                    out.append({"prices": b["prices"],
+                                "weight": shadow.path_weight(len(out)),
+                                "label": f"housing:{name}"})
+                break
+    research_fallback_used = False
+    for target in (getattr(meta_view, "open_targets", None) or []):
+        if len(out) >= PATH_MAX_TARGETS:
+            break
+        if target == active_target:
+            continue
+        prices = _target_prices(snap, target)
+        if not prices:
+            if target.get("kind") == "research" and not research_fallback_used:
+                # Ziel noch unsichtbar → Referenzpreis (einmal reicht: weitere
+                # unsichtbare Forschung hätte dieselbe Science-Position).
+                prices = [{"name": "science", "val": REFERENCE_RESEARCH_SCIENCE}]
+                research_fallback_used = True
+            else:
+                continue
+        out.append({"prices": prices, "weight": shadow.path_weight(len(out)),
+                    "label": f"{target.get('kind')}:{target.get('name')}"})
+    return out
+
+
+def path_lambdas(snap, meta_view) -> tuple[dict, dict]:
+    """(λ, λ_rate) über den Pfad-Preisvektor — der EINE λ-Satz des Zyklus."""
+    pt = path_targets(snap, meta_view)
+    if not pt:
+        return {}, {}
+    return (shadow.path_shadow_prices(snap, pt),
+            shadow.path_rate_shadow_prices(snap, pt))
+
+
+def lambda_top(lam: dict, lam_rate: dict, n: int = 8) -> list[dict]:
+    """λ-Topliste fürs Cockpit (#34): die n wertvollsten Ressourcen des
+    Pfads, deterministisch sortiert (−λ, Name), Werte gerundet."""
+    rows = [{"name": name, "lam": round(val, 2),
+             "lamRate": round(lam_rate.get(name, 0.0), 2)}
+            for name, val in lam.items() if val > 0]
+    rows.sort(key=lambda r: (-r["lam"], r["name"]))
+    return rows[:n]
+
+
 # ---------------------------------------------------------------- Jobs
 
 def _allocation_prices(snap, goal_prices, next_research=None) -> list[dict] | None:
@@ -458,7 +551,9 @@ def _allocation_prices(snap, goal_prices, next_research=None) -> list[dict] | No
     nächste Housing-Stufe PLUS das nächste offene Forschungsziel — sonst
     wäre eine Pfad-Ressource „wertlos", nur weil das Sofortziel sie nicht
     braucht (Nutzer-Funde: null Woodcutter im ganzen Run; danach alle 6
-    Kitten als Woodcutter, weil das Holz-Ziel Science den Wert 0 gab)."""
+    Kitten als Woodcutter, weil das Holz-Ziel Science den Wert 0 gab).
+    Hinweis (#34): der λ-Pfadvektor (path_targets) ist eine Obermenge
+    hiervon; die Allokation behält bewusst ihren schlanken Vektor."""
     prices = list(goal_prices or [])
     village = snap.get("village", {})
     if village.get("maxKittens", 0) <= village.get("kittens", 0):
