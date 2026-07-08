@@ -161,6 +161,22 @@ Inspector zeigt damit die echten Zeit-Äquivalente jeder Entscheidung.
 Score > 0 — sonst WAIT. **Tie-Break (C.2):** bei Score-Gleichheit gewinnt
 die lexikografisch kleinere Action-ID → deterministisch.
 
+### Job-Marginalraten (12.2, #40)
+
+JobScore und Soll-Allokation rechnen mit den BEOBACHTETEN effektiven
+Pro-Kitten-Raten aus dem Spiel: snapshot.js exportiert je Job
+`ratesPerKitten` (Nachbau von village.js `updateResourceProduction` für
+ein marginales Skill-0-Kitten — verstärkte Happiness, Leader-Team-Boost —
+multipliziert mit der calcResourcePerTick-Kette aus game.js: JobRatio-
+Upgrades, Gebäude-/Religion-/Paragon-/Magneto-/Reaktor-Multiplikatoren,
+Pollution, Solar Revolution, CMBR; Weather bewusst nicht — es wirkt im
+Spiel VOR der Villager-Addition). `shadow.job_marginal_rates` behandelt
+das Snapshot-Feld als autoritativ (auch leer); die statische Tabelle
+`JOB_BASE_RATES × Happiness` ist nur noch Fallback ohne Snapshot-Daten.
+Damit ist die Kitten-Beitrags-Subtraktion in `target_allocation` exakt
+(vorher Phantom-Restrate: statische Basisraten von multiplikator-
+behafteten Ist-Raten abgezogen).
+
 ### Konversions-Reservierung (Deadlock-Schutz)
 
 Ist der Engpass nur über eine Konversion erreichbar (früh: Wood nur über
@@ -219,9 +235,21 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
   Spec-Regeln A–D mit deterministischer Batch-Suche unter Heat-/Cap-
   Constraints und Cycle-Referenztabelle. Ohne λ-/Time-Daten greift die
   alte konservative Regel (RR ≥ 1, Heat-Spielraum, 5-TC-Reserve, Batch ≤ 5).
+  Seit #43 sind die irreversiblen AUSGABE-Entscheidungen zustandsabhängig:
+  `tc_opportunity_s` (max aus λ_TC am Ziel und λ-bewertetem Shatter-
+  Jahresertrag der RR-Stufe) bepreist den TC-Einsatz in RRValue und
+  Regel D; `paragon_value_s` = Δ`prestige.paragon_production_ratio`/
+  (1+ratio) × Σλ·rate × Horizont ersetzt die 900-s-Konstante in Regel D.
+  Die Konstanten `TC_VALUE_REF_S`/`PARAGON_VALUE_REF_S` sind nur noch
+  Fallback ohne Daten. Bewusste Ausnahme: Regeln A/B behalten
+  supplied-λ-sonst-Referenz — dort wäre λ_TC := Shatter-Ertrag
+  selbstreferenziell (Regel A könnte nie feuern).
 - **Chronosphere-Zielzahl (19.1, `brain/chrono.py`):** CSValue-Suche über
   n−2…n+3 (Carryover 1,5 %/CS, UO-Kosten über λ); gekauft wird nur bis zur
-  optimalen Zahl, nicht mehr opportunistisch.
+  optimalen Zahl, nicht mehr opportunistisch. RebuildDelay seit #43 als
+  Engpass-ETA des Flotten-Wiederaufbaus aus beobachteten Raten
+  (`_rebuild_eta_seconds`, Preisreihe wie `rebuild_cost_vector`);
+  die 60-s-Konstante nur noch Fallback (`rebuildMode` transparent).
 - **TC-Schutz-Gate (I-02 / 9.1):** Reset mit ≥ 3 Time Crystals wird ohne
   Anachronomancy blockiert.
 - **Run-Typ-Wahl (8.2/8.3, `meta.determine_run_plan`):** alle **13
@@ -280,6 +308,14 @@ Decision Inspectors und des JSONL-Logs (Reproduzierbarkeit).
 - **Policies (13.4, `brain/policy.py`):** Bewertung über λ/Horizont mit
   I-07-Alternativenprüfung, 13.4-Startkandidaten als Suchraum-Prior;
   Kauf über die PolicyBtnController-API als irreversible Transaktion.
+  Seit #37 deckt `POLICY_EFFECTS` alle 66 Policies der Referenzversion
+  ab (Übersetzungs-Konventionen im Modul-Docstring; ehrlich nicht
+  übersetzbare Effekte als `unratable` mit Wert 0 — die I-07-Prüfung
+  entscheidet, kein stiller Ausschluss). Exklusive Zweige werden über
+  den Restplan bewertet: `branch_value` = eigener Wert + unlocks-
+  Nachfolger (BFS ≤ 3, je blocks-Gruppe das Maximum, harmonischer
+  Diskont 1/(1+Tiefe)); i07_check/best_policy vergleichen Zweigwerte,
+  der Horizont kommt aus `run_plan["restzeitS"]` (meta), falls endlich.
 - **Challenges (18, `brain/challenge.py`):** Katalog aus challenges.js,
   ChallengeValue-Auswahl (18.2), CHALLENGE_RUN; Reset nur, wenn das Spiel
   die Challenge als erfüllt markiert (18.4). Seit #38 ist der

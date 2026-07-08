@@ -6,9 +6,10 @@ Diese Tabelle ist der ehrliche Abgleich. Die 33 Zeilen des Erstausbaus sind
 umgesetzt (✅); der Live-Betrieb und ein adversarialer Light-Audit (drei
 Prüf-Agenten, 7. Juli abends) haben danach NEUE offene Zeilen eröffnet
 (#34 ff. unten) — dort steht, wo eine kluge Spec-Mechanik bisher nur als
-Konstante/Sonderfall gebaut ist. Die beiden wichtigsten Pakete daraus
+Konstante/Sonderfall gebaut ist. Die drei wichtigsten Pakete daraus
 sind am 8. Juli umgesetzt worden: „Economy-Kern ehrlich machen"
-(#34+#35+#36+#41) und „Makro & Reset ehrlich machen" (#38+#39+#42) —
+(#34+#35+#36+#41), „Makro & Reset ehrlich machen" (#38+#39+#42) und
+„Politik, Jobs & irreversible Käufe ehrlich machen" (#37+#40+#43) —
 ✅ mit Fundstellen in den Zeilen, Abschluss-Notizen am Ende.
 
 Legende: ✅ umgesetzt/spec-nah · 🟠 lohnendste offene Lücken · 🟡 offen, geringere Wirkung
@@ -22,7 +23,7 @@ Legende: ✅ umgesetzt/spec-nah · 🟠 lohnendste offene Lücken · 🟡 offen,
 | 3 | 20.4 | **Paragon-Speedrun-Abbruch** (marginale Rate) | Marginalraten-Fenster vs. Ø-Rate implementiert (`reset._paragon_speedrun_rule`) | ✅ |
 | 4 | 10.2 | **Schattenpreise λᵢ für alle Ressourcen**; Kosten/Nutzen in Zielzeit-Äquivalenten | λᵢ numerisch über die Engpass-ETA inkl. Craft-Kaskade (`shadow.shadow_prices`); Cost_time/Benefit_time/NetValue als Sekundenwerte im Decision Inspector, NetValue fließt normiert in den Score | ✅ |
 | 5 | 10.4 | **Payback-Regel** (Amortisation vor Reset/Milestone, sonst kein Produktionskauf) | Payback-Gate in `tactics._building_candidates` gegen `shadow.run_horizon`; Unlocks/Safety/Dependencies ausgenommen (Spec-konform) | ✅ |
-| 6 | 12.2 | **Job-Zuweisung** über marginalen Zielzeitgewinn je Job, iterativ mit Tauschoperationen | `shadow.job_score` (Σ λᵢ·Marginalrate) wählt den Job; Tausch nur bei Gewinn > Schwelle (`tactics._job_candidates`/`_job_rebalance_candidate`); Basisraten-Näherung im Docstring dokumentiert | ✅ |
+| 6 | 12.2 | **Job-Zuweisung** über marginalen Zielzeitgewinn je Job, iterativ mit Tauschoperationen | `shadow.job_score` (Σ λᵢ·Marginalrate) wählt den Job; Tausch nur bei Gewinn > Schwelle (`tactics._job_candidates`/`_job_rebalance_candidate`); Marginalraten seit #40 beobachtet (`job_marginal_rates`), Basisraten nur Fallback | ✅ |
 | 7 | 8.3 | **Run-Typ-Wahl** durch Simulation aller Makroplan-Kandidaten (×3 Varianten) | `meta.determine_run_plan`: zulässige Run-Typen × Varianten a/b/c per EV-Projektion, Score = −Restzeit, Tie-Break C.2 — für die 3 aktiven Run-Typen (alle 13 siehe #16) | ✅ |
 | 8 | 14.1 | **TradeValue** als Erwartungswert über die Ergebnisverteilung (Saison, Standing, Ships) | `tactics._trade_value`: Σ P(o)·λ-Wert(o) − λ-Kosten aus Race-Daten im Snapshot (sells/Saison-Deltas/Standing/Ships); EV-Gate, Engpass-Regel als Fallback | ✅ |
 | 9 | 20.1 | **Reset-Wert** V(post-reset) − V(continue) via Simulation | `reset._reset_value` über die EV-Projektion am gleichen Realzeithorizont (Neustart-Rampe als dokumentierte Näherung); Schwelle 35 bleibt notwendige Vorbedingung, Perk-Finanzierung harte Regel | ✅ |
@@ -73,13 +74,13 @@ Sparfenster der DelayPenalty, Cap-Klausel, Farmer-Hysterese.)
 | 34 | 10.2 / 11.1 | **λ für ALLE Ressourcen** im Critical Path | PFAD-Preisvektor: aktives Ziel + Housing + alle offenen Meilensteine (`meta.MetaView.open_targets`), rang-diskontiert 1/(1+k) als diskontiertes Maximum (`shadow.path_shadow_prices`/`path_rate_shadow_prices`, Assembly `tactics.path_targets`); Jagd/Trade/Leader/Storage/Cap-Relief laufen damit im λ-Zweig, Schwellen-Fallbacks nur noch Sicherheitsnetz; Sparregel neutralisiert netValue von Störkäufen; λ-Topliste im Cockpit (Economy-Tab, `plan.lambdaTop`) | ✅ |
 | 35 | 13.1 / 13.2 | **Gebäudebewertung über alle Modifier** (direkt+indirekt, Energie, Pollution, Rest-Aktivzeit); Factories nach Craft/Engineer/Pollution | snapshot.js exportiert das volle `effects`-Dict pro Gebäude (+ `pollution`-Sektion); `tactics._rate_delta_from_effects`: mehrressourcig inkl. Verbrauch (PerTick ×TPS, DemandRatio ×Bedarf, Ratio ×Rate, coalRatioGlobal nur 1. Exemplar, magnetoRatio/happiness/craftRatio als dokumentierte Näherungen), Mint/Brewery in der Whitelist, Pollution als λ-bewerteter Zeitkostenterm (`_pollution_cost_time`, Schwelle 5e8). Restnäherungen ehrlich: craftRatio nur Autocraft-Durchsatz, tradeRatio/standingRatio via Trade-EV 14.1, Pollution nur das Arrival-Slowdown-Regime | ✅ |
 | 36 | 5.2 / 8.3 | **Vorwärtssimulation mit Bevölkerungswachstum und echten Käufen** | snapshot.js exportiert `village.kittensPerSec` (village.js calculateKittensPerTick ×TPS); `simulate.project` lässt die Population wachsen (Housing-Klemme, Catnip-Mehrlast) → FIRST-/PARAGON-/PRICE_RATIO-Restzeiten zustandsabhängig. Offen bleibt der zweite Halbsatz: Varianten a/b/c sind weiter eine abstrakte Ratenrampe, keine simulierten Kaufsequenzen (Wirkung deutlich kleiner, Restlücke dokumentiert) | ✅ |
-| 37 | 13.4 | **Alle Policies + Kombinationen** über den Restplan bewerten | `policy.POLICY_EFFECTS` deckt 23 von ~66 Policies; der Rest (u. a. alle Race-Relations, Pacts-Policies, fullIndustrialization) ist NIE Kandidat; keine Kombinationsbewertung | 🟡 |
+| 37 | 13.4 | **Alle Policies + Kombinationen** über den Restplan bewerten | `policy.POLICY_EFFECTS` deckt alle 66 Policies aus science.js:850-2189 (Übersetzungs-Konventionen im Modul-Docstring; 22 ehrlich `unratable` — Wert 0, I-07 entscheidet statt stillem Ausschluss); Zweigwert `policy.branch_value` (unlocks-BFS ≤ 3, Gruppen-Maximum über blocks-Komponenten, harmonischer Diskont), i07_check/best_policy vergleichen Zweige; Horizont = `run_plan["restzeitS"]` (tactics reicht meta_view.run_plan durch). Restnäherungen ehrlich: Schätz-Konventionen je Eintrag gekennzeichnet (`estimate`), Embassy-/Cycle-Mittelwerte statt Live-Werten | ✅ |
 | 38 | 8.3 / 18.2 | **Restzeiten simuliert, ChallengeValue zustandsabhängig** | Alle Restzeit-Konstanten ersetzt: SEED = ETA der nächsten ganzen Carryover-Einheit (`chrono.seed_progress`), POSITIVE_CS = Verdienzeit der Wiederaufbaukosten (`rebuild_cost_vector`/beobachtete Raten), SHATTER-Ziel = Reserve + Heat-gedeckelter Batch (`meta._shatter_tc_target`), CHALLENGE = Zielprojektion je Challenge (`challenge.completion_eta`, Mindestlaufzeit-Floor; unbeobachtbar/unerreichbar → ehrlich ∞). `challenge_value` = `reward_seconds` (Produktionszeit-Äquivalent) / projizierte Completion; Referenzschätzungen NUR noch als Fallback ohne Zielobjekte im Snapshot. Restnäherungen ehrlich: Energy-Stages nicht ablesbar, postApocalypse prinzipiell nicht projizierbar, reward_seconds nur für übersetzbare Effekte | ✅ |
 | 39 | 10.4 / 6.4 | **Payback gegen den GEPLANTEN Reset**; Makrohorizont „mind. ein voller Run" | Die Makroplan-Restzeit (`meta.determine_run_plan` → `run_plan["restzeitS"]`) fließt als `reset.evaluate["etaSeconds"]` in `tactics.generate(run_horizon_s=…)`: das Payback-Gate prüft gegen den geplanten Reset, nach unten `HORIZON_PLANNED_MIN` (Anti-Deadlock), nach OBEN ungeklemmt (6.4 — lange Runs planen lang); `resolve_deadlock` reicht durch. `shadow.run_horizon` (2×Spielzeit, [30 min, 4 h]) bleibt Heuristik-Fallback ohne Projektion/Reset-Ziel/bei TC-Block; `_score_plans` bewertet bewusst weiter mit der Heuristik (keine Zirkularität Plan→Horizont→Plan) | ✅ |
-| 40 | 12.2 | **Marginalraten mit Gebäude-/Upgrade-Multiplikatoren** | `shadow.JOB_BASE_RATES` statisch ×Happiness; `target_allocation` subtrahiert Basisraten von multiplikator-behafteten Ist-Raten (Restrate zu hoch) → Mid-Game-Verzerrung | 🟡 |
+| 40 | 12.2 | **Marginalraten mit Gebäude-/Upgrade-Multiplikatoren** | snapshot.js exportiert je Job `ratesPerKitten` (village.js updateResourceProduction für ein Skill-0-Marginalkitten × game.js calcResourcePerTick-Kette 3243-3331; Weather bewusst außen vor — wirkt vor der Villager-Addition; priest.calculateEffects nie aufgerufen); `shadow.job_marginal_rates` autoritativ (auch leer), `job_score`/`target_allocation`/6 tactics-Leser umgestellt — Baseline-Subtraktion exakt statt Phantom-Restrate. JOB_BASE_RATES × Happiness nur noch Fallback ohne Snapshot-Feld. Tests `tests/test_job_rates.py` | ✅ |
 | 41 | 12.1 | **ExpectedKittenArrivals** × KittenValue | `_housing_eval`: Slots füllen sequenziell mit `village.kittensPerSec` (Slot i arbeitet H − i/Rate); ohne Snapshot-Rate Fallback Sofort-Vollbelegung; Food-Gate bleibt bewusst worst-case (I-01) | ✅ |
 | 42 | 20.1 / 20.2 | **V(post) simuliert; Reset-Trigger je Run-Typ** | Vier Zweige VOR dem Perk-Catch-all in `reset.evaluate`: RELIGION (TAP-Punkt via `transcend_value["worth"]`), UNICORN (Ziggurat + 2500er-Opfer-Batch), SEED (`seed_progress["basisReached"]`), POSITIVE_CS (`positive_cs_check`-Dominanz) — je ResetValue-geprüft (`_goal_reset_decision`). V(post) = Neustart-Kurzsimulation (`_post_reset_paragon`: Carryover-Startkapital, Ankunftsrate × Paragon-Bonus-Verhältnis aus portiertem prestige.js `getParagonProductionRatio`/game.js `getLimitedDR`); ohne Ankunftsrate bleibt die lineare Rampe als Fallback (`vPostMode` transparent). Restnäherung: paragonRatio-Effekt konservativ 1.0 (nicht im Snapshot) | ✅ |
-| 43 | 17.2/17.5 / 19.1 | **λ-bewertete irreversible TC-/CS-Käufe** | `TC_VALUE_REF_S=600`, `PARAGON_VALUE_REF_S=900`, `REBUILD_DELAY_PER_CS_S=60` — Referenzkonstanten steuern Shatter-Batches und CS-Zielzahl (irreversibel) | 🟡 |
+| 43 | 17.2/17.5 / 19.1 | **λ-bewertete irreversible TC-/CS-Käufe** | `timecrystal.tc_opportunity_s` (max aus λ_TC und Shatter-Jahresertrag) bepreist TC-Ausgaben in rr_value und Regel D (`tcValueMode` transparent); `paragon_value_s` = Δ`prestige.paragon_production_ratio`/(1+ratio) × Σλ·rate × Horizont für Regel D (`paragonValueS`); `chrono._rebuild_eta_seconds` = Engpass-ETA des Flotten-Wiederaufbaus aus beobachteten Raten (`rebuildMode` eta\|fallback). Alle drei Konstanten NUR noch Fallback ohne Daten. Bewusste Ausnahme: Regeln A/B behalten supplied-λ-sonst-Referenz — λ_TC := Shatter-Ertrag wäre dort selbstreferenziell (Regel A könnte nie feuern, dokumentiert) | ✅ |
 | 44 | 6.1 / 6.3 | **C(S) über alle 7 Dimensionen projiziert; Meilensteine „operational nutzbar"** | `endgame_score` projiziert nur Paragon (übrige ΔlnC-Beiträge 0); `frontier_complete` prüft Unlock-Flags statt Betrieb (Energie/Versorgung) | 🟡 |
 | 45 | 14.1 / 14.2 / 15.1 | **Verdrängungsprüfung, Batch-Optimum, Praise-Integral** | Trade: nur λ-Kosten, kein expliziter Catpower-/Gold-Konkurrenzcheck; Jagd: immer alle Squads, Schwelle statt Batch-Optimum; Praise: Overflow-Heuristik statt Integral bis Adore/Reset | 🟡 |
 | 46 | 5.3 | **Weckquellen vollständig** (inkl. „Fertigstellung eines Sparziels") | `scheduler.next_wakeup`: Saison/Cap/ETA/Kontrollpunkt; Sparziel-, Festival-, Heat-, Cycle-Weckung fehlen (Wirkung gering durch 30-s-Clamp) | 🟡 |
@@ -116,75 +117,30 @@ Zustand; run_horizon folgt der Reset-Projektion; RELIGION_RUN erreicht
 seine Reset-Transaktion). Bewusst offene Restnäherungen stehen in den
 Tabellenzeilen.
 
-## Empfohlenes nächstes Paket: „Politik, Jobs & irreversible Käufe ehrlich machen" (#37+#40+#43)
+## Erledigt (8. Juli): Paket „Politik, Jobs & irreversible Käufe ehrlich machen" (#37+#40+#43)
 
-Drei Stellen, an denen heute Referenztabellen bzw. -konstanten statt
-Rechnungen stehen: die Policy-Abdeckung (Governance-Entscheidungen sind
-irreversibel!), die Job-Marginalraten der Soll-Allokation (Mid-Game-
-Verzerrung) und die TC-/CS-Kaufsteuerung (irreversible Käufe).
+Die drei Referenztabellen-/Konstanten-Stellen rechnen jetzt aus dem
+Zustand: Die Policy-Tabelle deckt alle 66 Policies der Referenzversion ab
+(ehrlich `unratable`, wo kein Ratenbezug existiert — die I-07-Prüfung
+entscheidet, kein stiller Ausschluss mehr) und bewertet exklusive Zweige
+über den Restplan (`policy.branch_value`, Horizont aus
+`run_plan["restzeitS"]`); die Soll-Allokation nutzt die BEOBACHTETEN
+Pro-Kitten-Marginalraten aus dem Spiel (`village.jobs[].ratesPerKitten`
+im Snapshot, `shadow.job_marginal_rates`) statt der statischen
+Basisraten — der Baseline-Subtraktionsfehler ist damit weg; und die
+irreversiblen TC-/CS-Käufe hängen an `tc_opportunity_s`/
+`paragon_value_s`/`_rebuild_eta_seconds` statt an den drei Konstanten
+(nur noch dokumentierte Fallbacks). Fundstellen in den Zeilen #37/#40/
+#43 oben; Regressionstests in `tests/test_job_rates.py`,
+`tests/test_policy.py` (Vollabdeckungs-Invariante, Zweig-Kippfall,
+unratable-Semantik) und `tests/test_timecrystal.py` (Regel D reagiert
+auf den Zustand, Rebuild-ETA). Bewusst offene Restnäherungen stehen in
+den Tabellenzeilen (Schätz-Konventionen je Policy-Eintrag; Skill-0-
+Marginalkitten, Weather außen vor; Shatter-Regeln A/B bewusst
+supplied-λ-sonst-Referenz).
 
-Fertiger Auftrag zum Kopieren für eine neue Claude-Code-Session:
+## Empfohlenes nächstes Paket (Paket 4)
 
-> Arbeite auf Branch `working` (nach Abschluss dorthin pushen; falls die
-> Session einen eigenen claude/-Branch anlegt, am Ende nach working
-> mergen). Lies zuerst docs/spec-gaps.md (Tabelle „Offene Lücken aus dem
-> Light-Audit") und docs/brain.md. Setze das Paket #37+#40+#43 um:
->
-> 1. **Policy-Vollabdeckung + Kombinationsbewertung (#37, Spec 13.4):**
->    `policy.POLICY_EFFECTS` deckt 23 von ~66 Policies ab — der Rest
->    (u. a. alle Race-Relations-Policies, die Pacts-Policies,
->    fullIndustrialization) wird NIE Kandidat. Vervollständige die
->    Tabelle aus gamefiles/js/science.js (Abschnitt `policies`): jede
->    Policy mit ihren `effects` (Fundstelle im Kommentar); Effekte, die
->    sich nicht in eine Ratenänderung übersetzen lassen, ehrlich als
->    nicht bewertbar markieren (dann entscheidet die I-07-Alternativen-
->    Prüfung, nicht ein stiller Ausschluss). Kombinationsbewertung 13.4:
->    Bei sich gegenseitig ausschließenden Zweigen (`blocks`/blocked-
->    Beziehungen aus science.js) den ganzen Zweig über den Restplan
->    (run_plan/Restzeit aus meta) bewerten, nicht nur die Einzel-Policy —
->    eine jetzt schwächere Policy darf gewinnen, wenn ihr Zweig über den
->    Rest des Runs mehr Sekunden spart. Deterministisch (Tie-Breaks C.2).
-> 2. **Job-Marginalraten mit echten Multiplikatoren (#40, Spec 12.2):**
->    `shadow.JOB_BASE_RATES` ist statisch ×Happiness; `target_allocation`
->    subtrahiert diese Basisraten von multiplikator-behafteten Ist-Raten
->    (Restrate zu hoch) → Mid-Game-Verzerrung. Exportiere in
->    player/driver/snapshot.js pro Job die EFFEKTIVE Pro-Kitten-
->    Marginalrate aus dem Spiel (gamefiles/js/village.js: getResProduction
->    bzw. job.modifiers × Skill/Happiness/Upgrade-Multiplikatoren;
->    Fundstelle im Kommentar, defensiv wie die übrigen Sektionen).
->    `shadow.job_score`/`target_allocation` nutzen diese beobachteten
->    Marginalraten direkt; JOB_BASE_RATES bleibt nur Fallback ohne
->    Snapshot-Daten. Damit entfällt auch der Baseline-Subtraktionsfehler
->    (Ist-Rate minus statische Basisrate). Achtung: `node --check
->    player/driver/snapshot.js` und der E2E-Test müssen grün bleiben.
-> 3. **Irreversible TC-/CS-Käufe λ-basiert (#43, Spec 17.2/17.5/19.1):**
->    Ersetze die Steuerkonstanten `timecrystal.TC_VALUE_REF_S=600`,
->    `timecrystal.PARAGON_VALUE_REF_S=900` und
->    `chrono.REBUILD_DELAY_PER_CS_S=60`: TC-Wert = beste Verwendung laut
->    aktuellem Plan (Shatter-Zeitgewinn via λ/Projektion aus
->    simulate.project bzw. meta-Restzeit), Paragon-Wert = ΔProduktion aus
->    dem echten Paragon-Bonus (portierte getParagonProductionRatio ist
->    seit #42 im Repo) über den Planungshorizont, RebuildDelay = ETA der
->    Wiederaufbaukosten aus beobachteten Raten (rebuild_cost_vector aus
->    #38 existiert bereits). Die Konstanten bleiben NUR als dokumentierter
->    Fallback, wenn keine Projektion möglich ist — irreversible Käufe
->    dürfen im Zweifel eher unterbleiben (konservativ).
->
-> Leitplanken wie im Repo etabliert: exakte Mechanik aus gamefiles/
-> (Fundstelle im Kommentar), Fallbacks ohne Daten, deterministisch
-> (Tie-Breaks C.2), Bestandstests grün oder minimal begründet angepasst,
-> neue Regressionstests auf make_snap-Fixtures (u. a.: eine bisher
-> unabgedeckte Policy wird Kandidat und gewinnt gegen eine schwächere
-> abgedeckte; Zweigbewertung kippt eine Einzel-Policy-Entscheidung;
-> target_allocation mit Upgrade-Multiplikatoren trifft die richtige
-> Zuteilung, wo die statische Tabelle sie verfehlt; TC-/CS-Kauf reagiert
-> auf den Zustand statt auf die Konstante). Verifikation:
-> python -m pytest tests/ -q, dann RUN_E2E=1
-> KGP_CHROMIUM_PATH=/opt/pw-browsers/chromium python -m pytest
-> tests/test_e2e.py -q. Danach docs/spec-gaps.md (#37/#40/#43 auf ✅ mit
-> Fundstellen) und docs/brain.md nachziehen. Commit-Stil wie git log;
-> pushen.
-
-Danach als Paket 4 sinnvoll: #44 (C(S) über alle 7 Dimensionen) + #45
+Sinnvoll als nächstes: #44 (C(S) über alle 7 Dimensionen) + #45
 (Trade-Verdrängung/Jagd-Batch/Praise-Integral) + #46/#47 (Weckquellen,
 CVaR-Proxy) — die verbleibenden, kleineren Light-Reste.
