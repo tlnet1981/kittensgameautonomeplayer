@@ -133,6 +133,63 @@ def test_lambda_top_sorted_and_capped():
     assert all(r["lam"] > 0 for r in tactics.lambda_top(lam, lam_rate))
 
 
+# ================================================== Wachsende Bevölkerung (#36/#41)
+
+def test_first_run_restzeit_shortens_with_kitten_arrivals():
+    """Auftragstest (#36): Mit exportierter Ankunftsrate wird die
+    FIRST_RUN-Restzeit (paragon_eta bis 35) endlich/zustandsabhängig;
+    ohne Rate bleibt sie ∞ (eingefrorene Population)."""
+    from player.brain import simulate
+
+    def _snap(kps):
+        return make_snap(
+            resources={"catnip": {"value": 500000, "max": 0, "rate": 50}},
+            kittens=80, max_kittens=120, jobs={"farmer": 5},
+            catnip_field_base=40, kittens_per_sec=kps,
+        )
+
+    horizon = 3600.0
+    frozen = simulate.project(_snap(0.0), horizon)
+    growing = simulate.project(_snap(0.05), horizon)
+    rest_frozen = meta._plan_restzeit(_snap(0.0), "FIRST_RUN", frozen, horizon)
+    rest_growing = meta._plan_restzeit(_snap(0.05), "FIRST_RUN", growing, horizon)
+    assert math.isinf(rest_frozen)
+    assert math.isfinite(rest_growing)
+    # 25 fehlende Kitten (Paragon 10 → 35) bei 0,05/s ≈ 500 s:
+    assert rest_growing == pytest.approx(500.0, rel=0.15)
+
+
+def test_housing_benefit_uses_sequential_slot_fill():
+    """Auftragstest (#41): benefitTime folgt der echten Ankunftsrate —
+    Slots füllen sequenziell; ohne Rate bleibt die Sofort-Vollbelegung
+    (Altverhalten als Fallback)."""
+    horizon = 600.0
+    lam_rate = {"wood": 100.0}
+
+    def _benefit(kps):
+        snap = make_snap(
+            resources={"catnip": {"value": 50000, "max": 60000, "rate": 20},
+                       "wood": {"value": 100, "max": 1000, "rate": 0.5}},
+            buildings={"hut": {"val": 1, "prices": {"wood": 20},
+                               "unlocked": True}},
+            jobs={"woodcutter": 1}, kittens=2, max_kittens=2,
+            catnip_field_base=40, kittens_per_sec=kps,
+        )
+        b = next(x for x in snap["buildings"] if x["name"] == "hut")
+        comp, reject = tactics._housing_eval(snap, "hut", b, blocked=set(),
+                                             lam={}, lam_rate=lam_rate,
+                                             horizon=horizon)
+        assert reject is None
+        return comp.get("benefitTime", 0.0)
+
+    full = _benefit(0.0)                      # Fallback: capacity × H
+    assert full == pytest.approx(2 * horizon * shadow.JOB_BASE_RATES
+                                 ["woodcutter"]["wood"] * 100.0)
+    slow, faster = _benefit(0.01), _benefit(0.02)
+    assert 0 < slow < faster < full           # monoton in der Ankunftsrate
+    assert _benefit(1e-4) == 0.0              # Ankunft jenseits des Horizonts
+
+
 def test_meta_evaluate_exposes_open_targets():
     """meta.evaluate verwirft die offenen Meilenstein-Targets nicht mehr."""
     snap = make_snap(resources={"catnip": {"value": 10, "max": 5000, "rate": 1}})

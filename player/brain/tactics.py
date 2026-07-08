@@ -1210,7 +1210,19 @@ def _housing_eval(snap, name: str, b: dict, blocked,
                        if A.job_unlocked(snap, j)), default=0.0)
         if best_js > 0:
             capacity = HOUSING_CAPACITY.get(name, 1)
-            comp["benefitTime"] = best_js * horizon * capacity
+            arrival = float(village.get("kittensPerSec", 0.0) or 0.0)
+            if arrival > 1e-9:
+                # Echte ExpectedKittenArrivals (#41): die Slots füllen sich
+                # SEQUENZIELL mit der Ankunftsrate (village.js sim.update:
+                # nextKittenProgress += kittensPerTick, ein Spawn je
+                # Überlauf) — Slot i arbeitet nur die Restzeit H − i/Rate.
+                work_s = sum(max(0.0, horizon - i / arrival)
+                             for i in range(1, capacity + 1))
+            else:
+                # Fallback ohne Snapshot-Rate: Sofort-Vollbelegung
+                # (Bestandsverhalten, bewusst optimistisch).
+                work_s = capacity * horizon
+            comp["benefitTime"] = best_js * work_s
             comp["costTime"] = shadow.cost_time(b["prices"], lam or {})
             comp["netValue"] = shadow.net_value(comp["benefitTime"],
                                                 comp["costTime"])
@@ -1220,7 +1232,9 @@ def _housing_eval(snap, name: str, b: dict, blocked,
         return comp, (f"ungenutzte Housing-Kapazität ({kittens}/{max_kittens}) — "
                       f"neue Plätze haben keinen Wert (12.1)")
 
-    # 2. Food-Gate über die Saisonprojektion
+    # 2. Food-Gate über die Saisonprojektion. Bewusst konservativ trotz
+    # bekannter Ankunftsrate (#41): die Sicherheitsinvariante I-01 rechnet
+    # worst-case (Kapazität sofort voll), nicht erwartungstreu.
     food = snap.get("derived", {}).get("food", {})
     if "housing" in blocked:
         return comp, "Food-Warnstufe blockiert Housing (I-01)"

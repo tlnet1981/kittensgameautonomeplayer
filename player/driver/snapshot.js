@@ -114,6 +114,22 @@
                 const cons = v.getResConsumption();
                 return cons && cons.catnip ? -cons.catnip * TPS : 0;
             })(),
+            // Kitten-Ankunftsrate pro Sekunde (Spec 5.2, Lücke #36):
+            // village.js calculateKittensPerTick() = kittensPerTickBase(0.01)
+            // × (1 + kittenGrowthRatio), ×(2 + festivalArrivalRatio) während
+            // eines Festivals, ÷ pollutionArrivalSlowdown (wenn > 1);
+            // gespawnt wird via sim.nextKittenProgress, solange Housing-
+            // Kapazität frei ist (village.js update/sim.update).
+            kittensPerSec: (() => {
+                try {
+                    if (typeof v.calculateKittensPerTick === "function") {
+                        return v.calculateKittensPerTick() * TPS;
+                    }
+                    // Fallback ältere Versionen: Basisrate × Growth-Effekt.
+                    return (v.kittensPerTickBase || 0.01)
+                        * (1 + (g.getEffect("kittenGrowthRatio") || 0)) * TPS;
+                } catch (e) { return 0; }
+            })(),
         };
     });
 
