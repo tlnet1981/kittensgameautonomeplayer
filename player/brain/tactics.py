@@ -232,14 +232,22 @@ def _target_obj(snap: dict, target: dict | None) -> dict | None:
 
 def generate(snap: dict, meta_view, safety_result, *,
              horizon_scale: float = 1.0,
-             relax_whitelist: bool = False) -> tuple[list[Candidate], dict | None]:
+             relax_whitelist: bool = False,
+             run_horizon_s: float | None = None) -> tuple[list[Candidate], dict | None]:
     """Erzeugt alle Kandidaten inkl. Scores; gibt (candidates, bottleneck) zurück.
 
     horizon_scale/relax_whitelist werden NUR von der Deadlock-Auflösung
     (resolve_deadlock, Spec 22.3) gesetzt: Horizontverdopplung der λ-/
     Payback-Bewertung bzw. Aufhebung der ECONOMY_WHITELIST-Suchraum-
     Heuristik. Sicherheitsinvarianten (blocked_types, foodRisk, Storage-
-    Gates 11.3, Kaufregel 10.3) bleiben dabei UNVERÄNDERT."""
+    Gates 11.3, Kaufregel 10.3) bleiben dabei UNVERÄNDERT.
+
+    run_horizon_s (#39, Spec 10.4/6.4): erwartete Restlaufzeit bis zum
+    GEPLANTEN Reset (reset.evaluate["etaSeconds"], vom Loop durchgereicht)
+    — das Payback-Gate prüft dann gegen den echten Plan statt gegen die
+    2×Spielzeit-Heuristik. Nach unten auf HORIZON_PLANNED_MIN geflöort
+    (Anti-Deadlock), nach oben UNGEKLEMMT (6.4: lange Runs planen lang).
+    None/∞ → run_horizon-Heuristik als Fallback."""
     target = meta_view.active.target if meta_view.active else None
     bn = bottleneck_info(snap, target)
     cands: list[Candidate] = []
@@ -254,7 +262,11 @@ def generate(snap: dict, meta_view, safety_result, *,
     # Schwellen-Fallbacks der Kandidaten greifen (Sicherheitsnetz).
     goal_prices = _target_prices(snap, target)
     lam, lam_rate = path_lambdas(snap, meta_view)
-    horizon = shadow.run_horizon(snap) * max(1.0, horizon_scale)
+    if run_horizon_s is not None and math.isfinite(run_horizon_s):
+        base_horizon = max(run_horizon_s, shadow.HORIZON_PLANNED_MIN)
+    else:
+        base_horizon = shadow.run_horizon(snap)
+    horizon = base_horizon * max(1.0, horizon_scale)
 
     _milestone_candidate(snap, target, bn, cands, blocked)
     _job_candidates(snap, bn, cands, lam_rate, goal_prices,
@@ -2670,7 +2682,8 @@ def is_deadlock(candidates: list[Candidate], bn: dict | None,
     return True
 
 
-def resolve_deadlock(snap: dict, meta_view, safety_result
+def resolve_deadlock(snap: dict, meta_view, safety_result, *,
+                     run_horizon_s: float | None = None
                      ) -> tuple[list[Candidate], dict | None, dict]:
     """Generische Deadlock-Auflösung (Spec 22.3) — deterministisch, EIN
     Durchlauf, kein Loop:
@@ -2690,12 +2703,13 @@ def resolve_deadlock(snap: dict, meta_view, safety_result
 
     Rückgabe: (candidates, bottleneck, detail) mit detail["stage"] ∈
     {"a", "b", "c"}; in Stufe c zusätzlich detail["notice"]."""
-    cands, bn = generate(snap, meta_view, safety_result, horizon_scale=2.0)
+    cands, bn = generate(snap, meta_view, safety_result, horizon_scale=2.0,
+                         run_horizon_s=run_horizon_s)
     if not is_deadlock(cands, bn, snap):
         return cands, bn, {"stage": "a",
                            "detail": "Horizontverdopplung löst den Deadlock (22.3 a)"}
     cands, bn = generate(snap, meta_view, safety_result, horizon_scale=2.0,
-                         relax_whitelist=True)
+                         relax_whitelist=True, run_horizon_s=run_horizon_s)
     if not is_deadlock(cands, bn, snap):
         return cands, bn, {"stage": "b",
                            "detail": "gelockerter Suchraum (ECONOMY_WHITELIST auf) "

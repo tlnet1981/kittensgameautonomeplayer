@@ -6,7 +6,9 @@ import math
 
 import pytest
 
-from player.brain import challenge, chrono, meta, simulate
+from player.brain import challenge, chrono, meta, reset, safety, shadow, \
+    simulate, tactics
+from player.brain.meta import Milestone
 from tests.helpers import make_snap
 
 
@@ -131,6 +133,83 @@ def test_challenge_value_zero_when_observable_but_unreachable():
                                  {"name": "anarchy"}])
     assert (challenge.challenge_value(bare, "winterIsComing")
             > challenge.challenge_value(bare, "anarchy") > 0)
+
+
+# ============================================ #39 Reset-Horizont
+
+def test_evaluate_exports_eta_seconds():
+    """reset.evaluate exportiert die erwartete Restlaufzeit bis zum
+    geplanten Reset (#39): Durchreichung der Makroplan-Restzeit, 0 bei
+    empfohlenem Reset, None ohne Reset-Ziel oder bei TC-Block."""
+    # FIRST_RUN unter der Schwelle: Restzeit wird durchgereicht.
+    snap = make_snap(kittens=80,
+                     resources={"catnip": {"value": 1000, "max": 5000,
+                                           "rate": 5.0}})
+    ev = reset.evaluate(snap, "FIRST_RUN", None, plan_restzeit_s=1234.5)
+    assert not ev["recommended"] and ev["etaSeconds"] == 1234.5
+    # Empfohlener Reset (110 Kitten, kein Wachstum) → etaSeconds 0.
+    snap = make_snap(kittens=110, max_kittens=110,
+                     resources={"catnip": {"value": 50000, "max": 60000,
+                                           "rate": 20.0}},
+                     catnip_field_base=40)
+    ev = reset.evaluate(snap, "FIRST_RUN", None, plan_restzeit_s=999.0)
+    assert ev["recommended"] and ev["etaSeconds"] == 0.0
+    # TC-Schutz blockiert → kein geplanter Reset → None (Heuristik-Fallback).
+    snap["resources"].append({"name": "timeCrystal", "title": "TC",
+                              "value": 10, "maxValue": 0, "craftable": False,
+                              "unlocked": True, "perSec": 0})
+    ev = reset.evaluate(snap, "FIRST_RUN", None, plan_restzeit_s=999.0)
+    assert not ev["recommended"] and ev["etaSeconds"] is None
+    # Kein Reset-Ziel (else-Zweig) → None.
+    snap2 = make_snap(kittens=5)
+    ev = reset.evaluate(snap2, "SEED_RUN", None, plan_restzeit_s=999.0)
+    assert ev["etaSeconds"] is None
+
+
+def _payback_5h_snap():
+    """Kandidat mit Payback ≈ 5,6 h: Effekt-Gebäude produziert das
+    λ-tragende Zielgut (0,001/s), Preis 20 Minerals × λ 1000 s/Einheit →
+    Payback 20000 s — über der 4-h-Heuristik-Klemme, unter 6 h."""
+    return make_snap(
+        resources={"minerals": {"value": 30, "max": 0, "rate": 0.001},
+                   "catnip": {"value": 5000, "max": 6000, "rate": 10.0}},
+        buildings={"mint": {"val": 0, "prices": {"minerals": 20},
+                            "unlocked": True,
+                            "effects": {"mineralsPerTickProd": 0.0002}}},
+        jobs={"miner": 1}, kittens=1, max_kittens=2, catnip_field_base=40,
+    )
+
+
+def _gen(snap, target, run_horizon_s=None):
+    mv = meta.MetaView(phase="P0", run_type="FIRST_RUN",
+                       active=Milestone("test", "Testziel",
+                                        lambda s: False, target),
+                       milestones=[], open_targets=None)
+    return tactics.generate(snap, mv, safety.check(snap),
+                            run_horizon_s=run_horizon_s)[0]
+
+
+def test_run_horizon_follows_reset_projection():
+    """Auftragstest (#39): Das Payback-Gate prüft gegen den GEPLANTEN
+    Reset — ein 5,6-h-Payback wird ohne Projektion (Heuristik ≤ 4 h)
+    abgelehnt, mit 6-h-Reset-Projektion zugelassen; die 4-h-Klemme fällt
+    nur bei echter Projektion."""
+    target = {"kind": "resource", "name": "minerals", "amount": 1000}
+    # Ohne Projektion: Heuristik (frischer Kalender → HORIZON_MIN) lehnt ab:
+    cands = _gen(_payback_5h_snap(), target)
+    mint = next(c for c in cands if c.action.id == "build:mint")
+    assert not mint.feasible and "Payback" in mint.reject_reason
+    # Mit geplanter Reset-Projektion 6 h: Payback 5,6 h passt hinein:
+    cands = _gen(_payback_5h_snap(), target, run_horizon_s=6 * 3600.0)
+    mint = next(c for c in cands if c.action.id == "build:mint")
+    assert mint.feasible
+    # etaSeconds ≈ 0 (Reset steht bevor): Anti-Deadlock-Floor greift —
+    # der Horizont kollabiert nicht auf 0, kurze Paybacks bleiben möglich:
+    cands = _gen(_payback_5h_snap(), target, run_horizon_s=0.0)
+    mint = next(c for c in cands if c.action.id == "build:mint")
+    assert not mint.feasible
+    assert f"{shadow.HORIZON_PLANNED_MIN / 60:.0f}" in mint.reject_reason \
+        or "Payback" in mint.reject_reason
 
 
 def test_reward_seconds_mapping():

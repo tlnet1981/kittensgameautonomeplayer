@@ -60,6 +60,14 @@ REFINE_RECIPES: dict[str, list[dict]] = {
 # Catnip-Bank fürs erste Housing massiv verlangsamt (E2E-Smoke-Fund).
 HORIZON_MIN = 1800.0
 HORIZON_MAX = 4 * 3600.0
+# Untergrenze des GEPLANTEN Reset-Horizonts (#39, Spec 10.4/6.4): steht ein
+# Reset unmittelbar bevor (etaSeconds ≈ 0), darf der Payback-Horizont nicht
+# auf null kollabieren (jeder Kauf würde abgelehnt → Deadlock-Gefahr) —
+# Anti-Deadlock-Floor analog reset.RESET_VALUE_T_MIN. Nach OBEN ist die
+# echte Projektion bewusst UNGEKLEMMT: „Horizont mindestens ein voller
+# Run" (6.4) heißt, lange Runs planen lang — die 4-h-Klemme gilt nur für
+# die Heuristik run_horizon (Fallback ohne Projektion).
+HORIZON_PLANNED_MIN = 600.0
 
 # Spielzeit-Konstanten (wie state/derived.py): 1 Tag = 2 s.
 SECONDS_PER_DAY = 2.0

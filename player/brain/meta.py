@@ -703,6 +703,13 @@ def determine_run_plan(snap: dict) -> tuple[str, str | None, dict]:
     detail = {
         "horizonS": horizon,
         "scoreMode": rows[0]["scoreMode"] if rows else "6.2",
+        # Erwartete Restlaufzeit des GEWINNERS bis zum Run-Ziel (#39):
+        # Grundlage des geplanten-Reset-Horizonts (Payback-Regel 10.4/6.4),
+        # via reset.evaluate → tactics.generate durchgereicht. Ungerundet;
+        # None bei ∞ oder im 6.3-Modus (dort gibt es keine Restzeit).
+        "restzeitS": (best["restzeit"]
+                      if math.isfinite(best.get("restzeit", math.inf))
+                      else None),
         "scores": [{**r,
                     "restzeit": (None if math.isinf(r["restzeit"])
                                  else round(r["restzeit"], 1)),

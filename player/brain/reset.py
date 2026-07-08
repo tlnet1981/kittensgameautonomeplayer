@@ -74,14 +74,21 @@ APPLY_PENDING_CORE_JS = """
 
 
 def evaluate(snap: dict, run_type: str, next_perk: dict | None,
-             paragon_samples: list[tuple[float, int]] | None = None) -> dict[str, Any]:
-    """Bewertet, ob jetzt resettet werden soll. Liefert Gates fürs Cockpit."""
+             paragon_samples: list[tuple[float, int]] | None = None, *,
+             plan_restzeit_s: float | None = None) -> dict[str, Any]:
+    """Bewertet, ob jetzt resettet werden soll. Liefert Gates fürs Cockpit.
+
+    plan_restzeit_s (#39): erwartete Restlaufzeit des Makroplans bis zum
+    Run-Ziel (meta.determine_run_plan → run_plan["restzeitS"]) — sie IST
+    die erwartete Zeit bis zum geplanten Reset bzw. zur Perk-Finanzierung
+    und wird als "etaSeconds" exportiert (Payback-Horizont 10.4/6.4)."""
     projection = snap.get("derived", {}).get("resetParagon", 0)
     paragon_now = snap.get("prestige", {}).get("paragon", 0)
 
     recommended = False
     reason = ""
     reset_value: dict | None = None
+    has_reset_goal = True
     if run_type == "FIRST_RUN":
         # Schwelle bleibt notwendige Vorbedingung (Sanity-Grenze); erst dann
         # entscheidet ResetValue = V(post) − V(continue) (Spec 20.1):
@@ -124,6 +131,7 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
                 reason += "; " + _reset_value_text(reset_value)
     else:
         reason = "Kein Reset-Ziel im aktuellen Run"
+        has_reset_goal = False
 
     # TC-Schutz (Invariante I-02 / Spec 9.1): Reset mit relevantem
     # Time-Crystal-Bestand nur mit Anachronomancy (TC überleben sonst nicht).
@@ -133,6 +141,17 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
     tc_safe = tc < 3 or anachronomancy
     if not tc_safe:
         recommended = False
+
+    # Erwartete Restlaufzeit bis zum GEPLANTEN Reset (#39, Spec 10.4/6.4):
+    # 0 wenn der Reset jetzt empfohlen ist; sonst die Makroplan-Restzeit;
+    # None, wenn kein Reset geplant ist (TC-Schutz blockiert / kein Ziel)
+    # — der Aufrufer fällt dann auf die run_horizon-Heuristik zurück.
+    if not tc_safe or not has_reset_goal:
+        eta_seconds: float | None = None
+    elif recommended:
+        eta_seconds = 0.0
+    else:
+        eta_seconds = plan_restzeit_s
 
     gates = [
         {"name": "Paragon-Projektion", "pass": projection > 0,
@@ -162,6 +181,7 @@ def evaluate(snap: dict, run_type: str, next_perk: dict | None,
         "projection": projection,
         "paragonNow": paragon_now,
         "reason": reason,
+        "etaSeconds": eta_seconds,
         "gates": gates,
         "nextPerk": next_perk["label"] if next_perk else None,
         "resetValue": reset_value,
