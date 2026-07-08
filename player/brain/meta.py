@@ -274,10 +274,10 @@ RUN_TYPES = frozenset({
 })
 ACTIVE_RUN_TYPES = frozenset(RUN_TYPES)
 
-# SHATTER_RUN-Restzeit (dokumentierte Näherung, siehe _plan_restzeit):
-# Ziel-TC-Bestand, ab dem die Engine „läuft" = Reserve + ein voller
-# konservativer Batch-Vorrat (Referenzgröße, kein Spielwert):
-SHATTER_RUN_TC_TARGET = timecrystal.TC_RESERVE + 15.0
+# SHATTER_RUN: Fallback-Batchgröße des TC-Ziels, wenn der Snapshot keine
+# Heat-Daten trägt (Altverhalten Reserve+15; sonst rechnet
+# _shatter_tc_target den Heat-gedeckelten Batch zustandsabhängig, #38):
+SHATTER_FALLBACK_BATCH = 15.0
 # RELIC_STATION_RUN: AM-Cap-Schwelle der vollen Relic-Station-Wirkung
 # (space.js:718-720: rrBoost × amMax/5000 unter 5000) und Referenzpreise
 # des relicStation-Upgrades (workshop.js:1538-1550):
@@ -287,10 +287,25 @@ RELIC_STATION_REF_PRICES = [{"name": "antimatter", "val": 5000},
 # AM-Cap je Containment Chamber (space.js:597, ohne Heatsink-Bonus —
 # konservative Basis; der Snapshot-Cap hat immer Vorrang):
 AM_MAX_PER_CONTAINMENT = 100.0
-# SEED_RUN: erwartete Dauer eines dedizierten Seed-Runs — REFERENZSCHÄTZUNG
-# (ehrlich gekennzeichnet, konservativ wie challenge.est_completion_s):
-# SEED_RUN gewinnt nur, wenn die anderen Pläne schlechter scoren.
-SEED_RUN_EST_S = 6 * 3600.0
+
+
+def _shatter_tc_target(snap: dict) -> float:
+    """Zustandsabhängiges TC-Ziel des SHATTER_RUN (#38): Reserve + der
+    Heat-gedeckelte NÄCHSTE Shatter-Batch — genau so viele TC, wie die
+    Engine unter dem aktuellen Heat-Spielraum sinnvoll verbrennen kann
+    (time.js:1407: 10 Heat je Shatter, halbiert nach 1000Years; Deckel
+    SHATTER_BATCH_SEARCH_MAX wie die Batch-Suche in timecrystal.py).
+    Ohne Heat-Daten (heatMax fehlt): dokumentierter Fallback
+    Reserve + SHATTER_FALLBACK_BATCH (Altverhalten)."""
+    time_sec = snap.get("time") if isinstance(snap.get("time"), dict) else {}
+    heat_max = float(time_sec.get("heatMax", 0) or 0)
+    if heat_max <= 0:
+        return timecrystal.TC_RESERVE + SHATTER_FALLBACK_BATCH
+    heat = float(time_sec.get("heat", 0) or 0)
+    hps = timecrystal.heat_per_shatter(snap)
+    batch = min(math.floor(max(0.0, heat_max - heat) / hps),
+                timecrystal.SHATTER_BATCH_SEARCH_MAX)
+    return timecrystal.TC_RESERVE + float(max(1, batch))
 
 # Taktische Varianten je Makroplan (Spec 8.3 Schritt 3): invest-Anteil der
 # Projektions-Politik. Namen sind zugleich der deterministische Tie-Break
@@ -451,34 +466,45 @@ def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
                      die Zeit für MIN_PARAGON_GAIN Paragon (vergleichbar).
     MATURE_ENDGAME_RUN: hat KEINE Restzeit — sein Score ist ΔlnC/Δt
                      (Spec 6.3, siehe _score_plans); hier defensiv inf.
-    CHALLENGE_RUN:   geschätzte Completion-Zeit der (aktiven bzw. besten)
-                     Challenge — Referenzkonstante aus challenge.py, bewusst
-                     KONSERVATIV (Stunden), damit CHALLENGE_RUN nur gewinnt,
-                     wenn PRICE_RATIO/PARAGON schlechter scoren (Spec 18.2).
+    CHALLENGE_RUN:   projizierte Completion-Zeit der (aktiven bzw. besten)
+                     Challenge (challenge.completion_eta, #38) mit
+                     Mindestlaufzeit-Floor; ist das Ziel im Snapshot nicht
+                     beobachtbar oder unerreichbar → ehrlich math.inf
+                     (kein Konstanten-Fallback — CHALLENGE_RUN gewinnt den
+                     Makroplan nur mit sichtbarem Ziel, Spec 18.2).
 
-    Endgame-Typen (dokumentierte Näherungen — Zeit bis positiver TC-/
-    Relic-Fluss über die EV-Projektion bzw. beobachtete Raten):
+    Endgame-Typen (Zeit bis zur Zielbedingung über die EV-Projektion bzw.
+    beobachtete Raten — seit #38 ohne Restzeit-Konstanten):
     LEVIATHAN_RUN:   ETA des nächsten Leviathan-Trade-Kostenvektors
                      (buys + 50 Catpower, diplomacy.js tradeImpl) über die
                      Projektion — dann fließen TC (Spec 14.4/17.1).
-    SHATTER_RUN:     Zeit bis der TC-Bestand SHATTER_RUN_TC_TARGET trägt
-                     (beobachtete timeCrystal-Rate; Bestand reicht → 0).
+    SHATTER_RUN:     Zeit bis der TC-Bestand das zustandsabhängige Ziel
+                     _shatter_tc_target trägt (Reserve + Heat-gedeckelter
+                     Batch; beobachtete TC-Rate; Bestand reicht → 0).
     RELIC_STATION_RUN: ETA des AM-Cap-Blocks = eta_of der relicStation-
                      Preise (Snapshot, sonst Referenz workshop.js:1538-1550).
-    POSITIVE_CS_RUN: Dauer einer Schleifeniteration ≈ Wiederaufbau der
-                     Chronosphere-Flotte (REBUILD_DELAY_PER_CS_S × n, 19.4).
-    SEED_RUN:        Referenzschätzung SEED_RUN_EST_S (konservativ, 19.3).
+    POSITIVE_CS_RUN: Dauer einer Schleifeniteration = Zeit, die
+                     Wiederaufbaukosten der CS-Flotte (chrono.
+                     rebuild_cost_vector) mit den beobachteten Raten
+                     erneut zu VERDIENEN; Rate 0 → inf (19.4).
+    SEED_RUN:        Zeit bis zur nächsten GANZEN Carryover-Einheit des
+                     Seed-Trägers (chrono.seed_progress, 19.3) —
+                     zustandsabhängig statt 6-h-Konstante.
     """
     if run_type == "FIRST_RUN":
         return proj.paragon_eta(FIRST_RESET_MIN_PARAGON)
     if run_type == "CHALLENGE_RUN":
         act = challenge.active_challenge(snap)
-        if act is not None:
-            return challenge.est_completion_s(act["name"])
-        best = challenge.best_challenge(snap)
-        if best is None:
-            return math.inf
-        return challenge.est_completion_s(best[0])
+        name = act["name"] if act is not None else None
+        if name is None:
+            best = challenge.best_challenge(snap)
+            if best is None:
+                return math.inf
+            name = best[0]
+        eta, observable = challenge.completion_eta(snap, name)
+        if observable and math.isfinite(eta):
+            return max(eta, challenge.CHALLENGE_MIN_RUN_S)
+        return math.inf
     if run_type in ("PRICE_RATIO_RUN", "CORE_META_RUN"):
         perk = next_metaphysics_target(snap)
         if perk is None:
@@ -520,7 +546,7 @@ def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
         return proj.eta_of(costs)
     if run_type == "SHATTER_RUN":
         bal = timecrystal.tc_balance(snap)
-        need = SHATTER_RUN_TC_TARGET - bal["stock"]
+        need = _shatter_tc_target(snap) - bal["stock"]
         if need <= 0:
             return 0.0
         if bal["ratePerSec"] <= 1e-9:
@@ -536,12 +562,24 @@ def _plan_restzeit(snap: dict, run_type: str, proj: simulate.Projection,
             prices = (cc or {}).get("prices") or []
         return proj.eta_of(prices)
     if run_type == "POSITIVE_CS_RUN":
-        n = A.bld_val(snap, "chronosphere")
-        if n < 1:
+        # Schleifeniterationsdauer (19.4, #38): Zeit, die Wiederaufbau-
+        # kosten der CS-Flotte mit den BEOBACHTETEN Raten erneut zu
+        # verdienen (die Kostenressourcen — Unobtainium/Void — sind nicht
+        # in simulate.TRACKED, darum need/rate statt eta_of).
+        rebuild = chrono.rebuild_cost_vector(snap)
+        if not rebuild:
             return math.inf
-        return chrono.REBUILD_DELAY_PER_CS_S * n
+        worst = 0.0
+        for res in sorted(rebuild):
+            rate = A.res_rate(snap, res)
+            if rate <= 1e-9:
+                return math.inf
+            worst = max(worst, rebuild[res] / rate)
+        return worst
     if run_type == "SEED_RUN":
-        return SEED_RUN_EST_S
+        # Zustandsabhängig statt 6-h-Konstante (#38): Zeit bis die nächste
+        # GANZE Carryover-Einheit des Seed-Trägers den Reset überlebt.
+        return chrono.seed_progress(snap)["nextUnitEtaS"]
     # PARAGON_RUN (Spec 20.4): erwartete Paragonrate über den Horizont
     gain = proj.paragon_projection(horizon) - proj.paragon_projection(0.0)
     if gain <= 0:

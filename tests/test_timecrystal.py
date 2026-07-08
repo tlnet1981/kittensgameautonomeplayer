@@ -420,7 +420,9 @@ def test_shatter_run_restzeit_zero_when_stocked():
     assert meta._plan_restzeit(snap, "SHATTER_RUN", proj, 600) == 0.0
     snap["resources"][0]["value"] = 10.0     # unter dem Ziel → Rate zählt
     rz = meta._plan_restzeit(snap, "SHATTER_RUN", proj, 600)
-    assert rz == pytest.approx((meta.SHATTER_RUN_TC_TARGET - 10.0) / 0.5)
+    # Seit #38 ist das TC-Ziel zustandsabhängig (Reserve + Heat-gedeckelter
+    # Batch, hier heatMax 100/10 → 5+10 = 15) statt der Konstante Reserve+15:
+    assert rz == pytest.approx((meta._shatter_tc_target(snap) - 10.0) / 0.5)
     snap["resources"][0]["perSec"] = 0.0
     assert math.isinf(meta._plan_restzeit(snap, "SHATTER_RUN", proj, 600))
 

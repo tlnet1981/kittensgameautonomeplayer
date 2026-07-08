@@ -33,8 +33,23 @@ None/0/False — kein Kandidat, kein Crash.
 
 from __future__ import annotations
 
+import math
+
+from player.state import access as A
+
+from . import shadow
+
 # Iron Will: Sonderregeln, kein pending-Toggle (challenges.js:885-888).
 EXCLUDED = frozenset({"ironWill"})
+
+# Mindest-Completion eines dedizierten Challenge-Runs (#38): auch wenn die
+# Zielbedingung im aktuellen Zustand sofort erfüllbar scheint, braucht ein
+# Challenge-RUN den Neustart + Wiederaufbau — Floor analog zur Speedrun-
+# Mindestlaufzeit (reset.PARAGON_RUN_MIN_SECONDS).
+CHALLENGE_MIN_RUN_S = 1200.0
+# Helios-Reisezeit: routeDays = 1200 (gamefiles/js/space.js, helios-Planet)
+# × 2 s/Tag (state/derived.py) — die Mission selbst dauert diese Zeit.
+HELIOS_ROUTE_S = 1200 * 2.0
 
 # name → Profil. restriction/goal/reward zitieren challenges.js;
 # die *_s-Werte sind REFERENZSCHÄTZUNGEN (siehe Modul-Docstring).
@@ -166,16 +181,234 @@ def challenges_available(snap: dict) -> bool:
 # ------------------------------------------------------------ Bewertung (18.2)
 
 def est_completion_s(name: str) -> float:
-    """Erwartete Completion-Zeit (Referenzkonstante, konservativ)."""
+    """Erwartete Completion-Zeit (Referenzkonstante, konservativ) —
+    seit #38 nur noch FALLBACK, wenn completion_eta die Zielobjekte im
+    Snapshot gar nicht sieht (Alt-Fixtures, frühe Spielphasen)."""
     prof = CHALLENGE_PROFILES.get(name)
     return prof["est_completion_s"] if prof else float("inf")
 
 
-def challenge_value(snap: dict, name: str) -> float:
-    """ChallengeValue(c) = ΔE[T_F]-Proxy / E[Completion] (Spec 18.2).
+# ---- Zielprojektion (#38, Spec 18.2): Completion-Zeit aus dem Zustand ----
 
-    Nur Erstabschlüsse zählen (researched == False); ohne Snapshot-Daten,
-    ohne Profil oder für gesperrte/ausgeschlossene Challenges: 0."""
+def _eta_prices_observed(snap: dict, prices: list[dict]) -> float:
+    """ETA eines Preisvektors über BEOBACHTETE Raten (need/rate je Position,
+    max über Positionen — wie UNICORN/SHATTER in meta._plan_restzeit;
+    die EV-Projektion trackt Space-/Zeitressourcen nicht). Bestand deckt
+    alles → 0; eine Position ohne Rate → inf (ehrlich)."""
+    worst = 0.0
+    for p in prices or []:
+        need = p["val"] - A.res_value(snap, p["name"])
+        if need <= 0:
+            continue
+        rate = A.res_rate(snap, p["name"])
+        if rate <= 1e-9:
+            return math.inf
+        worst = max(worst, need / rate)
+    return worst
+
+
+def _space_program(snap: dict, name: str) -> dict | None:
+    return next((p for p in snap.get("space", {}).get("programs", [])
+                 if p.get("name") == name), None)
+
+
+def _space_building(snap: dict, name: str) -> dict | None:
+    for planet in snap.get("space", {}).get("planets", []):
+        for b in planet.get("buildings", []):
+            if b.get("name") == name:
+                return b
+    return None
+
+
+def _planet(snap: dict, name: str) -> dict | None:
+    return next((pl for pl in snap.get("space", {}).get("planets", [])
+                 if pl.get("name") == name), None)
+
+
+def _policy(snap: dict, name: str) -> dict | None:
+    return next((p for p in snap.get("policies", [])
+                 if p.get("name") == name), None)
+
+
+def _voidspace(snap: dict, name: str) -> dict | None:
+    return next((u for u in snap.get("time", {}).get("voidspace", [])
+                 if u.get("name") == name), None)
+
+
+# Energie-Kette der energy-Challenge (challenges.js:136-148) — Bonfire- und
+# Space-Gebäude, die alle > 0 stehen müssen. Stage-Prüfung (Pasture→Solar
+# Farm, Aqueduct→Hydro) ist aus dem Snapshot nicht ablesbar — val > 0 des
+# Basisgebäudes ist die dokumentierte UNTERE Schranke der Rest-ETA.
+_ENERGY_CHAIN_BLD = ("pasture", "aqueduct", "steamworks", "magneto", "reactor")
+_ENERGY_CHAIN_SPACE = ("sattelite", "sunlifter", "tectonic", "hrHarvester")
+
+
+def completion_eta(snap: dict, name: str) -> tuple[float, bool]:
+    """(etaS, observable) — Zeit bis zur Zielbedingung der Challenge im
+    AKTUELLEN Zustand (#38, Spec 18.2), je Ziel aus challenges.js:
+
+    observable=False: die Zielobjekte fehlen im Snapshot komplett (frühe
+    Phase/Alt-Fixture) — der Aufrufer fällt auf die Referenzschätzung
+    zurück. observable=True mit math.inf: beobachtbar, aber im aktuellen
+    Zustand unerreichbar — ehrlich ∞ statt Konstante."""
+    if name == "winterIsComing":
+        # Ziel: helios reached (challenges.js:83). Snapshot hat kein
+        # reached-Flag; Proxys: Planet gelistet + Gebäude gebaut → erreicht
+        # (Gebäude erst nach reached baubar); Planet gelistet ohne Gebäude
+        # → Reise läuft (routeDays 1200, space.js:559); sonst über die
+        # heliosMission (val ≥ 1 → unterwegs, sonst Preis-ETA + Reise).
+        planet = _planet(snap, "helios")
+        if planet is not None:
+            if any((b.get("val") or 0) > 0 for b in planet.get("buildings", [])):
+                return 0.0, True
+            return HELIOS_ROUTE_S, True
+        mission = _space_program(snap, "heliosMission")
+        if mission is not None:
+            if (mission.get("val") or 0) >= 1:
+                return HELIOS_ROUTE_S, True
+            return (_eta_prices_observed(snap, mission.get("prices"))
+                    + HELIOS_ROUTE_S), True
+        return math.inf, False
+    if name == "anarchy":
+        # Ziel: aiCore.val > 0 (challenges.js:109).
+        b = A.building(snap, "aiCore")
+        if b is None:
+            return math.inf, False
+        if (b.get("val") or 0) > 0:
+            return 0.0, True
+        return _eta_prices_observed(snap, b.get("prices")), True
+    if name == "energy":
+        # Ziel: volle Energie-Kette (challenges.js:136-148); max über die
+        # Preis-ETAs der fehlenden Glieder; ein Glied unsichtbar → nicht
+        # beobachtbar (Referenzschätzung ist dann der ehrliche Stand).
+        worst = 0.0
+        for bname in _ENERGY_CHAIN_BLD:
+            b = A.building(snap, bname)
+            if b is None:
+                return math.inf, False
+            if (b.get("val") or 0) < 1:
+                worst = max(worst, _eta_prices_observed(snap, b.get("prices")))
+        for sname in _ENERGY_CHAIN_SPACE:
+            b = _space_building(snap, sname)
+            if b is None:
+                return math.inf, False
+            if (b.get("val") or 0) < 1:
+                worst = max(worst, _eta_prices_observed(snap, b.get("prices")))
+        return worst, True
+    if name == "atheism":
+        # Ziel: Reset mit Cryochambers (challenges.js:179-181) — erfüllt
+        # sich BEIM Reset; Rest-ETA = Cryochamber beschaffen.
+        u = _voidspace(snap, "cryochambers")
+        if u is None:
+            return math.inf, False
+        if (u.get("val") or 0) >= 1:
+            return 0.0, True
+        return _eta_prices_observed(snap, u.get("prices")), True
+    if name == "1000Years":
+        # Ziel: Jahr 1000 per Shatter (Kalender klemmt bei 500,
+        # calendar.js:457). TC-Bedarf ≈ (1000 − Jahr) × 1,5 (1 TC/Jahr
+        # Basispreis + 50 % Shatter-Malus WÄHREND der Challenge,
+        # challenges.js:205-212) über die beobachtete TC-Rate.
+        if A.resource(snap, "timeCrystal") is None:
+            return math.inf, False
+        years = 1000 - snap.get("calendar", {}).get("year", 0)
+        if years <= 0:
+            return 0.0, True
+        need = years * 1.5 - A.res_value(snap, "timeCrystal")
+        if need <= 0:
+            return 0.0, True
+        rate = A.res_rate(snap, "timeCrystal")
+        return (need / rate if rate > 1e-9 else math.inf), True
+    if name == "blackSky":
+        # Ziel: spaceBeacon.val > bisherige Abschlusszahl (challenges.js:
+        # 252-254) — `on` der Challenge zählt die Abschlüsse.
+        b = _space_building(snap, "spaceBeacon")
+        if b is None:
+            return math.inf, False
+        done = (get(snap, name) or {}).get("on") or 0
+        if (b.get("val") or 0) > done:
+            return 0.0, True
+        return _eta_prices_observed(snap, b.get("prices")), True
+    if name == "pacifism":
+        # Ziel: Outer-Space-Treaty-Policy (challenges.js:299-312, on reset).
+        p = _policy(snap, "outerSpaceTreaty")
+        if p is None:
+            return math.inf, False
+        if p.get("researched"):
+            return 0.0, True
+        if p.get("blocked"):
+            return math.inf, True    # I-07: Alternative gewählt — ehrlich ∞
+        return _eta_prices_observed(snap, p.get("prices")), True
+    if name == "unicornTears":
+        # Ziel: 1 Necrocorn (challenges.js:450-452). Produktion über
+        # pacts.necrocornPerDay (Marker-Netto, 1 Tag = 2 s).
+        necro = A.resource(snap, "necrocorn")
+        pacts = snap.get("pacts") if isinstance(snap.get("pacts"), dict) else None
+        if necro is None and pacts is None:
+            return math.inf, False
+        value = float((necro or {}).get("value", 0.0))
+        if value >= 1.0:
+            return 0.0, True
+        per_day = float((pacts or {}).get("necrocornPerDay", 0.0) or 0.0)
+        if per_day > 1e-12:
+            return (1.0 - value) / (per_day / 2.0), True
+        return math.inf, True
+    if name == "postApocalypse":
+        # Ziel: cathPollution == 0 (challenges.js:475-477) — der Zielzustand
+        # entsteht erst DURCH die Challenge-Startbedingung (Start mit
+        # maximaler Pollution); eine Ist-Projektion wäre gelogen → ehrlich ∞.
+        return math.inf, True
+    return math.inf, False
+
+
+# ---- Belohnungswert (#38): ΔE[T_F] über die Projektion mit Effekt ----
+
+def reward_seconds(snap: dict, name: str, horizon: float) -> float | None:
+    """Sekundenwert des Erstbelohnungseffekts über den Horizont —
+    λ-freies Produktionszeit-Äquivalent Σ (ΔRate/Rate) × H (#38).
+
+    Abgebildet werden Effekte mit seriöser Snapshot-Übersetzung:
+    - winterIsComing springCatnipRatio 0.05 (challenges.js:77): +5 % auf
+      die Feld-Basisproduktion, nur im Frühling (Saisonanteil ¼,
+      Modifikator 1,5) — relativ zur beobachteten Catnip-Rate.
+    - pacifism alicornPerTickRatio 0.1 (challenges.js:286): +10 % auf die
+      Alicorn-Rate, sofern Alicorns überhaupt produziert werden.
+    Nicht abbildbar (None → Aufrufer nutzt die Referenzschätzung):
+    masterSkillMultiplier (Skill-Verteilung unbekannt), energy-/faith-/
+    shatter-/corruption-/ivory-Effekte (wirken auf Systeme ohne
+    beobachtbare Basisrate im Snapshot)."""
+    if name == "winterIsComing":
+        rate = A.res_rate(snap, "catnip")
+        if rate <= 1e-9:
+            return None
+        tps = snap.get("meta", {}).get("ticksPerSecond", 5)
+        field_base = snap.get("effects", {}).get("catnipPerTickBase", 0.0) * tps
+        if field_base <= 0:
+            return None
+        delta = 0.05 * field_base * 1.5 * 0.25   # +5 % × Frühling(1,5) × ¼ Jahr
+        return delta / rate * horizon
+    if name == "pacifism":
+        if A.res_rate(snap, "alicorn") > 1e-9:
+            return 0.1 * horizon                 # Δrate/rate = ratio exakt
+        return None
+    return None
+
+
+def challenge_value(snap: dict, name: str) -> float:
+    """ChallengeValue(c) = ΔE[T_F] / E[Completion] (Spec 18.2, #38).
+
+    Zähler: reward_seconds über den Run-Horizont (ohne Übersetzung →
+    Referenzschätzung reward_tf_reduction_s als Fallback). Nenner:
+    completion_eta — beobachtbar+endlich → max(eta, CHALLENGE_MIN_RUN_S);
+    beobachtbar+∞ → Wert ehrlich 0 (Ziel im aktuellen Zustand
+    unerreichbar); Zielobjekte gar nicht im Snapshot → Referenzschätzung
+    est_completion_s. Begründung: „ehrlich math.inf statt Konstante" gilt
+    für die RESTZEIT (sie konkurriert in Sekunden gegen echte
+    Projektionen, meta._plan_restzeit); der dimensionslose ChallengeValue
+    ordnet nur Challenges untereinander — ohne jegliche Zielobjekte ist
+    die dokumentierte Referenz-Rangfolge der ehrliche Informationsstand
+    (Leitplanke „Fallbacks ohne Daten"). Nur Erstabschlüsse
+    (researched == False); ohne Daten/Profil/gesperrt: 0."""
     if name in EXCLUDED:
         return 0.0
     c = get(snap, name)
@@ -184,7 +417,17 @@ def challenge_value(snap: dict, name: str) -> float:
     prof = CHALLENGE_PROFILES.get(name)
     if not prof:
         return 0.0
-    return prof["reward_tf_reduction_s"] / prof["est_completion_s"]
+    eta, observable = completion_eta(snap, name)
+    if observable:
+        if not math.isfinite(eta):
+            return 0.0
+        denom = max(eta, CHALLENGE_MIN_RUN_S)
+    else:
+        denom = prof["est_completion_s"]
+    reward = reward_seconds(snap, name, shadow.run_horizon(snap))
+    if reward is None:
+        reward = prof["reward_tf_reduction_s"]
+    return reward / denom
 
 
 def best_challenge(snap: dict) -> tuple[str, float] | None:

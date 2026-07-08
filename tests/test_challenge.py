@@ -1,5 +1,9 @@
 """Tests der Challenge-Logik (Spec 18.1–18.4, brain/challenge.py)."""
 
+import math
+
+import pytest
+
 from player.brain import actions, challenge, meta, reset, simulate
 from tests.helpers import make_snap
 
@@ -72,13 +76,31 @@ def test_active_challenge_binds_run_type():
     assert meta._admissible_run_types(snap) == ["CHALLENGE_RUN"]
 
 
-def test_plan_restzeit_is_conservative_reference_constant():
+def test_plan_restzeit_projected_or_honest_inf():
+    """Seit #38 ist die CHALLENGE_RUN-Restzeit projiziert (Spec 8.3/18.2):
+    ohne beobachtbares Ziel ehrlich ∞ statt Referenzkonstante; mit
+    sichtbarem Zielzustand die projizierte Completion-Zeit (Floor
+    CHALLENGE_MIN_RUN_S); Mission bezahlbar → Preis-ETA + Reisezeit."""
     snap = _with_prestige(make_snap(
         resources={"catnip": {"value": 100, "max": 5000, "rate": 1.0}},
         kittens=10, challenges=[_winter()]), perks=[AB_PERK])
     proj = simulate.project(snap, 600.0)
+    # Bare-Fixture: helios/Mission fehlen im Snapshot → ehrlich ∞:
+    assert math.isinf(meta._plan_restzeit(snap, "CHALLENGE_RUN", proj, 600.0))
+    # Helios-Planet mit Gebäude → Ziel erreicht → Mindestlaufzeit-Floor:
+    snap["space"] = {"programs": [], "planets": [
+        {"name": "helios", "label": "Helios",
+         "buildings": [{"name": "sunlifter", "label": "Sunlifter", "val": 1,
+                        "unlocked": True, "prices": []}]}]}
     rz = meta._plan_restzeit(snap, "CHALLENGE_RUN", proj, 600.0)
-    assert rz == challenge.est_completion_s("winterIsComing") == 6 * 3600.0
+    assert rz == challenge.CHALLENGE_MIN_RUN_S
+    # Mission bezahlbar über die beobachtete Rate: Preis-ETA + Reisezeit
+    # (Catnip 100→200 bei 1/s = 100 s):
+    snap["space"] = {"planets": [], "programs": [
+        {"name": "heliosMission", "label": "Helios Mission", "val": 0,
+         "unlocked": True, "prices": [{"name": "catnip", "val": 200}]}]}
+    rz = meta._plan_restzeit(snap, "CHALLENGE_RUN", proj, 600.0)
+    assert rz == pytest.approx(100.0 + challenge.HELIOS_ROUTE_S)
 
 
 # ------------------------------------------------------------ 18.4 Reset-Gate

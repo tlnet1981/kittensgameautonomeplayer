@@ -228,6 +228,55 @@ def positive_cs_check(snap: dict) -> tuple[bool, dict]:
 
 # ================================================================ 19.3 Seed-Run
 
+def seed_progress(snap: dict) -> dict:
+    """Fortschritt zur Seed-Basis (Spec 19.3, #38/#42) — EINE Definition
+    für die SEED_RUN-Restzeit (meta) und den Reset-Trigger (reset):
+
+    Seed-Basis = die erste GANZE Carryover-Einheit des Seed-Trägers
+    überlebt den Reset. Referenzmechanik game.js _resetInternal:
+    saveRatio = Chronospheres × 0.015 (resStasisRatio, buildings.js:2049;
+    game.js:5008); Void wird beim Carryover ABGERUNDET (game.js:5057-5061)
+    — erst floor(value·s) ≥ 1 trägt also wirklich etwas hinüber.
+    Antimatter läuft über denselben value×saveRatio-Zweig (nicht craftbar).
+
+    Je Träger (void bevorzugt — das eigentliche Seed-Gut; sonst
+    antimatter): Zielbestand der nächsten ganzen Einheit
+    target = (floor(value·s)+1)/s, ETA über die BEOBACHTETE Rate
+    (need/rate wie UNICORN/SHATTER — Void/AM sind nicht in
+    simulate.TRACKED); Rate ≈ 0 → inf, ohne Chronosphere → inf
+    (saveRatio 0, nichts überlebt). Rückgabe:
+    {"basisReached", "nextUnitEtaS", "detail"} — deterministisch."""
+    cs = A.bld_val(snap, "chronosphere")
+    save_ratio = cs * CARRYOVER_PER_CS if cs > 0 else 0.0
+    detail: dict = {"chronospheres": cs, "saveRatio": round(save_ratio, 4)}
+    if save_ratio <= 0:
+        detail["reason"] = "keine Chronosphere — kein Seed-Carryover (19.3)"
+        return {"basisReached": False, "nextUnitEtaS": math.inf,
+                "detail": detail}
+    basis_reached = False
+    etas: list[float] = []
+    for res in ("void", "antimatter"):
+        value = A.res_value(snap, res)
+        carried_units = math.floor(value * save_ratio)
+        if carried_units >= 1:
+            basis_reached = True
+        target = (carried_units + 1) / save_ratio
+        rate = A.res_rate(snap, res)
+        eta = (target - value) / rate if rate > 1e-9 else math.inf
+        etas.append(eta)
+        detail[res] = {"value": round(value, 2),
+                       "carriedUnits": carried_units,
+                       "nextUnitEtaS": (round(eta, 1)
+                                        if math.isfinite(eta) else None)}
+    next_eta = min(etas) if etas else math.inf
+    detail["reason"] = ("Seed-Basis erreicht: ganze Carryover-Einheit "
+                        "überlebt den Reset (19.3)" if basis_reached else
+                        "Seed-Basis offen: noch keine ganze Carryover-"
+                        "Einheit (19.3)")
+    return {"basisReached": basis_reached, "nextUnitEtaS": next_eta,
+            "detail": detail}
+
+
 def seed_run_admissible(snap: dict) -> tuple[bool, dict]:
     """SEED_RUN-Zulässigkeit (Spec 19.3, konservative Kriterien —
     dokumentiert): Void-Farming ist ein EIGENER MacroPlan und wird nie
