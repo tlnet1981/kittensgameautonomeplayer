@@ -333,7 +333,12 @@ def _apply_saving_rule(snap: dict, cands: list[Candidate]) -> None:
         pot = c.components.get("potential", 0.0)
         if pot <= 0 and "milestone" in c.components:
             pot = 3.0   # unbezahlbares Meilensteinziel ist immer Sparziel
-        if pot > 0 and c.eta_seconds <= SAVING_HORIZON_S:
+        # Wertskaliertes Sparfenster (10.3): je höher der Wert des
+        # Sparziels, desto länger lohnt das Sparen (DelayPenalty ∝ Wert ×
+        # Verzögerung). Ein festes 600-s-Fenster verfehlte Housing bei
+        # realistischen Holzraten fast immer (Live-Fund: Hütte ~20 min
+        # entfernt, Library kaufte das Sparholz sofort weg).
+        if pot > 0 and c.eta_seconds <= SAVING_HORIZON_S * max(1.0, pot):
             targets.append((pot, c))
     if not targets:
         return
@@ -1139,7 +1144,15 @@ def _building_candidates(snap, target, bn, cands, blocked, reserved=None,
                     {"bottleneck": 0.0}, feasible=False,
                     reject_reason="Feldkauf würde die Catnip-Bank fürs Housing schwächen"))
                 continue
-        elif BUILDING_PRODUCES.get(name) and bn and BUILDING_PRODUCES[name] == bn.get("resource"):
+        elif BUILDING_PRODUCES.get(name) and bn and BUILDING_PRODUCES[name] == bn.get("resource") \
+                and (not lam or banking or not b.get("effects")):
+            # Fallback OHNE λ- oder Effektdaten: flacher Engpasslöser-
+            # Bonus. MIT λ und echten Effekten bepreist netValue den
+            # Engpassbeitrag bereits (λ der Engpassressource ist hoch)
+            # und fällt mit jedem Exemplar — der flache Bonus dagegen
+            # machte Library #12 so wertvoll wie Library #1, befreite sie
+            # vom Payback-Gate und hob sie über die Sparziel-Schwelle
+            # (Live-Fund: 12. Library frisst das Hütten-Sparholz).
             comp["bottleneck"] = 1.8   # produziert genau den Engpass
         elif name == "workshop" and A.bld_val(snap, "workshop") == 0:
             comp["unlock"] = 1.7       # erste Werkstatt schaltet Crafts frei

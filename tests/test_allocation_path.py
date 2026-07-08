@@ -139,3 +139,39 @@ def test_large_science_goal_still_attracts_scholars():
               {"name": "wood", "val": 100, "weight": 0.5}]
     alloc = shadow.target_allocation(snap, prices, min_farmers=4)
     assert alloc.get("scholar", 0) >= 2
+
+
+def test_twelfth_library_does_not_eat_housing_savings():
+    """Live-Fund: Library #13 (bezahlbar, mit effects-Daten) darf das
+    Sparholz für Hütte #5 nicht fressen. Ohne den flachen Engpasslöser-
+    Bonus zählt ihr ehrlicher netValue → Payback-Gate lehnt ab; die Hütte
+    ist Sparziel im wertskalierten Fenster (600 s × potential)."""
+    snap = make_snap(
+        resources={"catnip": {"value": 8000, "max": 10000, "rate": 15},
+                   "wood": {"value": 180, "max": 600, "rate": 0.35},
+                   "science": {"value": 900, "max": 3000, "rate": 0.6},
+                   "minerals": {"value": 300, "max": 500, "rate": 0.4}},
+        buildings={"field": {"val": 16, "prices": {"catnip": 800}},
+                   "hut": {"val": 4, "prices": {"wood": 488}},
+                   "library": {"val": 12, "prices": {"wood": 160},
+                               "effects": {"scienceRatio": 0.08,
+                                           "scienceMax": 250,
+                                           "cultureMax": 10}},
+                   "mine": {"val": 2, "prices": {"wood": 250}}},
+        techs={"currency": {"researched": False, "unlocked": True,
+                            "prices": {"science": 2200}}},
+        jobs={"farmer": 3, "woodcutter": 2, "scholar": 3},
+        kittens=8, max_kittens=8,
+        catnip_field_base=10,
+    )
+    mv = meta.evaluate(snap)
+    cands = tactics.generate(snap, mv, safety.check(snap))[0]
+    lib = next(c for c in cands if c.action.id == "build:library")
+    hut = next(c for c in cands if c.action.id == "build:hut")
+    assert not lib.feasible and "Payback" in lib.reject_reason
+    assert "bottleneck" not in lib.components   # kein flacher Bonus mit effects+λ
+    assert hut.components.get("potential", 0) > 0   # Sparziel erkannt (~16 min)
+    # und niemand außer WAIT/Shift gewinnt mit Holzverbrauch:
+    winner = next(c for c in cands if c.feasible)
+    assert not any(p["name"] == "wood"
+                   for p in winner.action.exec_spec.get("prices", []))
