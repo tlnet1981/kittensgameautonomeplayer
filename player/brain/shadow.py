@@ -414,23 +414,40 @@ ALLOC_JOB_ORDER = ("farmer", "woodcutter", "scholar", "miner",
                    "hunter", "geologist", "priest")
 
 
-def _alloc_eta(prices: list[dict], amounts: dict, rates: dict) -> tuple[int, float]:
-    """(Anzahl Ressourcen ohne Rate, max. ETA) — lexikografisch vergleichbar:
-    erst zählt, wie viele Zielressourcen GAR NICHT produziert werden, dann
-    die Engpass-ETA. So ist „eine tote Ressource zum Leben erwecken" immer
-    wertvoller als jede ETA-Verkürzung."""
-    dead = 0
-    worst = 0.0
+# Totzeit-Referenz der Allokation: eine Zielressource ohne jede Produktion
+# zählt wie eine Stunde Engpass — teuer genug, dass das erste Kitten für
+# eine tote NAHE Ressource fast immer die beste Zuweisung ist, aber
+# gedeckelt, damit hoffnungslose Posten (ETA > 1 h selbst MIT Kitten) die
+# Summe nicht dauerhaft dominieren und niemand ihnen nachjagt.
+ALLOC_DEAD_ETA_S = 3600.0
+
+# Mindestgewinn (Sekundensumme) für eine Greedy-Zuweisung — filtert
+# numerisches Rauschen, damit „praktisch kein Gewinn" in die Stickiness-
+# Restverteilung fällt statt Kitten zu verschieben.
+ALLOC_GAIN_EPS = 1.0
+
+
+def _alloc_eta(prices: list[dict], amounts: dict, rates: dict) -> float:
+    """Gewichtete Engpass-Zeitsumme Σ wᵢ·min(ETAᵢ, Totzeit) der Allokation.
+
+    SUMME statt Maximum, damit kein einzelner (z. B. unbeeinflussbarer)
+    Posten alle übrigen Verbesserungen maskiert — der Greedy in
+    target_allocation vergibt jedes Kitten an die größte Senkung dieser
+    Summe. Tote Ressourcen (keine Rate) zählen als ALLOC_DEAD_ETA_S:
+    „zum Leben erwecken" ist damit die wertvollste Einzelbewegung, außer
+    die Ressource bleibt auch MIT Kitten jenseits der Totzeit (dann Gewinn
+    0 → niemand jagt Hoffnungslosem nach). Optionales "weight" je Eintrag
+    (Pfadziele, tactics._allocation_prices) diskontiert ferne Ziele wie
+    beim Pfad-λ."""
+    total = 0.0
     for p in prices:
         missing = p["val"] - amounts.get(p["name"], 0.0)
         if missing <= 0:
             continue
         r = rates.get(p["name"], 0.0)
-        if r <= RATE_EPS:
-            dead += 1
-        else:
-            worst = max(worst, missing / r)
-    return dead, worst
+        eta = missing / r if r > RATE_EPS else ALLOC_DEAD_ETA_S
+        total += p.get("weight", 1.0) * min(eta, ALLOC_DEAD_ETA_S)
+    return total
 
 
 def target_allocation(snap: dict, goal_prices: list[dict] | None,
@@ -461,20 +478,37 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
     # Marginalraten je Job EINMAL bestimmen (enthalten Happiness bereits):
     jrates = {j: job_marginal_rates(snap, j) for j in jobs}
 
+    def _capped(res: str) -> bool:
+        cap = A.res_cap(snap, res)
+        return cap > 0 and A.res_value(snap, res) >= cap * CAP_FULL_RATIO
+
+    # Nur Einträge behalten, die ein freigeschalteter Job überhaupt
+    # beeinflussen kann und die nicht am Cap kleben — alles andere wäre
+    # ein konstanter Term in der Zeitsumme, den kein Kitten senken kann
+    # (Cap-Anhebung ist Sache der Gebäudekandidaten, nicht der Jobs).
+    producible = {res for j in jobs for res in jrates[j]}
+    goal_prices = [p for p in goal_prices
+                   if p["name"] in producible and not _capped(p["name"])]
+    if not goal_prices:
+        return {}
+
     amounts = {p["name"]: A.res_value(snap, p["name"]) for p in goal_prices}
     rates: dict[str, float] = {}
     for p in goal_prices:
         rates[p["name"]] = A.res_rate(snap, p["name"])
-    # Kitten-Beiträge herausrechnen (nur bekannte Job-Ressourcen):
+    # Kitten-Beiträge herausrechnen (nur bekannte Job-Ressourcen). Floor
+    # bei 0: Verbrauch/Messrauschen kann die Baseline sonst negativ machen,
+    # und ein Trial-Kitten hebt sie dann nur auf exakt 0 — die Ressource
+    # bliebe „tot", der Fixpunkt hinge vom Ist-Zustand ab (Oszillation).
+    # Verbrauchssicherheit (Catnip) ist Sache von min_farmers/Safety, hier
+    # zählt die Produktions-ETA.
     for j in jobs:
         count = A.job_count(snap, j)
         for res, rate in jrates[j].items():
             if res in rates:
                 rates[res] -= count * rate
-
-    def _capped(res: str) -> bool:
-        cap = A.res_cap(snap, res)
-        return cap > 0 and A.res_value(snap, res) >= cap * CAP_FULL_RATIO
+    for res in rates:
+        rates[res] = max(0.0, rates[res])
 
     alloc = {j: 0 for j in jobs}
     remaining = total
@@ -488,9 +522,8 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
 
     for _ in range(remaining):
         base = _alloc_eta(goal_prices, amounts, rates)
-        best_job, best_gain = None, (0, 0.0)
+        best_job, best_gain = None, ALLOC_GAIN_EPS
         for j in jobs:
-            gain_d = gain_e = 0.0
             trial = dict(rates)
             touched = False
             for res, rate in jrates.get(j, {}).items():
@@ -499,8 +532,7 @@ def target_allocation(snap: dict, goal_prices: list[dict] | None,
                     touched = True
             if not touched:
                 continue
-            with_j = _alloc_eta(goal_prices, amounts, trial)
-            gain = (base[0] - with_j[0], base[1] - with_j[1])
+            gain = base - _alloc_eta(goal_prices, amounts, trial)
             if gain > best_gain:
                 best_gain, best_job = gain, j
         if best_job is None:

@@ -261,7 +261,12 @@ def generate(snap: dict, meta_view, safety_result, *,
     # Bottleneck/Sparlogik. Ohne Pfad bleiben die Dicts leer → die
     # Schwellen-Fallbacks der Kandidaten greifen (Sicherheitsnetz).
     goal_prices = _target_prices(snap, target)
-    lam, lam_rate = path_lambdas(snap, meta_view)
+    path = path_targets(snap, meta_view)
+    if path:
+        lam = shadow.path_shadow_prices(snap, path)
+        lam_rate = shadow.path_rate_shadow_prices(snap, path)
+    else:
+        lam, lam_rate = {}, {}
     if run_horizon_s is not None and math.isfinite(run_horizon_s):
         base_horizon = max(run_horizon_s, shadow.HORIZON_PLANNED_MIN)
     else:
@@ -270,7 +275,7 @@ def generate(snap: dict, meta_view, safety_result, *,
 
     _milestone_candidate(snap, target, bn, cands, blocked)
     _job_candidates(snap, bn, cands, lam_rate, goal_prices,
-                    getattr(meta_view, 'next_research', None))
+                    getattr(meta_view, 'next_research', None), path)
     _gather_candidates(snap, target, bn, cands)
     _research_candidates(snap, target, cands, lam, lam_rate)
     _building_candidates(snap, target, bn, cands, blocked, reserved, banking,
@@ -523,7 +528,12 @@ def path_targets(snap, meta_view) -> list[dict]:
     for target in (getattr(meta_view, "open_targets", None) or []):
         if len(out) >= PATH_MAX_TARGETS:
             break
-        if target == active_target:
+        if target == active_target and active_prices:
+            # Nur überspringen, wenn Rang 0 das Ziel wirklich trägt: ein
+            # UNSICHTBARES aktives Forschungsziel fällt sonst komplett aus
+            # dem Pfad und die Allokation sähe nie Science (Live-Fund:
+            # Forschungsziel, aber keine Scholars) — es läuft stattdessen
+            # durch den Research-Referenz-Fallback unten.
             continue
         prices = _target_prices(snap, target)
         if not prices:
@@ -560,33 +570,61 @@ def lambda_top(lam: dict, lam_rate: dict, n: int = 8) -> list[dict]:
 
 # ---------------------------------------------------------------- Jobs
 
-def _allocation_prices(snap, goal_prices, next_research=None) -> list[dict] | None:
+def _allocation_prices(snap, goal_prices, next_research=None,
+                       path=None) -> list[dict] | None:
     """Preisvektor für die Soll-Allokation (12.2): Meilensteinziel PLUS die
     nächste Housing-Stufe PLUS das nächste offene Forschungsziel — sonst
     wäre eine Pfad-Ressource „wertlos", nur weil das Sofortziel sie nicht
     braucht (Nutzer-Funde: null Woodcutter im ganzen Run; danach alle 6
     Kitten als Woodcutter, weil das Holz-Ziel Science den Wert 0 gab).
-    Hinweis (#34): der λ-Pfadvektor (path_targets) ist eine Obermenge
-    hiervon; die Allokation behält bewusst ihren schlanken Vektor."""
-    prices = list(goal_prices or [])
+
+    PLUS (Live-Fund „keine Miner/Hunter im ganzen Run"): die restlichen
+    offenen Pfadziele aus path_targets — rang-diskontiert über das
+    "weight"-Feld (shadow._alloc_eta skaliert die ETA damit). Die
+    Allokation ist die EINZIGE Umschul-Instanz; kennt sie eine
+    Pfad-Ressource nicht, wird der zugehörige Job NIE besetzt, obwohl
+    der λ-Pfadvektor die Ressource längst bepreist. Und: Manpower als
+    Dauerposten (eine Jagdladung), sobald der Hunter freigeschaltet ist —
+    Manpower kommt in keinem Meilensteinpreis vor, ohne Eintrag gäbe es
+    nie Hunter, nie Jagd, nie Furs/Happiness (geschlossener Kreis).
+    Duplikate je Ressource: der nächstrangige Eintrag gewinnt (höchstes
+    weight; bei Gleichstand der größere Bedarf) — Pfadeinträge ergänzen
+    nur Ressourcen, die der nahe Vektor nicht kennt, sie überstimmen ihn
+    nie."""
+    prices = [dict(p, weight=1.0) for p in (goal_prices or [])]
     village = snap.get("village", {})
     if village.get("maxKittens", 0) <= village.get("kittens", 0):
         for name in sorted(HOUSING_BUILDINGS):
             b = A.building(snap, name)
             if b and b.get("unlocked") and b.get("prices"):
-                prices.extend(b["prices"])
+                prices.extend(dict(p, weight=1.0) for p in b["prices"])
                 break
     if next_research:
         t = A.tech(snap, next_research.get("name"))
         if t and not t.get("researched") and t.get("prices"):
-            prices.extend(t["prices"])
+            prices.extend(dict(p, weight=1.0) for p in t["prices"])
         elif not t:
             # Forschungsziel noch unsichtbar (gleiche Falle wie bei der
             # Mine/unlockRatio): Referenzpreis, damit Science in der
             # Allokation nie den Wert 0 hat, solange Forschung ansteht.
             prices.append({"name": "science",
-                           "val": REFERENCE_RESEARCH_SCIENCE})
-    return prices or None
+                           "val": REFERENCE_RESEARCH_SCIENCE,
+                           "weight": 1.0})
+    for entry in (path or []):
+        if entry.get("label") == "active":
+            continue    # Rang 0 steckt schon in goal_prices
+        w = entry.get("weight", 0.0)
+        for p in entry.get("prices", []):
+            prices.append(dict(p, weight=w))
+    if A.job_unlocked(snap, "hunter"):
+        prices.append({"name": "manpower", "val": float(HUNT_MANPOWER_COST),
+                       "weight": shadow.path_weight(len(path or []))})
+    merged: dict[str, dict] = {}
+    for p in prices:
+        cur = merged.get(p["name"])
+        if cur is None or (p["weight"], p["val"]) > (cur["weight"], cur["val"]):
+            merged[p["name"]] = dict(p)
+    return list(merged.values()) or None
 
 
 def _min_farmers(snap, village) -> int:
@@ -609,7 +647,7 @@ def _min_farmers(snap, village) -> int:
 
 
 def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None,
-                    next_research=None) -> None:
+                    next_research=None, path=None) -> None:
     village = snap.get("village", {})
     free = village.get("freeKittens", 0)
     food = snap.get("derived", {}).get("food", {})
@@ -625,7 +663,8 @@ def _job_candidates(snap, bn, cands, lam_rate=None, goal_prices=None,
     # Safety das Monopol.
     alloc = {}
     if food.get("status", "ok") != "critical":
-        alloc_prices = _allocation_prices(snap, goal_prices, next_research)
+        alloc_prices = _allocation_prices(snap, goal_prices, next_research,
+                                          path)
         if alloc_prices:
             alloc = shadow.target_allocation(snap, alloc_prices,
                                              _min_farmers(snap, village))

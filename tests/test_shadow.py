@@ -152,8 +152,10 @@ def test_free_kitten_goes_to_highest_job_score():
 
 
 def test_job_fallback_without_lambda_data():
-    """Ziel ohne Preisvektor (Gebäude fehlt im Snapshot) → λ leer →
-    Balance-Fallback: dünnster Basisjob, kein Crash."""
+    """Ziel ohne Preisvektor (Gebäude fehlt im Snapshot): seit dem
+    Pfad-Allokationsvektor hat die Soll-Allokation trotzdem Daten (offene
+    Meilensteine) — das freie Kitten geht zur toten Pfad-Ressource Wood
+    (Catnip läuft mit +20/s, min_farmers = 0), kein Crash."""
     snap = make_snap(
         resources={"catnip": {"value": 5000, "max": 10000, "rate": 20}},
         jobs={"woodcutter": 1, "farmer": 0}, free_kittens=1,
@@ -161,8 +163,8 @@ def test_job_fallback_without_lambda_data():
     )
     cands, _ = _generate(snap, {"kind": "build", "name": "library"})
     job = next(c for c in cands if c.action.exec_spec.get("kind") == "assign_job")
-    assert job.action.exec_spec["job"] == "farmer"     # min. Besetzung
-    assert "jobScore" not in job.components
+    assert job.action.exec_spec["job"] == "woodcutter"
+    assert "allocDeficit" in job.components
 
 
 def test_rebalance_gate_requires_job_score_gain():

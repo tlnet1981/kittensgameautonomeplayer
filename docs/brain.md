@@ -177,6 +177,30 @@ Damit ist die Kitten-Beitrags-Subtraktion in `target_allocation` exakt
 (vorher Phantom-Restrate: statische Basisraten von multiplikator-
 behafteten Ist-Raten abgezogen).
 
+### Pfad-Allokationsvektor (12.2, Live-Fund „nie Scholars/Miner/Hunter")
+
+Die Soll-Allokation ist die EINZIGE Umschul-Instanz — kennt ihr
+Preisvektor eine Ressource nicht, wird der zugehörige Job NIE besetzt.
+Deshalb speist `tactics._allocation_prices` neben Sofortziel + Housing +
+nächster Forschung auch die restlichen offenen Pfadziele aus
+`path_targets` ein (rang-diskontiert über ein `weight`-Feld; je Ressource
+gewinnt der nächstrangige Eintrag) sowie Manpower als Dauerposten (eine
+Jagdladung), sobald der Hunter freigeschaltet ist — Manpower steht in
+keinem Meilensteinpreis, ohne den Eintrag gäbe es nie Jagd/Furs. Ein
+UNSICHTBARES aktives Forschungsziel läuft durch den
+Research-Referenz-Fallback von `path_targets` (Bottleneck bleibt bewusst
+leer — Referenzpreise dürfen keine Engpasslöser-Boni verteilen, sonst
+umgeht die Library die Sparregel).
+
+`shadow._alloc_eta` bewertet als gewichtete Engpass-Zeitsumme
+Σ wᵢ·min(ETAᵢ, 1 h): SUMME statt Maximum, damit kein unbeeinflussbarer
+Posten alle übrigen Verbesserungen maskiert; tote Ressourcen zählen als
+1 h (Totzeit-Deckel: Hoffnungslosem jagt niemand nach). Cap-volle und von
+keinem Job produzierbare Posten fliegen vorab aus dem Vektor; die
+Beitrags-Baseline ist bei 0 gefloort (sonst hinge der Fixpunkt vom
+Ist-Zustand ab — Oszillation). Regressionstests:
+`tests/test_allocation_path.py`.
+
 ### Konversions-Reservierung (Deadlock-Schutz)
 
 Ist der Engpass nur über eine Konversion erreichbar (früh: Wood nur über
